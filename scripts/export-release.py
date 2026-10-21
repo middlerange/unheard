@@ -16,6 +16,7 @@ FILES = {
     'tsconfig.json', 'tsconfig.app.json', 'vite.config.mts', 'vitest.config.mts',
     'wrangler.toml', 'drizzle.config.ts', 'playwright.config.ts',
     'scripts/patch-worker.mjs', 'scripts/prepare-skill.mjs',
+    'scripts/prepare-deploy.mjs',
     'scripts/export-release.py',
     'docs/agent-skill.md', 'docs/release.md',
     'e2e/login.spec.ts', 'data/writing-prompts/no-slop.md',
@@ -38,6 +39,7 @@ TREES = {
 EXCLUDE = {'lib/db/seed.ts'}
 REQUIRED = {'README.md', 'LICENSE', 'package.json', 'package-lock.json',
             'wrangler.toml', 'scripts/patch-worker.mjs', 'scripts/prepare-skill.mjs',
+            'scripts/prepare-deploy.mjs',
             'skills/content-hub/SKILL.md', 'lib/schema.ts',
             'data/writing-prompts/no-slop.md'}
 SECRET_PATTERNS = [

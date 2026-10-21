@@ -39,6 +39,17 @@ For a custom domain, configure it on the Worker first, then register callbacks f
 that domain. Set `CONTENT_HUB_PUBLIC_URL` to that origin if you want canonical MCP
 and media URLs. Existing media URLs keep their original origin.
 
+## Reconnecting an existing Worker
+
+Keep the existing Worker, database, media bucket, domains, and runtime secrets.
+In Cloudflare build settings, set `CONTENT_HUB_D1_DATABASE_ID` to the ID of its
+existing `DB` database, use `npm run build` and `npm run deploy`, and select the
+new repository's `main` branch. If the existing media bucket has a different name,
+set `CONTENT_HUB_R2_BUCKET_NAME` to that bucket's name as well.
+The deploy script generates an ignored local
+configuration for migrations and deployment; the public template stays portable.
+Keep `SESSION_SECRET` and `CREDENTIALS_ENCRYPTION_KEY` unchanged.
+
 ## Social providers
 
 | Destination | Configuration | Callback on your origin |

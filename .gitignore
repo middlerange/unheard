@@ -29,6 +29,7 @@
 
 # wrangler local state
 .wrangler/
+/.wrangler.deploy.toml
 
 # misc
 .DS_Store

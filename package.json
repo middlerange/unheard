@@ -19,7 +19,7 @@
     "test:e2e:debug": "playwright test --debug",
     "seed:test": "tsx lib/db/seed.ts",
     "test:all": "npm run test && npm run test:e2e",
-    "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy --keep-vars",
+    "deploy": "node scripts/prepare-deploy.mjs && wrangler d1 migrations apply DB --remote --config .wrangler.deploy.toml && wrangler deploy --keep-vars --config .wrangler.deploy.toml",
     "ship": "git add -A && git commit -m \"${npm_config_m:-deploy}\" && git push && npm run deploy",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
