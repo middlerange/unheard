@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Content Hub — AI Reply Generator",
+  "version": "1.0.0",
+  "description": "Generate AI replies from writing prompts and templates, with current page context.",
+  "permissions": ["sidePanel", "activeTab", "storage", "contextMenus"],
+  "host_permissions": ["https://content-hub.codejets.workers.dev/*"],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "commands": {
+    "toggle-side-panel": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+S",
+        "mac": "Command+Shift+S"
+      },
+      "description": "Toggle Content Hub side panel"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Open Content Hub"
+  }
+}

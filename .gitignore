@@ -1,0 +1,51 @@
+# test artifacts
+/test-results/
+/e2e-report/
+/playwright-report/
+
+# dependencies
+/node_modules
+
+# build output
+/.vinxi
+/dist
+/.output
+/.tanstack
+
+# database (local data)
+/data/*.db
+/data/*.db-shm
+/data/*.db-wal
+/data/*.sqlite
+/data/*.sqlite3
+
+# uploaded media
+/public/uploads/*
+!/public/uploads/.gitkeep
+
+# env files
+.env*
+!.env.example
+
+# wrangler local state
+.wrangler/
+
+# misc
+.DS_Store
+*.pem
+*.tsbuildinfo
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+bun-debug.log*
+/tmp/
+
+# private release backups and local database exports
+/.private-release-backup/
+/local.db*
+/scripts/d1-import.sql
+.dev.vars*
+
+# generated agent skill downloads
+/public/skills/

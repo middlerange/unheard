@@ -1,0 +1,36 @@
+name: Manual deployment smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'Explicit deployment origin to test (use a test deployment)'
+        required: true
+        type: string
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Test deployment login pages
+        run: npm run test:e2e -- e2e/login.spec.ts
+        env:
+          E2E_BASE_URL: ${{ inputs.base_url }}
+          E2E_TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
+          E2E_TEST_PASSWORD: ${{ secrets.E2E_TEST_PASSWORD }}
+      - name: Upload results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-smoke-results
+          path: |
+            e2e-report/
+            test-results/
+          retention-days: 7

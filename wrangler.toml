@@ -1,0 +1,25 @@
+name = "content-hub"
+main = "dist/server/worker.mjs"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+preview_urls = true
+
+[build]
+command = "npm run build"
+
+[assets]
+directory = "./dist/client"
+
+[triggers]
+crons = ["* * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "content-hub"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "drizzle-d1"
+
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "content-hub-media"
