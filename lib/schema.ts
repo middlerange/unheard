@@ -387,3 +387,41 @@ export const posting_time_analytics = sqliteTable('posting_time_analytics', {
   engagement_rate: integer('engagement_rate', { mode: 'number' }), // Calculated engagement rate
   created_at: integer('created_at', { mode: 'number' }).notNull(),
 });
+
+// Research records are isolated by team; source definitions live in the versioned registry.
+export const research_settings = sqliteTable('research_settings', {
+  team_id: text('team_id').primaryKey().references(() => teams.id, { onDelete: 'cascade' }),
+  icp: text('icp').notNull(), daily_enabled: integer('daily_enabled', { mode: 'boolean' }).notNull().default(false),
+  last_daily_at: integer('last_daily_at'), updated_at: integer('updated_at').notNull(),
+});
+export const research_sources = sqliteTable('research_sources', {
+  id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }),
+  seed_id: text('seed_id').notNull(), enabled: integer('enabled', { mode: 'boolean' }).notNull(),
+  last_collected_at: integer('last_collected_at'), last_error: text('last_error'), item_count: integer('item_count').notNull().default(0),
+});
+export const research_runs = sqliteTable('research_runs', {
+  id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }),
+  mode: text('mode').notNull(), status: text('status').notNull(), days: integer('days').notNull(),
+  created_at: integer('created_at').notNull(), completed_at: integer('completed_at'),
+  source_count: integer('source_count').notNull().default(0), collected_count: integer('collected_count').notNull().default(0), findings_count: integer('findings_count').notNull().default(0),
+  input_tokens: integer('input_tokens').notNull().default(0), output_tokens: integer('output_tokens').notNull().default(0), cache_hits: integer('cache_hits').notNull().default(0),
+  error: text('error'), icp: text('icp').notNull(), source_ids: text('source_ids').notNull().default('[]'),
+});
+export const research_run_sources = sqliteTable('research_run_sources', {
+  id: text('id').primaryKey(), run_id: text('run_id').notNull().references(() => research_runs.id, { onDelete: 'cascade' }),
+  source_id: text('source_id').notNull(), status: text('status').notNull().default('pending'), item_count: integer('item_count').notNull().default(0), error: text('error'),
+});
+export const research_items = sqliteTable('research_items', {
+  id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }), source_id: text('source_id').notNull(),
+  canonical_url: text('canonical_url').notNull(), title: text('title').notNull(), excerpt: text('excerpt').notNull(), published_at: integer('published_at'),
+  content: text('content'), content_hash: text('content_hash'), collected_at: integer('collected_at').notNull(), content_type: text('content_type').notNull().default('article'), transcript_status: text('transcript_status').notNull().default('not_applicable'),
+});
+export const research_cache = sqliteTable('research_cache', {
+  id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }), value: text('value').notNull(), created_at: integer('created_at').notNull(),
+});
+export const research_findings = sqliteTable('research_findings', {
+  id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }), run_id: text('run_id').notNull().references(() => research_runs.id, { onDelete: 'cascade' }), item_id: text('item_id').notNull().references(() => research_items.id, { onDelete: 'cascade' }),
+  source_id: text('source_id').notNull(), title: text('title').notNull(), url: text('url').notNull(), published_at: integer('published_at').notNull(), score: integer('score').notNull(),
+  summary: text('summary').notNull(), why_it_matters: text('why_it_matters').notNull(), content_angle: text('content_angle').notNull(), evidence: text('evidence').notNull(), limitations: text('limitations').notNull(),
+  status: text('status').notNull().default('new'), idea_id: text('idea_id'), created_at: integer('created_at').notNull(), family_key: text('family_key').notNull(), content_type: text('content_type').notNull().default('article'), transcript_status: text('transcript_status').notNull().default('not_applicable'),
+});

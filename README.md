@@ -101,6 +101,16 @@ Install [skills/content-hub](skills/content-hub/SKILL.md), set
 shows exact URLs and downloadable skill files served by your deployment.
 See [agent installation and HTTP fallback](docs/agent-skill.md).
 
+## Research
+
+Open `/research` to collect practitioner articles, original research, and selected
+YouTube channels, scan the last 30 days, and save useful findings as ideas. The
+catalog preserves the original 43 sources and adds 22 curated entries; 25 are
+enabled by default, with competitor blogs and changelogs disabled. Daily collection
+does not call a model. Manual scans use `OPENAI_API_KEY` with `gpt-6-luna`, cached
+screening, and evidence checks. Public video captions are attempted; videos without
+readable transcripts are excluded from ranking. See [research setup and coverage](docs/research.md).
+
 ## Development and manual deployment
 
 Use Node.js 22 and install with `npm ci` (or use Bun with the existing scripts).

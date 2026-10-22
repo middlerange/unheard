@@ -42,3 +42,9 @@
 ## Visual transition verification
 
 - Verify page transitions in the browser, not from a successful build alone. Named view-transition snapshots can expose old route content through a transparent incoming panel; keep the incoming surface opaque and avoid fading its opacity over the outgoing page.
+
+## Practitioner-first editorial research
+
+- For our product/growth ICP, prioritize individual practitioners, original research, operator experiments and substantive product interviews. Competitor SEO blogs and changelogs are low-priority competitive intelligence and must remain off by default rather than dominating editorial discovery.
+- Preserve transcript availability as evidence: video metadata alone does not establish what a speaker said. Mark missing transcripts and never present a title-based summary as a watched/read video.
+- Validate durable workflow configuration on Cloudflare as well as in mocks. A zero-retry step still requires a retry delay; local mock execution does not validate that platform contract.

@@ -212,6 +212,7 @@ function DashboardLayout() {
               <Link to="/dashboard" className="rounded-lg px-3 py-2 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-muted)]">Dashboard</Link>
               <Link to="/posts" search={{ status: 'all' }} className="rounded-lg px-3 py-2 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-muted)]">Posts</Link>
               <Link to="/ideas" className="rounded-lg px-3 py-2 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-muted)]">Ideas</Link>
+              <Link to="/research" className="rounded-lg px-3 py-2 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-muted)]">Research</Link>
               <Link to="/calendar" className="rounded-lg px-3 py-2 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-muted)]">Calendar</Link>
               <Link to="/settings" className="rounded-lg px-3 py-2 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-muted)]">Settings</Link>
             </nav>
@@ -291,6 +292,7 @@ function getPageTitle(pathname: string): string {
   if (pathname === '/posts' || pathname === '/') return 'Posts';
   if (pathname.startsWith('/posts/')) return 'Post editor';
   if (pathname === '/ideas') return 'Ideas';
+  if (pathname === '/research') return 'Research';
   if (pathname.startsWith('/ideas/')) return 'Idea details';
   if (pathname === '/calendar') return 'Calendar';
   if (pathname === '/analytics' || pathname === '/dashboard') return 'Dashboard';
@@ -314,6 +316,7 @@ const NAV_ITEMS = [
   { href: '/dashboard', label: 'Dashboard', icon: House },
   { href: '/posts', label: 'Posts', icon: FileText },
   { href: '/ideas', label: 'Ideas', icon: Lightbulb },
+  { href: '/research', label: 'Research', icon: Search },
   { href: '/calendar', label: 'Calendar', icon: CalendarDays },
 ] as const;
 

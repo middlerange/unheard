@@ -555,3 +555,14 @@ Transition follow-up: reproduced `/posts` → `/posts/new` in the local browser.
 ## Review
 
 Removed the native route View Transition setting, matching page-content names, and snapshot animation CSS. The local `/posts` → `/posts/new` click now opens the styled editor directly. `npm run typecheck` and `git diff --check` pass.
+
+# Cloudflare research workspace
+
+- [x] Curate practitioner-first sources; preserve original 43 with competitor sources disabled.
+- [x] Implement team-scoped research storage, bounded collectors, GPT-6 Luna scoring and saving findings as ideas.
+- [x] Add /research interface with source controls, daily collection, scan progress and grounded results.
+- [x] Wire durable Cloudflare Workflow execution and daily dispatch, preserving publisher cron.
+- [x] Verify migrations, meaningful regression tests, typecheck, build, UI and source parsing.
+- [x] Deploy supported research feature with existing OpenAI secret and verify production behavior.
+
+Review: Deployed /research and content-hub-research Workflow to the existing Cloudflare Worker; migrated existing D1 without altering application records. Preserved 43 original sources, curated 65 total, enabled 25 practitioner/research/YouTube sources and disabled every competitor source. Production collection completed for all 25 enabled sources with no errors, added eight archive items and used zero model tokens. The production 30-day scan produced six evidence-backed findings using GPT-6 Luna (26,161 input / 2,190 output tokens). Daily collection is enabled for UserOrbit. No ideas or posts were automatically created. Public captions were unavailable for collected videos, which remain outside ranking. All 99 tests, typecheck, build and desktop/mobile UI checks passed. Verified temporary validation credentials were removed.

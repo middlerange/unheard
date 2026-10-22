@@ -19,6 +19,7 @@ import { Route as LoginRouteImport } from './routes/login'
 import { Route as McpRouteImport } from './routes/mcp'
 import { Route as PostsRouteImport } from './routes/posts'
 import { Route as PrivacyRouteImport } from './routes/privacy'
+import { Route as ResearchRouteImport } from './routes/research'
 import { Route as SignupRouteImport } from './routes/signup'
 import { Route as TermsRouteImport } from './routes/terms'
 import { Route as DotwellKnownOauthAuthorizationServerRouteImport } from './routes/[.]well-known/oauth-authorization-server'
@@ -29,6 +30,7 @@ import { Route as ApiAssistantRouteImport } from './routes/api/assistant'
 import { Route as ApiCronRouteImport } from './routes/api/cron'
 import { Route as ApiIdeasRouteImport } from './routes/api/ideas'
 import { Route as ApiPostsRouteImport } from './routes/api/posts'
+import { Route as ApiResearchRouteImport } from './routes/api/research'
 import { Route as ApiRssFeedsRouteImport } from './routes/api/rss-feeds'
 import { Route as ApiSettingsRouteImport } from './routes/api/settings'
 import { Route as ApiUploadRouteImport } from './routes/api/upload'
@@ -63,6 +65,10 @@ import { Route as DotwellKnownOauthProtectedResourceMcpRouteImport } from './rou
 import { Route as ApiIdeasConvertToPostRouteImport } from './routes/api/ideas/convert-to-post'
 import { Route as ApiMetaDataDeletionRouteImport } from './routes/api/meta/data-deletion'
 import { Route as ApiPostsScheduleRouteImport } from './routes/api/posts/schedule'
+import { Route as ApiResearchFindingsRouteImport } from './routes/api/research/findings'
+import { Route as ApiResearchProcessRouteImport } from './routes/api/research/process'
+import { Route as ApiResearchRunsRouteImport } from './routes/api/research/runs'
+import { Route as ApiResearchSourcesRouteImport } from './routes/api/research/sources'
 import { Route as ApiTelegramWebhookRouteImport } from './routes/api/telegram/webhook'
 
 const IndexRoute = IndexRouteImport.update({
@@ -115,6 +121,11 @@ const PrivacyRoute = PrivacyRouteImport.update({
   path: '/privacy',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ResearchRoute = ResearchRouteImport.update({
+  id: '/research',
+  path: '/research',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SignupRoute = SignupRouteImport.update({
   id: '/signup',
   path: '/signup',
@@ -165,6 +176,11 @@ const ApiIdeasRoute = ApiIdeasRouteImport.update({
 const ApiPostsRoute = ApiPostsRouteImport.update({
   id: '/api/posts',
   path: '/api/posts',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiResearchRoute = ApiResearchRouteImport.update({
+  id: '/api/research',
+  path: '/api/research',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiRssFeedsRoute = ApiRssFeedsRouteImport.update({
@@ -339,6 +355,26 @@ const ApiPostsScheduleRoute = ApiPostsScheduleRouteImport.update({
   path: '/schedule',
   getParentRoute: () => ApiPostsRoute,
 } as any)
+const ApiResearchFindingsRoute = ApiResearchFindingsRouteImport.update({
+  id: '/findings',
+  path: '/findings',
+  getParentRoute: () => ApiResearchRoute,
+} as any)
+const ApiResearchProcessRoute = ApiResearchProcessRouteImport.update({
+  id: '/process',
+  path: '/process',
+  getParentRoute: () => ApiResearchRoute,
+} as any)
+const ApiResearchRunsRoute = ApiResearchRunsRouteImport.update({
+  id: '/runs',
+  path: '/runs',
+  getParentRoute: () => ApiResearchRoute,
+} as any)
+const ApiResearchSourcesRoute = ApiResearchSourcesRouteImport.update({
+  id: '/sources',
+  path: '/sources',
+  getParentRoute: () => ApiResearchRoute,
+} as any)
 const ApiTelegramWebhookRoute = ApiTelegramWebhookRouteImport.update({
   id: '/api/telegram/webhook',
   path: '/api/telegram/webhook',
@@ -356,6 +392,7 @@ export interface FileRoutesByFullPath {
   '/mcp': typeof McpRoute
   '/posts': typeof PostsRoute
   '/privacy': typeof PrivacyRoute
+  '/research': typeof ResearchRoute
   '/signup': typeof SignupRoute
   '/terms': typeof TermsRoute
   '/.well-known/oauth-authorization-server': typeof DotwellKnownOauthAuthorizationServerRoute
@@ -366,6 +403,7 @@ export interface FileRoutesByFullPath {
   '/api/cron': typeof ApiCronRoute
   '/api/ideas': typeof ApiIdeasRouteWithChildren
   '/api/posts': typeof ApiPostsRouteWithChildren
+  '/api/research': typeof ApiResearchRouteWithChildren
   '/api/rss-feeds': typeof ApiRssFeedsRoute
   '/api/settings': typeof ApiSettingsRoute
   '/api/upload': typeof ApiUploadRoute
@@ -400,6 +438,10 @@ export interface FileRoutesByFullPath {
   '/api/ideas/convert-to-post': typeof ApiIdeasConvertToPostRoute
   '/api/meta/data-deletion': typeof ApiMetaDataDeletionRoute
   '/api/posts/schedule': typeof ApiPostsScheduleRoute
+  '/api/research/findings': typeof ApiResearchFindingsRoute
+  '/api/research/process': typeof ApiResearchProcessRoute
+  '/api/research/runs': typeof ApiResearchRunsRoute
+  '/api/research/sources': typeof ApiResearchSourcesRoute
   '/api/telegram/webhook': typeof ApiTelegramWebhookRoute
 }
 export interface FileRoutesByTo {
@@ -413,6 +455,7 @@ export interface FileRoutesByTo {
   '/mcp': typeof McpRoute
   '/posts': typeof PostsRoute
   '/privacy': typeof PrivacyRoute
+  '/research': typeof ResearchRoute
   '/signup': typeof SignupRoute
   '/terms': typeof TermsRoute
   '/.well-known/oauth-authorization-server': typeof DotwellKnownOauthAuthorizationServerRoute
@@ -423,6 +466,7 @@ export interface FileRoutesByTo {
   '/api/cron': typeof ApiCronRoute
   '/api/ideas': typeof ApiIdeasRouteWithChildren
   '/api/posts': typeof ApiPostsRouteWithChildren
+  '/api/research': typeof ApiResearchRouteWithChildren
   '/api/rss-feeds': typeof ApiRssFeedsRoute
   '/api/settings': typeof ApiSettingsRoute
   '/api/upload': typeof ApiUploadRoute
@@ -457,6 +501,10 @@ export interface FileRoutesByTo {
   '/api/ideas/convert-to-post': typeof ApiIdeasConvertToPostRoute
   '/api/meta/data-deletion': typeof ApiMetaDataDeletionRoute
   '/api/posts/schedule': typeof ApiPostsScheduleRoute
+  '/api/research/findings': typeof ApiResearchFindingsRoute
+  '/api/research/process': typeof ApiResearchProcessRoute
+  '/api/research/runs': typeof ApiResearchRunsRoute
+  '/api/research/sources': typeof ApiResearchSourcesRoute
   '/api/telegram/webhook': typeof ApiTelegramWebhookRoute
 }
 export interface FileRoutesById {
@@ -471,6 +519,7 @@ export interface FileRoutesById {
   '/mcp': typeof McpRoute
   '/posts': typeof PostsRoute
   '/privacy': typeof PrivacyRoute
+  '/research': typeof ResearchRoute
   '/signup': typeof SignupRoute
   '/terms': typeof TermsRoute
   '/.well-known/oauth-authorization-server': typeof DotwellKnownOauthAuthorizationServerRoute
@@ -481,6 +530,7 @@ export interface FileRoutesById {
   '/api/cron': typeof ApiCronRoute
   '/api/ideas': typeof ApiIdeasRouteWithChildren
   '/api/posts': typeof ApiPostsRouteWithChildren
+  '/api/research': typeof ApiResearchRouteWithChildren
   '/api/rss-feeds': typeof ApiRssFeedsRoute
   '/api/settings': typeof ApiSettingsRoute
   '/api/upload': typeof ApiUploadRoute
@@ -515,6 +565,10 @@ export interface FileRoutesById {
   '/api/ideas/convert-to-post': typeof ApiIdeasConvertToPostRoute
   '/api/meta/data-deletion': typeof ApiMetaDataDeletionRoute
   '/api/posts/schedule': typeof ApiPostsScheduleRoute
+  '/api/research/findings': typeof ApiResearchFindingsRoute
+  '/api/research/process': typeof ApiResearchProcessRoute
+  '/api/research/runs': typeof ApiResearchRunsRoute
+  '/api/research/sources': typeof ApiResearchSourcesRoute
   '/api/telegram/webhook': typeof ApiTelegramWebhookRoute
 }
 export interface FileRouteTypes {
@@ -530,6 +584,7 @@ export interface FileRouteTypes {
     | '/mcp'
     | '/posts'
     | '/privacy'
+    | '/research'
     | '/signup'
     | '/terms'
     | '/.well-known/oauth-authorization-server'
@@ -540,6 +595,7 @@ export interface FileRouteTypes {
     | '/api/cron'
     | '/api/ideas'
     | '/api/posts'
+    | '/api/research'
     | '/api/rss-feeds'
     | '/api/settings'
     | '/api/upload'
@@ -574,6 +630,10 @@ export interface FileRouteTypes {
     | '/api/ideas/convert-to-post'
     | '/api/meta/data-deletion'
     | '/api/posts/schedule'
+    | '/api/research/findings'
+    | '/api/research/process'
+    | '/api/research/runs'
+    | '/api/research/sources'
     | '/api/telegram/webhook'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -587,6 +647,7 @@ export interface FileRouteTypes {
     | '/mcp'
     | '/posts'
     | '/privacy'
+    | '/research'
     | '/signup'
     | '/terms'
     | '/.well-known/oauth-authorization-server'
@@ -597,6 +658,7 @@ export interface FileRouteTypes {
     | '/api/cron'
     | '/api/ideas'
     | '/api/posts'
+    | '/api/research'
     | '/api/rss-feeds'
     | '/api/settings'
     | '/api/upload'
@@ -631,6 +693,10 @@ export interface FileRouteTypes {
     | '/api/ideas/convert-to-post'
     | '/api/meta/data-deletion'
     | '/api/posts/schedule'
+    | '/api/research/findings'
+    | '/api/research/process'
+    | '/api/research/runs'
+    | '/api/research/sources'
     | '/api/telegram/webhook'
   id:
     | '__root__'
@@ -644,6 +710,7 @@ export interface FileRouteTypes {
     | '/mcp'
     | '/posts'
     | '/privacy'
+    | '/research'
     | '/signup'
     | '/terms'
     | '/.well-known/oauth-authorization-server'
@@ -654,6 +721,7 @@ export interface FileRouteTypes {
     | '/api/cron'
     | '/api/ideas'
     | '/api/posts'
+    | '/api/research'
     | '/api/rss-feeds'
     | '/api/settings'
     | '/api/upload'
@@ -688,6 +756,10 @@ export interface FileRouteTypes {
     | '/api/ideas/convert-to-post'
     | '/api/meta/data-deletion'
     | '/api/posts/schedule'
+    | '/api/research/findings'
+    | '/api/research/process'
+    | '/api/research/runs'
+    | '/api/research/sources'
     | '/api/telegram/webhook'
   fileRoutesById: FileRoutesById
 }
@@ -702,6 +774,7 @@ export interface RootRouteChildren {
   McpRoute: typeof McpRoute
   PostsRoute: typeof PostsRoute
   PrivacyRoute: typeof PrivacyRoute
+  ResearchRoute: typeof ResearchRoute
   SignupRoute: typeof SignupRoute
   TermsRoute: typeof TermsRoute
   DotwellKnownOauthAuthorizationServerRoute: typeof DotwellKnownOauthAuthorizationServerRoute
@@ -712,6 +785,7 @@ export interface RootRouteChildren {
   ApiCronRoute: typeof ApiCronRoute
   ApiIdeasRoute: typeof ApiIdeasRouteWithChildren
   ApiPostsRoute: typeof ApiPostsRouteWithChildren
+  ApiResearchRoute: typeof ApiResearchRouteWithChildren
   ApiRssFeedsRoute: typeof ApiRssFeedsRoute
   ApiSettingsRoute: typeof ApiSettingsRoute
   ApiUploadRoute: typeof ApiUploadRoute
@@ -818,6 +892,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PrivacyRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/research': {
+      id: '/research'
+      path: '/research'
+      fullPath: '/research'
+      preLoaderRoute: typeof ResearchRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/signup': {
       id: '/signup'
       path: '/signup'
@@ -886,6 +967,13 @@ declare module '@tanstack/react-router' {
       path: '/api/posts'
       fullPath: '/api/posts'
       preLoaderRoute: typeof ApiPostsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/research': {
+      id: '/api/research'
+      path: '/api/research'
+      fullPath: '/api/research'
+      preLoaderRoute: typeof ApiResearchRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/rss-feeds': {
@@ -1126,6 +1214,34 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPostsScheduleRouteImport
       parentRoute: typeof ApiPostsRoute
     }
+    '/api/research/findings': {
+      id: '/api/research/findings'
+      path: '/findings'
+      fullPath: '/api/research/findings'
+      preLoaderRoute: typeof ApiResearchFindingsRouteImport
+      parentRoute: typeof ApiResearchRoute
+    }
+    '/api/research/process': {
+      id: '/api/research/process'
+      path: '/process'
+      fullPath: '/api/research/process'
+      preLoaderRoute: typeof ApiResearchProcessRouteImport
+      parentRoute: typeof ApiResearchRoute
+    }
+    '/api/research/runs': {
+      id: '/api/research/runs'
+      path: '/runs'
+      fullPath: '/api/research/runs'
+      preLoaderRoute: typeof ApiResearchRunsRouteImport
+      parentRoute: typeof ApiResearchRoute
+    }
+    '/api/research/sources': {
+      id: '/api/research/sources'
+      path: '/sources'
+      fullPath: '/api/research/sources'
+      preLoaderRoute: typeof ApiResearchSourcesRouteImport
+      parentRoute: typeof ApiResearchRoute
+    }
     '/api/telegram/webhook': {
       id: '/api/telegram/webhook'
       path: '/api/telegram/webhook'
@@ -1175,6 +1291,24 @@ const ApiPostsRouteWithChildren = ApiPostsRoute._addFileChildren(
   ApiPostsRouteChildren,
 )
 
+interface ApiResearchRouteChildren {
+  ApiResearchFindingsRoute: typeof ApiResearchFindingsRoute
+  ApiResearchProcessRoute: typeof ApiResearchProcessRoute
+  ApiResearchRunsRoute: typeof ApiResearchRunsRoute
+  ApiResearchSourcesRoute: typeof ApiResearchSourcesRoute
+}
+
+const ApiResearchRouteChildren: ApiResearchRouteChildren = {
+  ApiResearchFindingsRoute: ApiResearchFindingsRoute,
+  ApiResearchProcessRoute: ApiResearchProcessRoute,
+  ApiResearchRunsRoute: ApiResearchRunsRoute,
+  ApiResearchSourcesRoute: ApiResearchSourcesRoute,
+}
+
+const ApiResearchRouteWithChildren = ApiResearchRoute._addFileChildren(
+  ApiResearchRouteChildren,
+)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AnalyticsRoute: AnalyticsRoute,
@@ -1186,6 +1320,7 @@ const rootRouteChildren: RootRouteChildren = {
   McpRoute: McpRoute,
   PostsRoute: PostsRoute,
   PrivacyRoute: PrivacyRoute,
+  ResearchRoute: ResearchRoute,
   SignupRoute: SignupRoute,
   TermsRoute: TermsRoute,
   DotwellKnownOauthAuthorizationServerRoute:
@@ -1198,6 +1333,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiCronRoute: ApiCronRoute,
   ApiIdeasRoute: ApiIdeasRouteWithChildren,
   ApiPostsRoute: ApiPostsRouteWithChildren,
+  ApiResearchRoute: ApiResearchRouteWithChildren,
   ApiRssFeedsRoute: ApiRssFeedsRoute,
   ApiSettingsRoute: ApiSettingsRoute,
   ApiUploadRoute: ApiUploadRoute,

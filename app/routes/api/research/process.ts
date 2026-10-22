@@ -1,0 +1,45 @@
+import { createFileRoute } from "@tanstack/react-router";
+import { z } from "zod";
+import { processResearchJob } from "@/lib/research";
+import { verifyResearchRequest } from "@/lib/research-internal";
+export const researchJobSchema = z
+  .object({
+    operation: z.enum(["plan", "collect", "rank", "fail", "daily"]),
+    runId: z.string().max(100).optional(),
+    sourceId: z.string().max(200).optional(),
+    error: z.string().max(1000).optional(),
+  })
+  .strict();
+export async function handleResearchProcess(request: Request) {
+  if (Number(request.headers.get("content-length") || 0) > 5000)
+    return Response.json({ error: "Payload too large" }, { status: 413 });
+  const body = await request.text();
+  if (body.length > 5000)
+    return Response.json({ error: "Payload too large" }, { status: 413 });
+  if (
+    !(await verifyResearchRequest(
+      request,
+      body,
+      process.env.SESSION_SECRET || "",
+    ))
+  )
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  try {
+    return Response.json(
+      await processResearchJob(researchJobSchema.parse(JSON.parse(body))),
+    );
+  } catch (error) {
+    if (error instanceof z.ZodError || error instanceof SyntaxError)
+      return Response.json({ error: "Invalid research job" }, { status: 400 });
+    console.error("Research job failed:", error);
+    return Response.json(
+      { error: error instanceof Error ? error.message : "Research job failed" },
+      { status: 500 },
+    );
+  }
+}
+export const Route = createFileRoute("/api/research/process")({
+  server: {
+    handlers: { POST: ({ request }) => handleResearchProcess(request) },
+  },
+});

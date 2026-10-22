@@ -14,6 +14,11 @@ directory = "./dist/client"
 [triggers]
 crons = ["* * * * *"]
 
+[[workflows]]
+binding = "RESEARCH_WORKFLOW"
+name = "content-hub-research"
+class_name = "ResearchWorkflow"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "content-hub"

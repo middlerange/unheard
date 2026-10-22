@@ -1,10 +1,20 @@
 // ABOUTME: Post-build script that wraps dist/server/server.mjs to add Cloudflare scheduled handling.
 // ABOUTME: Also bridges Worker env bindings into globals and process.env for server code.
 
-import { writeFileSync } from 'fs';
+import { copyFileSync, writeFileSync } from 'fs';
+
+copyFileSync('scripts/research-runtime.mjs', 'dist/server/research-runtime.mjs');
 
 writeFileSync('dist/server/worker.mjs', `
 import handler from './server.mjs';
+import { WorkflowEntrypoint } from 'cloudflare:workers';
+import { bindResearchEnvironment, invokeResearchProcess, runResearchWorkflow, isResearchCollectionTick } from './research-runtime.mjs';
+
+export class ResearchWorkflow extends WorkflowEntrypoint {
+  async run(event, step) {
+    return runResearchWorkflow(event.payload.runId, step, payload => invokeResearchProcess(handler, this.env, payload));
+  }
+}
 
 const origError = console.error.bind(console);
 console.error = (...args) => {
@@ -20,11 +30,7 @@ console.error = (...args) => {
 export default {
   async fetch(request, env, ctx) {
     globalThis.__contentHubOrigin__ = env.CONTENT_HUB_PUBLIC_URL || new URL(request.url).origin;
-    globalThis.__contentHubDb__ = env.DB;
-    globalThis.__contentHubMediaBucket__ = env.MEDIA_BUCKET;
-    for (const [k, v] of Object.entries(env)) {
-      if (typeof v === 'string') process.env[k] = v;
-    }
+    bindResearchEnvironment(env);
     try {
       const res = await handler.fetch(request, env, ctx);
       if (res.status >= 500) {
@@ -41,13 +47,12 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    globalThis.__contentHubDb__ = env.DB;
-    globalThis.__contentHubMediaBucket__ = env.MEDIA_BUCKET;
-    for (const [k, v] of Object.entries(env)) {
-      if (typeof v === 'string') process.env[k] = v;
-    }
+    bindResearchEnvironment(env);
     const req = new Request('http://localhost/api/cron');
     ctx.waitUntil(handler.fetch(req, env, ctx));
+    if (isResearchCollectionTick(event.scheduledTime)) {
+      ctx.waitUntil(invokeResearchProcess(handler, env, { operation: 'daily' }));
+    }
   },
 };
 `.trimStart());
