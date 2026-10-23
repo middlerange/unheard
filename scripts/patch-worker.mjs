@@ -8,7 +8,7 @@ copyFileSync('scripts/research-runtime.mjs', 'dist/server/research-runtime.mjs')
 writeFileSync('dist/server/worker.mjs', `
 import handler from './server.mjs';
 import { WorkflowEntrypoint } from 'cloudflare:workers';
-import { bindResearchEnvironment, invokeResearchProcess, runResearchWorkflow, runSlackWorkflow, isResearchCollectionTick } from './research-runtime.mjs';
+import { bindResearchEnvironment, invokeResearchProcess, runResearchWorkflow, runSlackWorkflow, researchDailyJob } from './research-runtime.mjs';
 
 export class ResearchWorkflow extends WorkflowEntrypoint {
   async run(event, step) {
@@ -57,9 +57,7 @@ export default {
     const req = new Request('http://localhost/api/cron');
     ctx.waitUntil(handler.fetch(req, env, ctx));
     ctx.waitUntil(invokeResearchProcess(handler, env, { operation: 'dispatch' }, '/api/slack/process'));
-    if (isResearchCollectionTick(event.scheduledTime)) {
-      ctx.waitUntil(invokeResearchProcess(handler, env, { operation: 'daily' }));
-    }
+    ctx.waitUntil(invokeResearchProcess(handler, env, researchDailyJob(event.scheduledTime)));
   },
 };
 `.trimStart());

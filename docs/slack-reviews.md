@@ -118,7 +118,10 @@ research drafts, Slack review jobs, profile settings, and OAuth state records.
 Keep `SESSION_SECRET`,
 `CREDENTIALS_ENCRYPTION_KEY`, and `OPENAI_API_KEY`. `wrangler.toml` includes
 `SLACK_WORKFLOW` / `SlackWorkflow` alongside the research workflow. The minute
-publisher cron continues dispatching review jobs.
+publisher cron continues dispatching review jobs. Research daily start time and
+timezone are configurable under **Settings → Research schedule**. **Research →
+Costs** separates initial drafting from later Slack revisions; edits rejected by
+evidence checks still consume tokens and appear in usage totals.
 
 ### Installation security
 

@@ -52,6 +52,7 @@ import { Route as SettingsBestTimeRouteImport } from './routes/settings/best-tim
 import { Route as SettingsBrandsRouteImport } from './routes/settings/brands'
 import { Route as SettingsChannelsRouteImport } from './routes/settings/channels'
 import { Route as SettingsNotificationsRouteImport } from './routes/settings/notifications'
+import { Route as SettingsResearchRouteImport } from './routes/settings/research'
 import { Route as SettingsResearchProfilesRouteImport } from './routes/settings/research-profiles'
 import { Route as SettingsRssRouteImport } from './routes/settings/rss'
 import { Route as SettingsRssFeedsRouteImport } from './routes/settings/rss-feeds'
@@ -73,6 +74,7 @@ import { Route as ApiResearchProcessRouteImport } from './routes/api/research/pr
 import { Route as ApiResearchProfilesRouteImport } from './routes/api/research/profiles'
 import { Route as ApiResearchRunsRouteImport } from './routes/api/research/runs'
 import { Route as ApiResearchSourcesRouteImport } from './routes/api/research/sources'
+import { Route as ApiResearchUsageRouteImport } from './routes/api/research/usage'
 import { Route as ApiSlackConnectRouteImport } from './routes/api/slack/connect'
 import { Route as ApiSlackEventsRouteImport } from './routes/api/slack/events'
 import { Route as ApiSlackInteractionsRouteImport } from './routes/api/slack/interactions'
@@ -299,6 +301,11 @@ const SettingsNotificationsRoute = SettingsNotificationsRouteImport.update({
   path: '/settings/notifications',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SettingsResearchRoute = SettingsResearchRouteImport.update({
+  id: '/settings/research',
+  path: '/settings/research',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SettingsResearchProfilesRoute =
   SettingsResearchProfilesRouteImport.update({
     id: '/settings/research-profiles',
@@ -407,6 +414,11 @@ const ApiResearchSourcesRoute = ApiResearchSourcesRouteImport.update({
   path: '/sources',
   getParentRoute: () => ApiResearchRoute,
 } as any)
+const ApiResearchUsageRoute = ApiResearchUsageRouteImport.update({
+  id: '/usage',
+  path: '/usage',
+  getParentRoute: () => ApiResearchRoute,
+} as any)
 const ApiSlackConnectRoute = ApiSlackConnectRouteImport.update({
   id: '/connect',
   path: '/connect',
@@ -491,6 +503,7 @@ export interface FileRoutesByFullPath {
   '/settings/brands': typeof SettingsBrandsRoute
   '/settings/channels': typeof SettingsChannelsRoute
   '/settings/notifications': typeof SettingsNotificationsRoute
+  '/settings/research': typeof SettingsResearchRoute
   '/settings/research-profiles': typeof SettingsResearchProfilesRoute
   '/settings/rss': typeof SettingsRssRoute
   '/settings/rss-feeds': typeof SettingsRssFeedsRoute
@@ -513,6 +526,7 @@ export interface FileRoutesByFullPath {
   '/api/research/profiles': typeof ApiResearchProfilesRoute
   '/api/research/runs': typeof ApiResearchRunsRoute
   '/api/research/sources': typeof ApiResearchSourcesRoute
+  '/api/research/usage': typeof ApiResearchUsageRoute
   '/api/slack/connect': typeof ApiSlackConnectRoute
   '/api/slack/events': typeof ApiSlackEventsRoute
   '/api/slack/interactions': typeof ApiSlackInteractionsRoute
@@ -565,6 +579,7 @@ export interface FileRoutesByTo {
   '/settings/brands': typeof SettingsBrandsRoute
   '/settings/channels': typeof SettingsChannelsRoute
   '/settings/notifications': typeof SettingsNotificationsRoute
+  '/settings/research': typeof SettingsResearchRoute
   '/settings/research-profiles': typeof SettingsResearchProfilesRoute
   '/settings/rss': typeof SettingsRssRoute
   '/settings/rss-feeds': typeof SettingsRssFeedsRoute
@@ -587,6 +602,7 @@ export interface FileRoutesByTo {
   '/api/research/profiles': typeof ApiResearchProfilesRoute
   '/api/research/runs': typeof ApiResearchRunsRoute
   '/api/research/sources': typeof ApiResearchSourcesRoute
+  '/api/research/usage': typeof ApiResearchUsageRoute
   '/api/slack/connect': typeof ApiSlackConnectRoute
   '/api/slack/events': typeof ApiSlackEventsRoute
   '/api/slack/interactions': typeof ApiSlackInteractionsRoute
@@ -640,6 +656,7 @@ export interface FileRoutesById {
   '/settings/brands': typeof SettingsBrandsRoute
   '/settings/channels': typeof SettingsChannelsRoute
   '/settings/notifications': typeof SettingsNotificationsRoute
+  '/settings/research': typeof SettingsResearchRoute
   '/settings/research-profiles': typeof SettingsResearchProfilesRoute
   '/settings/rss': typeof SettingsRssRoute
   '/settings/rss-feeds': typeof SettingsRssFeedsRoute
@@ -662,6 +679,7 @@ export interface FileRoutesById {
   '/api/research/profiles': typeof ApiResearchProfilesRoute
   '/api/research/runs': typeof ApiResearchRunsRoute
   '/api/research/sources': typeof ApiResearchSourcesRoute
+  '/api/research/usage': typeof ApiResearchUsageRoute
   '/api/slack/connect': typeof ApiSlackConnectRoute
   '/api/slack/events': typeof ApiSlackEventsRoute
   '/api/slack/interactions': typeof ApiSlackInteractionsRoute
@@ -716,6 +734,7 @@ export interface FileRouteTypes {
     | '/settings/brands'
     | '/settings/channels'
     | '/settings/notifications'
+    | '/settings/research'
     | '/settings/research-profiles'
     | '/settings/rss'
     | '/settings/rss-feeds'
@@ -738,6 +757,7 @@ export interface FileRouteTypes {
     | '/api/research/profiles'
     | '/api/research/runs'
     | '/api/research/sources'
+    | '/api/research/usage'
     | '/api/slack/connect'
     | '/api/slack/events'
     | '/api/slack/interactions'
@@ -790,6 +810,7 @@ export interface FileRouteTypes {
     | '/settings/brands'
     | '/settings/channels'
     | '/settings/notifications'
+    | '/settings/research'
     | '/settings/research-profiles'
     | '/settings/rss'
     | '/settings/rss-feeds'
@@ -812,6 +833,7 @@ export interface FileRouteTypes {
     | '/api/research/profiles'
     | '/api/research/runs'
     | '/api/research/sources'
+    | '/api/research/usage'
     | '/api/slack/connect'
     | '/api/slack/events'
     | '/api/slack/interactions'
@@ -864,6 +886,7 @@ export interface FileRouteTypes {
     | '/settings/brands'
     | '/settings/channels'
     | '/settings/notifications'
+    | '/settings/research'
     | '/settings/research-profiles'
     | '/settings/rss'
     | '/settings/rss-feeds'
@@ -886,6 +909,7 @@ export interface FileRouteTypes {
     | '/api/research/profiles'
     | '/api/research/runs'
     | '/api/research/sources'
+    | '/api/research/usage'
     | '/api/slack/connect'
     | '/api/slack/events'
     | '/api/slack/interactions'
@@ -939,6 +963,7 @@ export interface RootRouteChildren {
   SettingsBrandsRoute: typeof SettingsBrandsRoute
   SettingsChannelsRoute: typeof SettingsChannelsRoute
   SettingsNotificationsRoute: typeof SettingsNotificationsRoute
+  SettingsResearchRoute: typeof SettingsResearchRoute
   SettingsResearchProfilesRoute: typeof SettingsResearchProfilesRoute
   SettingsRssRoute: typeof SettingsRssRoute
   SettingsRssFeedsRoute: typeof SettingsRssFeedsRoute
@@ -1259,6 +1284,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsNotificationsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/settings/research': {
+      id: '/settings/research'
+      path: '/settings/research'
+      fullPath: '/settings/research'
+      preLoaderRoute: typeof SettingsResearchRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/settings/research-profiles': {
       id: '/settings/research-profiles'
       path: '/settings/research-profiles'
@@ -1406,6 +1438,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiResearchSourcesRouteImport
       parentRoute: typeof ApiResearchRoute
     }
+    '/api/research/usage': {
+      id: '/api/research/usage'
+      path: '/usage'
+      fullPath: '/api/research/usage'
+      preLoaderRoute: typeof ApiResearchUsageRouteImport
+      parentRoute: typeof ApiResearchRoute
+    }
     '/api/slack/connect': {
       id: '/api/slack/connect'
       path: '/connect'
@@ -1510,6 +1549,7 @@ interface ApiResearchRouteChildren {
   ApiResearchProfilesRoute: typeof ApiResearchProfilesRoute
   ApiResearchRunsRoute: typeof ApiResearchRunsRoute
   ApiResearchSourcesRoute: typeof ApiResearchSourcesRoute
+  ApiResearchUsageRoute: typeof ApiResearchUsageRoute
 }
 
 const ApiResearchRouteChildren: ApiResearchRouteChildren = {
@@ -1518,6 +1558,7 @@ const ApiResearchRouteChildren: ApiResearchRouteChildren = {
   ApiResearchProfilesRoute: ApiResearchProfilesRoute,
   ApiResearchRunsRoute: ApiResearchRunsRoute,
   ApiResearchSourcesRoute: ApiResearchSourcesRoute,
+  ApiResearchUsageRoute: ApiResearchUsageRoute,
 }
 
 const ApiResearchRouteWithChildren = ApiResearchRoute._addFileChildren(
@@ -1593,6 +1634,7 @@ const rootRouteChildren: RootRouteChildren = {
   SettingsBrandsRoute: SettingsBrandsRoute,
   SettingsChannelsRoute: SettingsChannelsRoute,
   SettingsNotificationsRoute: SettingsNotificationsRoute,
+  SettingsResearchRoute: SettingsResearchRoute,
   SettingsResearchProfilesRoute: SettingsResearchProfilesRoute,
   SettingsRssRoute: SettingsRssRoute,
   SettingsRssFeedsRoute: SettingsRssFeedsRoute,

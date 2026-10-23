@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { invokeResearchProcess, isResearchCollectionTick, runResearchWorkflow, runSlackWorkflow } from './research-runtime.mjs';
+import { invokeResearchProcess, researchDailyJob, runResearchWorkflow, runSlackWorkflow } from './research-runtime.mjs';
 
 describe('durable research execution', () => {
   it('collects each source before ranking and gives paid ranking no automatic retries', async () => {
@@ -49,9 +49,10 @@ describe('durable research execution', () => {
     expect(await crypto.subtle.verify('HMAC', key, bytes, new TextEncoder().encode(`${timestamp}.${rawBody}`))).toBe(true);
   });
 
-  it('dispatches hourly collection checks without changing the minute publisher cadence', () => {
-    expect(isResearchCollectionTick(Date.parse('2026-10-23T03:00:00Z'))).toBe(true);
-    expect(isResearchCollectionTick(Date.parse('2026-10-23T03:01:00Z'))).toBe(false);
+  it('checks fixed daily schedules every minute and forwards the tick for legacy hourly schedules', () => {
+    for (const time of ['2026-10-23T03:00:00Z', '2026-10-23T03:01:00Z']) {
+      expect(researchDailyJob(Date.parse(time))).toEqual({ operation: 'daily', scheduledTime: Date.parse(time) });
+    }
   });
 
   it('routes durable Slack work to the signed endpoint without retrying paid edits or publishing', async () => {

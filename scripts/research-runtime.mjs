@@ -64,6 +64,6 @@ export async function runSlackWorkflow(jobId, step, invoke) {
   }, () => invoke({ operation: 'process', jobId }));
 }
 
-export function isResearchCollectionTick(scheduledTime) {
-  return scheduledTime % (60 * 60 * 1000) === 0;
+export function researchDailyJob(scheduledTime) {
+  return { operation: 'daily', scheduledTime };
 }

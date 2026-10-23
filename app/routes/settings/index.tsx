@@ -34,6 +34,12 @@ const sections = [
     description: 'Outgoing webhooks for Zapier, Make, n8n integrations',
   },
   {
+    to: '/settings/research',
+    icon: Clock,
+    label: 'Research schedule',
+    description: 'Set the daily research time and timezone, or pause automatic scans',
+  },
+  {
     to: '/settings/research-profiles',
     icon: Mic2,
     label: 'Research profiles',

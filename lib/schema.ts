@@ -397,6 +397,9 @@ export const research_settings = sqliteTable('research_settings', {
   team_id: text('team_id').primaryKey().references(() => teams.id, { onDelete: 'cascade' }),
   icp: text('icp').notNull(), daily_enabled: integer('daily_enabled', { mode: 'boolean' }).notNull().default(false),
   last_daily_at: integer('last_daily_at'), updated_at: integer('updated_at').notNull(),
+  daily_time: text('daily_time'), daily_timezone: text('daily_timezone').notNull().default('UTC'),
+  next_daily_at: integer('next_daily_at'), daily_claim_id: text('daily_claim_id'), daily_claim_until: integer('daily_claim_until'),
+  daily_pending_run_id: text('daily_pending_run_id'),
 });
 export const research_sources = sqliteTable('research_sources', {
   id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }),
@@ -468,4 +471,17 @@ export const slack_jobs = sqliteTable('slack_jobs', {
   id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }),
   kind: text('kind').notNull(), payload: text('payload').notNull(), status: text('status').notNull().default('queued'),
   created_at: integer('created_at').notNull(), updated_at: integer('updated_at').notNull(), error: text('error'),
+});
+
+export const research_usage = sqliteTable('research_usage', {
+  id: text('id').primaryKey(),
+  team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }),
+  run_id: text('run_id').notNull().references(() => research_runs.id, { onDelete: 'cascade' }),
+  stage: text('stage').notNull(), operation: text('operation').notNull(),
+  model: text('model').notNull(), service_tier: text('service_tier').notNull().default('default'),
+  response_id: text('response_id'), status: text('status').notNull().default('pending'),
+  input_tokens: integer('input_tokens'), output_tokens: integer('output_tokens'),
+  cached_input_tokens: integer('cached_input_tokens'), cache_write_tokens: integer('cache_write_tokens'),
+  cost_nano_usd: integer('cost_nano_usd'), cost_status: text('cost_status').notNull().default('unknown'),
+  rate_card: text('rate_card'), created_at: integer('created_at').notNull(), completed_at: integer('completed_at'),
 });

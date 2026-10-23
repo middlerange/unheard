@@ -1,0 +1,55 @@
+export const RESEARCH_PRICING_DATE = '2026-10-23';
+export const RESEARCH_PRICING_URL = 'https://developers.openai.com/api/docs/pricing';
+
+export type ModelUsage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  input_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+    cache_write_tokens_details?: { ttl_30m_tokens?: number; ttl_12h_tokens?: number };
+  };
+};
+
+export function tokenCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+export function priceResearchUsage(model: string, tier: string, usage?: ModelUsage) {
+  const input = tokenCount(usage?.input_tokens);
+  const output = tokenCount(usage?.output_tokens);
+  const cached = tokenCount(usage?.input_tokens_details?.cached_tokens);
+  const writes = tokenCount(usage?.input_tokens_details?.cache_write_tokens);
+  const unknown = { input, output, cached, writes, costNanoUsd: null, costStatus: 'unknown', rateCard: null };
+  if (input === null || output === null || !/^gpt-6-luna(?:-|$)/.test(model)) return unknown;
+  const multiplier = { default: 1, standard: 1, priority: 2, fast: 2, flex: 0.5 }[tier];
+  if (multiplier === undefined) return unknown;
+  const long = input > 272_000;
+  const rates = {
+    asOf: RESEARCH_PRICING_DATE, input: long ? 0.2 : 0.1, output: long ? 0.75 : 0.5,
+    cachedInput: long ? 0.02 : 0.01, write30m: long ? 0.25 : 0.125, write12h: long ? 0.5 : 0.25,
+    multiplier,
+  };
+  if ((cached ?? 0) + (writes ?? 0) > input) return unknown;
+  let costStatus = 'calculated';
+  const cachedTokens = cached ?? 0;
+  let writes30 = writes ?? 0;
+  let writes12 = 0;
+  if (cached === null || writes === null) {
+    // Older responses did not expose cache billing. Budget unclassified input as a 30m write.
+    costStatus = 'estimated';
+    writes30 = input - cachedTokens;
+  } else if (writes > 0) {
+    const details = usage?.input_tokens_details?.cache_write_tokens_details;
+    if (details) {
+      const shortWrites = tokenCount(details.ttl_30m_tokens);
+      const longWrites = tokenCount(details.ttl_12h_tokens);
+      if (shortWrites === null || longWrites === null || shortWrites + longWrites !== writes) return unknown;
+      writes30 = shortWrites;
+      writes12 = longWrites;
+    }
+  }
+  const ordinary = input - cachedTokens - writes30 - writes12;
+  const usd = (ordinary * rates.input + cachedTokens * rates.cachedInput + writes30 * rates.write30m + writes12 * rates.write12h + output * rates.output) * multiplier / 1_000_000;
+  return { input, output, cached, writes, costNanoUsd: Math.round(usd * 1_000_000_000), costStatus, rateCard: JSON.stringify(rates) };
+}

@@ -266,18 +266,11 @@ async function generateDraft(
       input,
       researchDraftOutputSchema,
       3000,
+      { teamId: run.team_id, runId: run.id, stage: current ? "slack_revision" : "draft_generation", operation: current ? "rewrite" : "draft" },
     );
     value = response.value;
     inputTokens = response.inputTokens;
     outputTokens = response.outputTokens;
-    // Record billed tokens even when output validation rejects unsafe copy.
-    await db
-      .update(research_runs)
-      .set({
-        input_tokens: sql`${research_runs.input_tokens} + ${inputTokens}`,
-        output_tokens: sql`${research_runs.output_tokens} + ${outputTokens}`,
-      })
-      .where(eq(research_runs.id, run.id));
   }
   const content = validateResearchDraftContent(
     value,

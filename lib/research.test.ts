@@ -25,6 +25,8 @@ import {
   verifyResearchRequest,
 } from "./research-internal";
 import { validateResearchEvidence } from "./research-model";
+import { callResearchModel } from "./research-model";
+import { beginResearchUsage, finishResearchUsage, getResearchUsage } from "./research-usage";
 import {
   processResearchDraftJob,
   rewriteResearchDraftContent,
@@ -41,6 +43,7 @@ import {
   getResearchSnapshot,
   initializeResearch,
   processResearchJob,
+  updateResearchSettings,
   updateResearchSource,
 } from "./research";
 const source: ResearchSourceSeed = {
@@ -219,7 +222,7 @@ describe("internal workflow authentication", () => {
 describe("research persistence and team isolation", () => {
   const folder = mkdtempSync(join(tmpdir(), "content-research-test-"));
   const path = join(folder, "db.sqlite");
-  const python = `import json,sqlite3,sys\np=json.load(sys.stdin)\nc=sqlite3.connect(p['path'])\nc.row_factory=sqlite3.Row\nc.execute('PRAGMA foreign_keys=ON')\nif 'script' in p:\n c.executescript(p['script']); c.commit(); print('[]')\nelse:\n out=[]\n for q in p['queries']:\n  cur=c.execute(q['sql'],q.get('params',[])); out.append({'results':[dict(r) for r in cur.fetchall()],'success':True,'meta':{}})\n c.commit(); print(json.dumps(out))`;
+  const python = `import json,sqlite3,sys\np=json.load(sys.stdin)\nc=sqlite3.connect(p['path'])\nc.row_factory=sqlite3.Row\nc.execute('PRAGMA foreign_keys=ON')\nif 'script' in p:\n c.executescript(p['script']); c.commit(); print('[]')\nelse:\n out=[]\n for q in p['queries']:\n  cur=c.execute(q['sql'],q.get('params',[])); out.append({'results':[dict(r) for r in cur.fetchall()],'success':True,'meta':{'changes':cur.rowcount}})\n c.commit(); print(json.dumps(out))`;
   function execute(payload: object) {
     const result = spawnSync("python3", ["-c", python], {
       input: JSON.stringify({ path, ...payload }),
@@ -508,6 +511,122 @@ describe("research persistence and team isolation", () => {
       else process.env.OPENAI_API_KEY = previousKey;
     }
   }, 20_000);
+  it("saves a fixed local daily time and claims concurrent minute ticks without consuming a busy occurrence", async () => {
+    execute({ queries: [
+      { sql: "UPDATE research_settings SET daily_enabled=0" },
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('fixed-daily','Fixed','fixed-daily',0,0)" },
+    ] });
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-23T03:44:00Z"));
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-daily-key";
+    const dispatch = vi.fn(async () => ({}));
+    globalThis.__contentHubResearchWorkflow__ = { create: dispatch };
+    try {
+      await updateResearchSettings("fixed-daily", { dailyTime: "09:15", dailyTimezone: "Asia/Kolkata" });
+      const due = Date.parse("2026-10-23T03:45:00Z");
+      expect((await getResearchSnapshot("fixed-daily")).settings).toMatchObject({
+        dailyTime: "09:15", dailyTimezone: "Asia/Kolkata", nextDailyAt: due,
+      });
+      await expect(updateResearchSettings("fixed-daily", { dailyTime: "24:00" })).rejects.toThrow();
+      await expect(updateResearchSettings("fixed-daily", { dailyTimezone: "Bad/Zone" })).rejects.toThrow();
+      expect(await processResearchJob({ operation: "daily", scheduledTime: Date.now() })).toEqual({ dispatched: 0 });
+      const manual = await createResearchRun("fixed-daily", { days: 1, mode: "scan" }, true);
+      now.mockReturnValue(due);
+      expect(await processResearchJob({ operation: "daily", scheduledTime: due })).toEqual({ dispatched: 0 });
+      expect((await getResearchSnapshot("fixed-daily")).settings.nextDailyAt).toBe(due);
+      execute({ queries: [{ sql: "UPDATE research_runs SET status='completed' WHERE id=?", params: [manual.run.id] }] });
+      execute({ queries: [{ sql: "UPDATE research_settings SET daily_claim_id='another-worker',daily_claim_until=? WHERE team_id='fixed-daily'", params: [due + 60_000] }] });
+      expect(await processResearchJob({ operation: "daily", scheduledTime: due })).toEqual({ dispatched: 0 });
+      execute({ queries: [{ sql: "UPDATE research_settings SET daily_claim_until=? WHERE team_id='fixed-daily'", params: [due - 1] }] });
+      const results = await Promise.all([
+        processResearchJob({ operation: "daily", scheduledTime: due }),
+        processResearchJob({ operation: "daily", scheduledTime: due }),
+      ]);
+      expect(results.reduce((sum, result) => sum + ("dispatched" in result ? result.dispatched ?? 0 : 0), 0)).toBe(1);
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      expect((await getResearchSnapshot("fixed-daily")).settings.nextDailyAt).toBe(Date.parse("2026-10-24T03:45:00Z"));
+      await updateResearchSettings("fixed-daily", { icp: "Updated product teams and customer research audience" });
+      expect((await getResearchSnapshot("fixed-daily")).settings.nextDailyAt).toBe(Date.parse("2026-10-24T03:45:00Z"));
+      await updateResearchSettings("fixed-daily", { dailyTime: "10:15" });
+      expect((await getResearchSnapshot("fixed-daily")).settings.nextDailyAt).toBe(Date.parse("2026-10-24T04:45:00Z"));
+      await updateResearchSettings("fixed-daily", { dailyEnabled: false });
+      expect((await getResearchSnapshot("fixed-daily")).settings.nextDailyAt).toBeNull();
+      now.mockReturnValue(Date.parse("2026-10-23T03:46:00Z"));
+      await updateResearchSettings("fixed-daily", { dailyEnabled: true });
+      expect((await getResearchSnapshot("fixed-daily")).settings.nextDailyAt).toBe(Date.parse("2026-10-24T04:45:00Z"));
+      await updateResearchSettings("fixed-daily", { dailyTime: null });
+      expect((await getResearchSnapshot("fixed-daily")).settings).toMatchObject({ dailyTime: null, nextDailyAt: null });
+    } finally {
+      now.mockRestore();
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+    }
+  }, 30_000);
+  it("retries a failed scheduled workflow dispatch using the same queued run ID", async () => {
+    execute({ queries: [
+      { sql: "UPDATE research_settings SET daily_enabled=0" },
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('retry-daily','Retry','retry-daily',0,0)" },
+    ] });
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-23T03:44:00Z"));
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-daily-key";
+    const dispatch = vi.fn(async () => ({})).mockRejectedValueOnce(new Error("Workflow temporarily unavailable"));
+    globalThis.__contentHubResearchWorkflow__ = { create: dispatch };
+    try {
+      await updateResearchSettings("retry-daily", { dailyTime: "09:15", dailyTimezone: "Asia/Kolkata" });
+      const due = Date.parse("2026-10-23T03:45:00Z");
+      now.mockReturnValue(due);
+      expect(await processResearchJob({ operation: "daily", scheduledTime: due })).toEqual({ dispatched: 0 });
+      expect((await getResearchSnapshot("retry-daily")).runs[0].status).toBe("queued");
+      expect((await getResearchSnapshot("retry-daily")).settings.nextDailyAt).toBe(due);
+      expect(await processResearchJob({ operation: "daily", scheduledTime: due + 60_000 })).toEqual({ dispatched: 1 });
+      expect(dispatch.mock.calls[0]).toEqual(dispatch.mock.calls[1]);
+      expect((await getResearchSnapshot("retry-daily")).runs).toHaveLength(1);
+    } finally {
+      now.mockRestore();
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+    }
+  }, 30_000);
+  it("recovers a queued daily run across schedule edits and an interruption after dispatch", async () => {
+    execute({ queries: [
+      { sql: "UPDATE research_settings SET daily_enabled=0" },
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('changed-daily','Changed','changed-daily',0,0)" },
+    ] });
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-23T03:44:00Z"));
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-daily-key";
+    const dispatch = vi.fn(async () => ({})).mockRejectedValueOnce(new Error("Workflow temporarily unavailable"));
+    globalThis.__contentHubResearchWorkflow__ = { create: dispatch };
+    try {
+      await updateResearchSettings("changed-daily", { dailyTime: "09:15", dailyTimezone: "Asia/Kolkata" });
+      now.mockReturnValue(Date.parse("2026-10-23T03:45:00Z"));
+      expect(await processResearchJob({ operation: "daily", scheduledTime: Date.now() })).toEqual({ dispatched: 0 });
+      const queued = (await getResearchSnapshot("changed-daily")).runs[0];
+      await updateResearchSettings("changed-daily", { dailyTime: "05:00", dailyTimezone: "UTC" });
+      now.mockReturnValue(Date.parse("2026-10-23T05:00:00Z"));
+      dispatch.mockImplementationOnce(async () => {
+        execute({ queries: [
+          { sql: "UPDATE research_runs SET status='completed' WHERE id=?", params: [queued.id] },
+          { sql: "UPDATE research_settings SET daily_claim_id='interrupted-worker',daily_claim_until=? WHERE team_id='changed-daily'", params: [Date.now() - 1] },
+        ] });
+        return {};
+      });
+      expect(await processResearchJob({ operation: "daily", scheduledTime: Date.now() })).toEqual({ dispatched: 0 });
+      expect(dispatch.mock.calls[0]).toEqual(dispatch.mock.calls[1]);
+      expect(execute({ queries: [{ sql: "SELECT daily_pending_run_id FROM research_settings WHERE team_id='changed-daily'" }] })[0].results).toEqual([{ daily_pending_run_id: queued.id }]);
+      expect(await processResearchJob({ operation: "daily", scheduledTime: Date.now() })).toEqual({ dispatched: 1 });
+      expect((await getResearchSnapshot("changed-daily")).settings.nextDailyAt).toBe(Date.parse("2026-10-24T05:00:00Z"));
+      expect(execute({ queries: [{ sql: "SELECT daily_pending_run_id FROM research_settings WHERE team_id='changed-daily'" }] })[0].results).toEqual([{ daily_pending_run_id: null }]);
+      expect(await processResearchJob({ operation: "daily", scheduledTime: Date.now() })).toEqual({ dispatched: 0 });
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      expect((await getResearchSnapshot("changed-daily")).runs).toHaveLength(1);
+    } finally {
+      now.mockRestore();
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+    }
+  }, 30_000);
   it("dispatches one editorial scan of exactly24hours daily, with model work in durable steps", async () => {
     execute({
       queries: [
@@ -524,6 +643,7 @@ describe("research persistence and team isolation", () => {
     const previousKey = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "test-daily-key";
     try {
+      expect(await processResearchJob({ operation: "daily", scheduledTime: Date.parse("2026-10-23T03:01:00Z") })).toEqual({ dispatched: 0 });
       expect(await processResearchJob({ operation: "daily" })).toEqual({
         dispatched: 1,
       });
@@ -958,6 +1078,61 @@ describe("research persistence and team isolation", () => {
       else process.env.OPENAI_API_KEY = priorKey;
     }
   }, 20_000);
+  it("keeps usage totals isolated, prices once, and buckets revisions on their own billing date", async () => {
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('usage','Usage','usage',0,0)" },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp) VALUES('usage-run','usage','scan','completed',1,?,'ICP')", params: [Date.parse('2026-10-01T00:00:00Z')] },
+    ] });
+    const context = { teamId: 'usage', runId: 'usage-run', stage: 'research' as const, operation: 'screen' };
+    const id = await beginResearchUsage(context, 'gpt-6-luna');
+    const response = { model: 'gpt-6-luna', tier: 'default', status: 'completed', usage: { input_tokens: 1000, output_tokens: 100, input_tokens_details: { cached_tokens: 100, cache_write_tokens: 200 } } };
+    await finishResearchUsage(id, context, response);
+    await finishResearchUsage(id, context, response);
+    const revision = await beginResearchUsage({ ...context, stage: 'slack_revision', operation: 'rewrite' }, 'gpt-6-luna');
+    await finishResearchUsage(revision, context, { ...response, usage: { input_tokens: 2000, output_tokens: 200 } });
+    const interrupted = await beginResearchUsage(context, 'gpt-6-luna');
+    await finishResearchUsage(interrupted, context, { model: 'gpt-6-luna', tier: 'default', status: 'unknown' });
+    execute({ queries: [
+      { sql: "UPDATE research_usage SET created_at=? WHERE id=?", params: [Date.parse('2026-10-01T00:10:00Z'), id] },
+      { sql: "UPDATE research_usage SET created_at=? WHERE id=?", params: [Date.parse('2026-09-30T23:40:00Z'), revision] },
+    ] });
+    const india = await getResearchUsage('usage', 'Asia/Kolkata');
+    const utc = await getResearchUsage('usage', 'UTC');
+    expect(india.allTime).toMatchObject({ inputTokens: 3000, outputTokens: 300, requestCount: 3, estimatedRequests: 1, unknownRequests: 1 });
+    expect(india.allTime.costUsd).toBeCloseTo(0.000496, 9);
+    expect(india.monthly.find(row => row.month === '2026-10')?.inputTokens).toBe(3000);
+    expect(utc.monthly.find(row => row.month === '2026-09')?.inputTokens).toBe(2000);
+    expect(india.runs[0].stages.find(row => row.stage === 'slack_revision')?.inputTokens).toBe(2000);
+    expect(india.runs[0].inputTokens).toBe(3000);
+    expect((await getResearchUsage('b', 'UTC')).allTime.requestCount).toBe(0);
+    expect(execute({ queries: [{ sql: "SELECT input_tokens,output_tokens FROM research_runs WHERE id='usage-run'" }] })[0].results).toEqual([{ input_tokens: 3000, output_tokens: 300 }]);
+    await expect(getResearchUsage('usage', 'Invalid/Timezone')).rejects.toThrow('timezone');
+  });
+
+  it("retains billed tokens for malformed or incomplete responses and flags unknown network outcomes", async () => {
+    execute({ queries: [{ sql: "INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp) VALUES('usage-errors','usage','scan','completed',1,?,'ICP')", params: [Date.now()] }] });
+    const context = { teamId: 'usage', runId: 'usage-errors', stage: 'draft_generation' as const, operation: 'draft' };
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'test-key';
+    const fetcher = vi.spyOn(globalThis, 'fetch');
+    try {
+      fetcher.mockResolvedValueOnce(Response.json({ status: 'completed', usage: { input_tokens: 100, output_tokens: 30 }, output: [{ content: [{ type: 'output_text', text: 'invalid json' }] }] }));
+      await expect(callResearchModel('system', {}, {}, 100, context)).rejects.toThrow();
+      fetcher.mockResolvedValueOnce(Response.json({ status: 'incomplete', usage: { input_tokens: 200, output_tokens: 40 } }));
+      await expect(callResearchModel('system', {}, {}, 100, context)).rejects.toThrow('did not complete');
+      fetcher.mockRejectedValueOnce(new Error('Network interrupted'));
+      await expect(callResearchModel('system', {}, {}, 100, context)).rejects.toThrow('Network interrupted');
+      const summary = await getResearchUsage('usage', 'UTC');
+      const run = summary.runs.find(row => row.runId === 'usage-errors')!;
+      expect(run).toMatchObject({ inputTokens: 300, outputTokens: 70, requestCount: 3, unknownRequests: 1 });
+      expect(run.stages.find(row => row.stage === 'draft_generation')?.inputTokens).toBe(300);
+    } finally {
+      fetcher.mockRestore();
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+    }
+  });
+
   it("saves exactly one idea on repeated requests and rejects cross-team finding access", async () => {
     const runId = "saved-run";
     const now = Date.now();

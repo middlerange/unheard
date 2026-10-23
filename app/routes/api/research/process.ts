@@ -8,6 +8,7 @@ export const researchJobSchema = z
     runId: z.string().max(100).optional(),
     sourceId: z.string().max(200).optional(),
     error: z.string().max(1000).optional(),
+    scheduledTime: z.number().int().nonnegative().optional(),
   })
   .strict();
 export async function handleResearchProcess(request: Request) {

@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "./db/client";
 import {
@@ -15,6 +15,12 @@ import {
   research_sources,
 } from "./schema";
 import { RESEARCH_SOURCE_SEEDS } from "./research-sources";
+import {
+  isResearchDailyTime,
+  isResearchTimezone,
+  isSameResearchLocalDay,
+  nextResearchDailyAt,
+} from "./research-schedule";
 import type {
   ResearchFinding,
   ResearchDraftContent,
@@ -176,7 +182,13 @@ export async function getResearchSnapshot(
     configured: Boolean(process.env.OPENAI_API_KEY),
     workflowConfigured: Boolean(globalThis.__contentHubResearchWorkflow__),
     model: RESEARCH_MODEL,
-    settings: { icp: settings!.icp, dailyEnabled: settings!.daily_enabled },
+    settings: {
+      icp: settings!.icp,
+      dailyEnabled: settings!.daily_enabled,
+      dailyTime: settings!.daily_time,
+      dailyTimezone: settings!.daily_timezone,
+      nextDailyAt: settings!.next_daily_at,
+    },
     sources: RESEARCH_SOURCE_SEEDS.map((seed) => {
       const stored = sources.find((row) => row.seed_id === seed.id);
       return {
@@ -250,11 +262,27 @@ export async function updateResearchSettings(teamId: string, input: unknown) {
     .object({
       icp: z.string().trim().min(20).max(4000).optional(),
       dailyEnabled: z.boolean().optional(),
+      dailyTime: z.string()
+        .refine(isResearchDailyTime, "Use a daily time in HH:mm format")
+        .nullable().optional(),
+      dailyTimezone: z.string().max(100)
+        .refine(isResearchTimezone, "Use a valid IANA timezone").optional(),
     })
     .strict()
     .parse(input);
   await initializeResearch(teamId);
   const db = await getDb();
+  const settings = await db.select().from(research_settings)
+    .where(eq(research_settings.team_id, teamId)).get();
+  const time = data.dailyTime === undefined ? settings!.daily_time : data.dailyTime;
+  const timezone = data.dailyTimezone ?? settings!.daily_timezone;
+  const enabled = data.dailyEnabled ?? settings!.daily_enabled;
+  const scheduleChanged = time !== settings!.daily_time
+    || timezone !== settings!.daily_timezone
+    || enabled !== settings!.daily_enabled;
+  const now = Date.now();
+  const ranToday = settings!.last_daily_at !== null
+    && isSameResearchLocalDay(settings!.last_daily_at, now, timezone);
   await db
     .update(research_settings)
     .set({
@@ -262,7 +290,16 @@ export async function updateResearchSettings(teamId: string, input: unknown) {
       ...(data.dailyEnabled !== undefined
         ? { daily_enabled: data.dailyEnabled }
         : {}),
-      updated_at: Date.now(),
+      ...(scheduleChanged ? {
+        daily_time: time,
+        daily_timezone: timezone,
+        next_daily_at: time && enabled
+          ? nextResearchDailyAt(time, timezone, now, ranToday)
+          : null,
+        daily_claim_id: null,
+        daily_claim_until: null,
+      } : {}),
+      updated_at: now,
     })
     .where(eq(research_settings.team_id, teamId));
   return { ok: true };
@@ -309,6 +346,7 @@ export async function createResearchRun(
   teamId: string,
   input: unknown,
   editorial = false,
+  scheduledRunId?: string,
 ) {
   const data = z
     .object({
@@ -341,7 +379,8 @@ export async function createResearchRun(
     )
     .get();
   if (active) {
-    await dispatchResearchRun(active.id);
+    if (!scheduledRunId || active.id === scheduledRunId)
+      await dispatchResearchRun(active.id);
     return { run: runView(active) };
   }
   const [settings, sources, profiles] = await Promise.all([
@@ -377,7 +416,7 @@ export async function createResearchRun(
     .map((source) => source.seed_id)
     .filter((id) => RESEARCH_SOURCE_SEEDS.some((seed) => seed.id === id));
   if (!ids.length) throw new Error("Enable at least one research source");
-  const id = crypto.randomUUID();
+  const id = scheduledRunId ?? crypto.randomUUID();
   const row = await db
     .insert(research_runs)
     .values({
@@ -414,7 +453,8 @@ export async function createResearchRun(
       )
       .get();
     if (!other) throw new Error("Run could not be created");
-    await dispatchResearchRun(other.id);
+    if (!scheduledRunId || other.id === scheduledRunId)
+      await dispatchResearchRun(other.id);
     return { run: runView(other) };
   }
   try {
@@ -423,8 +463,10 @@ export async function createResearchRun(
     await db
       .update(research_runs)
       .set({
-        status: "failed",
-        completed_at: Date.now(),
+        // A scheduled run remains queued so a cron retry can dispatch this same
+        // durable workflow ID without creating another paid research run.
+        status: scheduledRunId ? "queued" : "failed",
+        completed_at: scheduledRunId ? null : Date.now(),
         error:
           "Workflow dispatch failed. Retry after checking the Cloudflare binding.",
       })
@@ -603,6 +645,7 @@ async function cachedModel(
     { icp: run.icp, items: input },
     schema,
     outputTokens,
+    { teamId: run.team_id, runId: run.id, stage: "research", operation: stage },
   );
   await db
     .insert(research_cache)
@@ -613,13 +656,6 @@ async function cachedModel(
       created_at: Date.now(),
     })
     .onConflictDoNothing();
-  await db
-    .update(research_runs)
-    .set({
-      input_tokens: sql`${research_runs.input_tokens} + ${result.inputTokens}`,
-      output_tokens: sql`${research_runs.output_tokens} + ${result.outputTokens}`,
-    })
-    .where(eq(research_runs.id, run.id));
   return result.value as unknown;
 }
 async function rankRun(run: typeof research_runs.$inferSelect) {
@@ -819,6 +855,15 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
 export async function processResearchJob(job: ResearchJob) {
   const db = await getDb();
   if (job.operation === "daily") {
+    const now = Date.now();
+    // Existing rolling schedules keep their hourly cadence. Fixed wall-clock
+    // schedules are checked every minute by the Worker's existing cron trigger.
+    const rollingTick = job.scheduledTime === undefined
+      || job.scheduledTime % 3_600_000 === 0;
+    const unclaimed = or(
+      isNull(research_settings.daily_claim_until),
+      lte(research_settings.daily_claim_until, now),
+    );
     const due = await db
       .select()
       .from(research_settings)
@@ -826,33 +871,105 @@ export async function processResearchJob(job: ResearchJob) {
         and(
           eq(research_settings.daily_enabled, true),
           or(
-            isNull(research_settings.last_daily_at),
-            lte(research_settings.last_daily_at, Date.now() - 86_400_000),
+            and(
+              isNotNull(research_settings.daily_time),
+              lte(research_settings.next_daily_at, now),
+            ),
+            rollingTick ? and(
+              isNull(research_settings.daily_time),
+              or(
+                isNull(research_settings.last_daily_at),
+                lte(research_settings.last_daily_at, now - 86_400_000),
+              ),
+            ) : undefined,
           ),
+          unclaimed,
         ),
       )
       .limit(25)
       .all();
     let dispatched = 0;
     for (const settings of due) {
+      const claimId = crypto.randomUUID();
+      const claim = await db.update(research_settings).set({
+        daily_claim_id: claimId,
+        daily_claim_until: now + 600_000,
+      }).where(and(
+        eq(research_settings.team_id, settings.team_id),
+        eq(research_settings.daily_enabled, true),
+        settings.daily_time === null
+          ? isNull(research_settings.daily_time)
+          : eq(research_settings.daily_time, settings.daily_time),
+        eq(research_settings.daily_timezone, settings.daily_timezone),
+        settings.next_daily_at === null
+          ? isNull(research_settings.next_daily_at)
+          : eq(research_settings.next_daily_at, settings.next_daily_at),
+        settings.last_daily_at === null
+          ? isNull(research_settings.last_daily_at)
+          : eq(research_settings.last_daily_at, settings.last_daily_at),
+        unclaimed,
+      )).returning({ teamId: research_settings.team_id }).get();
+      if (!claim) continue;
       try {
-        const { run } = await createResearchRun(
-          settings.team_id,
-          {
-            days: 1,
-            mode: "scan",
-          },
-          true,
-        );
-        // An existing manual run must not consume today's automatic editorial scan.
-        if (!run.editorial || run.days !== 1) continue;
-        await db
+        const occurrence = settings.daily_time
+          ? `fixed:${settings.daily_timezone}:${settings.daily_time}:${settings.next_daily_at}`
+          : `rolling:${settings.last_daily_at ?? 0}`;
+        let scheduledRunId = settings.daily_pending_run_id;
+        if (!scheduledRunId) {
+          const queued = await db.select().from(research_runs).where(and(
+            eq(research_runs.team_id, settings.team_id),
+            eq(research_runs.status, "queued"),
+          )).get();
+          scheduledRunId = queued?.id.startsWith("daily-")
+            ? queued.id
+            : `daily-${await researchHash(`${settings.team_id}:${occurrence}`)}`;
+          // Persist the association before dispatch, including across settings
+          // edits, so an interrupted recovery cannot create a second workflow.
+          const linked = await db.update(research_settings)
+            .set({ daily_pending_run_id: scheduledRunId })
+            .where(and(
+              eq(research_settings.team_id, settings.team_id),
+              eq(research_settings.daily_claim_id, claimId),
+            )).returning({ teamId: research_settings.team_id }).get();
+          if (!linked) continue;
+        }
+        const previous = await db.select().from(research_runs)
+          .where(eq(research_runs.id, scheduledRunId)).get();
+        // Recover a dispatch that succeeded before a Worker interruption. An
+        // unrelated active manual/editorial run leaves this occurrence due.
+        const result = previous && terminal(previous.status)
+          ? { run: runView(previous) }
+          : await createResearchRun(
+            settings.team_id, { days: 1, mode: "scan" }, true, scheduledRunId,
+          );
+        if (result.run.id !== scheduledRunId) continue;
+        const dispatchedAt = Date.now();
+        const saved = await db
           .update(research_settings)
-          .set({ last_daily_at: Date.now() })
-          .where(eq(research_settings.team_id, settings.team_id));
-        dispatched++;
+          .set({
+            last_daily_at: dispatchedAt,
+            next_daily_at: settings.daily_time
+              ? nextResearchDailyAt(settings.daily_time, settings.daily_timezone, dispatchedAt, true)
+              : null,
+            daily_claim_id: null,
+            daily_claim_until: null,
+            daily_pending_run_id: null,
+          })
+          .where(and(
+            eq(research_settings.team_id, settings.team_id),
+            eq(research_settings.daily_claim_id, claimId),
+          ))
+          .returning({ teamId: research_settings.team_id }).get();
+        if (saved) dispatched++;
       } catch {
         /* Leave the team due so the next scheduled tick retries. */
+      } finally {
+        await db.update(research_settings)
+          .set({ daily_claim_id: null, daily_claim_until: null })
+          .where(and(
+            eq(research_settings.team_id, settings.team_id),
+            eq(research_settings.daily_claim_id, claimId),
+          ));
       }
     }
     return { dispatched };
@@ -883,7 +1000,7 @@ export async function processResearchJob(job: ResearchJob) {
   if (job.operation === "plan") {
     await db
       .update(research_runs)
-      .set({ status: "collecting" })
+      .set({ status: "collecting", error: null })
       .where(eq(research_runs.id, run.id));
     return { sourceIds: JSON.parse(run.source_ids) as string[] };
   }

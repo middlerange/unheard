@@ -5,6 +5,7 @@ import { AlertCircle, ArrowUpRight, Check, Clock, ExternalLink, Globe, Lightbulb
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import { ResearchUsage } from '@/components/research-usage';
 import { cn } from '@/lib/utils';
 import { useWorkspace } from '@/lib/workspace-context';
 import type { SlackSettings } from '@/lib/slack-types';
@@ -12,7 +13,7 @@ import type { ResearchDraft, ResearchFinding, ResearchRun, ResearchSnapshot, Res
 
 export const Route = createFileRoute('/research')({ component: ResearchPage });
 
-type Tab = 'drafts' | 'findings' | 'sources' | 'runs' | 'audience';
+type Tab = 'drafts' | 'findings' | 'sources' | 'runs' | 'costs' | 'audience';
 type FindingFilter = 'new' | 'saved' | 'dismissed' | 'all';
 const panel = 'rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)] shadow-panel';
 const muted = 'text-[var(--color-text-muted)]';
@@ -42,8 +43,8 @@ function message(error: unknown) {
   return error instanceof Error ? error.message : 'Something went wrong. Please try again.';
 }
 
-function date(value: number, time = false) {
-  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric', ...(time ? { hour: 'numeric', minute: '2-digit' } : {}) }).format(value);
+function date(value: number, time = false, timezone?: string) {
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric', ...(time ? { hour: 'numeric', minute: '2-digit' } : {}), ...(timezone ? { timeZone: timezone } : {}) }).format(value);
 }
 
 function ResearchPage() {
@@ -113,6 +114,7 @@ function ResearchPage() {
   }
 
   function startRun(days: 1 | 30) {
+    if (hasActiveRun || pending) return;
     void mutate(`scan-${days}`,  async () => {
       const { run } = await request<{ run: ResearchRun }>('/api/research/runs', jsonRequest('POST', { days, mode: 'scan' }));
       if (alive.current) setData(current => current ? { ...current, runs: [run, ...current.runs.filter(item => item.id !== run.id)] } : current);
@@ -174,6 +176,7 @@ function ResearchPage() {
     { id: 'findings', label: 'Findings', count: newCount },
     { id: 'sources', label: 'Sources', count: enabledCount },
     { id: 'runs', label: 'Run history' },
+    { id: 'costs', label: 'Costs' },
     { id: 'audience', label: 'Audience' },
   ];
 
@@ -196,9 +199,12 @@ function ResearchPage() {
           <p className="text-base font-medium text-[var(--color-text-secondary)] [text-wrap:balance]">Find the ideas worth paying attention to.</p>
           <p className={cn('text-sm leading-6 [text-wrap:pretty]', muted)}>Practitioner insights, original research, and product conversations, ranked for your audience. Each day, review the last 24 hours and turn the best matches into posts for your approval.</p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" onClick={() => startRun(30)} disabled={!canRun} className={press}>{pending === 'scan-30' ? <Loader2 className="animate-spin" /> : <Search />}30-day discovery</Button>
-          <Button onClick={() => startRun(1)} disabled={!canRun} className={press}>{pending === 'scan-1' ? <Loader2 className="animate-spin" /> : <Sparkles />}Scan last 24 hours</Button>
+        <div className="space-y-2">
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={() => startRun(30)} disabled={!canRun} className={press}>{pending === 'scan-30' ? <Loader2 className="animate-spin" /> : <Search />}30-day discovery</Button>
+            <Button onClick={() => startRun(1)} disabled={!canRun} className={press} aria-describedby="research-run-now-help">{pending === 'scan-1' ? <Loader2 className="animate-spin" /> : <Sparkles />}Run now</Button>
+          </div>
+          <p id="research-run-now-help" className={cn('max-w-sm text-xs leading-5', muted)}>{hasActiveRun ? 'A scan is already running. You can close your browser while it finishes.' : 'Scan the last 24 hours and draft strong matches. You can close your browser after starting.'}</p>
         </div>
       </div>
 
@@ -207,8 +213,8 @@ function ResearchPage() {
       {!ready && <div className={cn(panel, 'flex items-start gap-3 border-amber-400/20 p-5')}><AlertCircle className="mt-0.5 size-5 shrink-0 text-amber-400" /><div className="space-y-2"><h2 className="text-sm font-medium">Finish research setup</h2><p className={cn('max-w-3xl text-sm leading-6', muted)}>{!data.configured ? 'Add OPENAI_API_KEY to the Cloudflare Worker secrets to enable research ranking. The key stays on the server.' : ''}{!data.configured && !data.workflowConfigured ? ' ' : ''}{!data.workflowConfigured ? 'The research background workflow also needs to be deployed and connected before collection can run.' : ''}</p><Link to="/settings/setup" className="inline-flex min-h-10 items-center gap-1 text-sm text-[var(--color-brand)] hover:underline">Open setup guide<ArrowUpRight className="size-4" /></Link></div></div>}
 
       <div className={cn(panel, 'flex flex-wrap items-center justify-between gap-5 px-5 py-4')}>
-        <div className="flex items-center gap-3"><div className="grid size-10 place-items-center rounded-xl bg-[var(--color-accent)]/10 text-[var(--color-brand)]"><Rss className="size-5" /></div><div><div className="flex items-center gap-2 text-sm font-medium">Daily research<span className={cn('size-1.5 rounded-full', data.settings.dailyEnabled && ready ? 'bg-emerald-400' : 'bg-[var(--color-text-tertiary)]')} /></div><p className={cn('mt-1 text-xs', muted)}>{data.settings.dailyEnabled ? ready ? 'Scans the last 24 hours and drafts up to two strong matches for review.' : 'Enabled · waiting for setup.' : 'Paused. You can still run a scan manually.'}</p></div></div>
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-2"><span className={cn('text-xs tabular-nums', muted)}>{enabledCount} sources enabled · {data.model}</span><Toggle label="Enable daily research" checked={data.settings.dailyEnabled} disabled={Boolean(pending)} onChange={() => updateDaily(!data.settings.dailyEnabled)} /></div>
+        <div className="flex items-center gap-3"><div className="grid size-10 shrink-0 place-items-center rounded-xl bg-[var(--color-accent)]/10 text-[var(--color-brand)]"><Rss className="size-5" /></div><div><div className="flex items-center gap-2 text-sm font-medium">Daily research<span className={cn('size-1.5 rounded-full', data.settings.dailyEnabled && ready ? 'bg-emerald-400' : 'bg-[var(--color-text-tertiary)]')} /></div><p className={cn('mt-1 text-xs leading-5', muted)}>{data.settings.dailyEnabled ? ready ? 'Scans the last 24 hours and drafts up to two strong matches for review.' : 'Enabled · waiting for setup.' : 'Paused. You can still run a scan manually.'}</p>{data.settings.dailyEnabled && data.settings.nextDailyAt && <p className={cn('mt-1 text-xs leading-5 tabular-nums', muted)}>Next: {date(data.settings.nextDailyAt, true, data.settings.dailyTimezone)} · {data.settings.dailyTimezone}</p>}</div></div>
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2"><span className={cn('text-xs tabular-nums', muted)}>{enabledCount} sources enabled · {data.model}</span><Link to="/settings/research" className="inline-flex min-h-10 items-center gap-1 text-xs text-[var(--color-brand)] hover:underline">Schedule settings<ArrowUpRight className="size-3.5" /></Link><Toggle label="Enable daily research" checked={data.settings.dailyEnabled} disabled={Boolean(pending)} onChange={() => updateDaily(!data.settings.dailyEnabled)} /></div>
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-4 py-3"><div className="flex items-start gap-2.5"><MessageSquare className="mt-0.5 size-4 shrink-0 text-[var(--color-brand)]" /><p className={cn('text-xs leading-5', muted)}>{slack?.enabled && slack.configured ? 'Drafts go to Slack for approval. Reply in the thread to request edits, then approve the latest version to publish.' : 'Connect Slack to receive daily drafts, request edits in a thread, and approve publishing. Drafts stay here until connected.'}</p></div><div className="flex flex-wrap gap-x-4"><Link to="/settings/research-profiles" className="inline-flex min-h-10 shrink-0 items-center gap-1 text-xs text-[var(--color-brand)] hover:underline">Research profiles<ArrowUpRight className="size-3.5" /></Link><Link to="/settings/slack" className="inline-flex min-h-10 shrink-0 items-center gap-1 text-xs text-[var(--color-brand)] hover:underline">{slack?.configured ? 'Slack settings' : 'Connect Slack'}<ArrowUpRight className="size-3.5" /></Link></div></div>
@@ -243,6 +249,8 @@ function ResearchPage() {
           <div><h2 className="text-sm font-medium">Research and draft history</h2><p className={cn('mt-2 text-sm leading-6', muted)}>Track each run, source coverage, and model usage. Daily scans cover the last 24 hours and prepare post drafts. Discovery scans look back 30 days and rank findings.</p></div>
           {data.runs.length ? <div className="space-y-3">{data.runs.map(run => <RunCard key={run.id} run={run} />)}</div> : <EmptyState icon={Clock} title="No research runs yet" description="Your first scan will appear here, with its progress and token usage." />}
         </>}
+
+        {tab === 'costs' && <ResearchUsage timezone={data.settings.dailyTimezone} active={hasActiveRun || hasDraftWork} />}
 
         {tab === 'audience' && <form className={cn(panel, 'max-w-3xl p-5 sm:p-6')} onSubmit={event => { event.preventDefault(); void mutate('icp', async () => { await request('/api/research', jsonRequest('PATCH', { icp: (icpDraft ?? data.settings.icp).trim() })); setIcpDraft(null); toast.success('Audience updated. Your next scan will use this context.'); }); }}>
           <div className="flex items-start gap-3"><Settings className="mt-0.5 size-5 text-[var(--color-brand)]" /><div><h2 className="text-base font-medium">What is worth your audience’s time?</h2><p className={cn('mt-2 text-sm leading-6', muted)}>Describe your ideal customer, their responsibilities, and the problems they care about. This guides source relevance and suggested content angles. Give each posting profile its own audience and writing instructions in Research profiles.</p></div></div>

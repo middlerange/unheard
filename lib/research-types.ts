@@ -60,7 +60,13 @@ export type ResearchSnapshot = {
   configured: boolean;
   workflowConfigured: boolean;
   model: string;
-  settings: { icp: string; dailyEnabled: boolean };
+  settings: {
+    icp: string;
+    dailyEnabled: boolean;
+    dailyTime: string | null;
+    dailyTimezone: string;
+    nextDailyAt: number | null;
+  };
   sources: ResearchSource[];
   runs: ResearchRun[];
   findings: ResearchFinding[];
@@ -71,6 +77,7 @@ export type ResearchJob = {
   runId?: string;
   sourceId?: string;
   error?: string;
+  scheduledTime?: number;
 };
 
 export type ResearchDraftContent = {

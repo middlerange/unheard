@@ -25,7 +25,14 @@ blocked, paywalled, or inaccessible pages can fail; source errors appear in the 
 ## Collection and scans
 
 Daily research starts after a team first opens Research. The existing minute
-cron checks due teams hourly and scans the preceding 24 hours once every day. It
+cron checks fixed schedules every minute and scans the preceding 24 hours. Set
+**Settings → Research schedule** to a local time and IANA timezone; the next
+start is shown there and in Research. Teams without a saved fixed time retain
+their hourly eligibility check and rolling 24-hour interval. Fixed schedules run
+once per local day, move a nonexistent daylight-saving time to the first valid
+minute, and use the first occurrence when a clock time repeats. A manual scan
+does not reset the automatic schedule. If another scan is active, the scheduled
+occurrence waits for it to finish. It
 ranks fresh evidence and proposes up to two strong post drafts for Slack review.
 Daily ranking and drafting consume OpenAI API tokens. The daily switch is
 team-specific. **Collect new items** only collects and makes no model calls. See
@@ -65,3 +72,35 @@ For local verification, apply migrations and use `wrangler dev` after building;
 the standalone Vite server does not provide a local Workflow binding. Research
 tests cover real SQLite migrations and team isolation, evidence validation,
 collection and cache behavior, save idempotency, fetch limits, and workflow signing.
+
+## Usage and cost estimates
+
+Open **Research → Costs** for today, this month, all-time, daily/monthly history
+and the 50 most recent runs, with separate research, draft-generation and Slack
+revision costs. Reporting uses the selected timezone and dates each new request
+when it starts, so later revisions fall in the period in which they were requested.
+The page refreshes while work is active. **Run now** starts a 24-hour scan and
+drafting workflow; the browser can close. A team has one active research run at a
+time to avoid duplicate collection and paid analysis. Collection sources run
+independently in durable steps; other app work can continue alongside the scan.
+
+Every model request gets a durable usage record before the API call. Response
+usage is saved before output parsing or editorial validation, including rejected
+or incomplete output. Costs use input/output tokens, provider cache reads and
+30-minute/12-hour cache writes, returned processing tier and snapshotted model
+rates. Unknown/interrupted usage is flagged and excluded from dollar totals,
+not reported as free. Application result-cache hits make no model call and add
+no model cost. Tokens remain visible in run history; do not sum draft counters
+on top of the request ledger. The latest rate card is dated 23 October 2026;
+rates must be updated deliberately when provider pricing changes. The request
+explicitly selects standard processing.
+
+Migration `0029_research_usage.sql` copies existing combined run token totals
+once as historical estimates, using the conservative default cache-write rate.
+Their stage breakdown, cache billing and original revision dates cannot be
+recovered; historical entries are dated by run creation. Finish old-worker scans
+before applying this migration. New calls append to the ledger and do not
+re-import combined counters. Costs are USD estimates, not invoices, and exclude
+taxes, Cloudflare/hosting/storage, social-provider fees and unrelated AI features.
+Reconcile with the provider billing dashboard for final charges. Migration
+`0028_research_schedule.sql` adds the per-team schedule and dispatch lease.
