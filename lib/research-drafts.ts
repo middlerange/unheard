@@ -18,6 +18,7 @@ import {
 } from "./research-model";
 import { RESEARCH_TEXT_PLATFORMS } from "./research-profiles";
 import { PLATFORM_LIMITS } from "./validation";
+import { SLACK_TEST_PROMPT } from "./slack-test-content";
 import type { ResearchDraftContent } from "./research-types";
 
 const DRAFT_PROMPT_VERSION = "research-draft-v2";
@@ -362,7 +363,11 @@ export async function rewriteResearchDraftContent(
       (channel) =>
         channel.id === target.channelId && channel.platform === target.platform,
     );
-    if (!profile?.research_enabled || profile.system_prompt.trim().length < 20)
+    if (
+      !profile ||
+      (!draft.is_test &&
+        (!profile.research_enabled || profile.system_prompt.trim().length < 20))
+    )
       throw new Error(
         "A selected publishing profile is no longer enabled for research",
       );
@@ -370,7 +375,7 @@ export async function rewriteResearchDraftContent(
       id: profile.id,
       platform: profile.platform,
       name: profile.name,
-      systemPrompt: profile.system_prompt,
+      systemPrompt: draft.is_test ? SLACK_TEST_PROMPT : profile.system_prompt,
     };
   });
   const result = await generateDraft(

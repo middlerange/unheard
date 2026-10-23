@@ -217,7 +217,7 @@ export async function getPostWithDetails(id: string, teamId: string): Promise<Po
 
 export async function listPostsWithDetails(teamId: string, states?: PostState[]): Promise<PostWithDetails[]> {
   const db = await getDb();
-  const conditions = [eq(schema.posts.team_id, teamId)];
+  const conditions = [eq(schema.posts.team_id, teamId), eq(schema.posts.is_test, false)];
   
   if (states && states.length > 0) {
     conditions.push(inArray(schema.posts.state, states));
@@ -235,7 +235,7 @@ export async function getDueScheduledPosts(): Promise<PostWithDetails[]> {
   const db = await getDb();
   const now = Date.now();
   const rows = await db.select().from(schema.posts)
-    .where(sql`${schema.posts.state} = 'scheduled' AND ${schema.posts.publish_at} <= ${now}`);
+    .where(sql`${schema.posts.state} = 'scheduled' AND ${schema.posts.publish_at} <= ${now} AND ${schema.posts.is_test} = 0`);
   return loadDetails(rows as Post[]);
 }
 

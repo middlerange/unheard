@@ -1,0 +1,4 @@
+export const SLACK_TEST_PROMPT =
+  "Write a short internal setup sample explaining how a reviewer can request changes in a Slack thread, review the updated copy, and approve the latest version. This is a test review: nothing will publish. Keep every claim grounded in the supplied setup sample, preserve its source URL, and do not claim this is external research.";
+export const SLACK_TEST_EVIDENCE =
+  "A reviewer can reply in a Slack review thread to request a change to the draft. The app prepares an updated preview in the same thread. A reviewer should inspect the latest preview before approving it. Ordinary thread replies do not approve a post. This internal setup sample tests the review workflow; approval of a test review never publishes to any social profile.";

@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "./db/client";
 import {
@@ -138,7 +138,7 @@ export async function getResearchSnapshot(
     db
       .select()
       .from(research_findings)
-      .where(eq(research_findings.team_id, teamId))
+      .where(and(eq(research_findings.team_id, teamId), ne(research_findings.source_id, "slack-test-review")))
       .orderBy(desc(research_findings.score))
       .limit(100)
       .all(),
@@ -206,6 +206,7 @@ export async function getResearchSnapshot(
         })),
       },
       revision: draft.revision,
+      isTest: draft.is_test,
       status: draft.status as ResearchSnapshot["drafts"][number]["status"],
       postId: draft.post_id,
       slackChannelId: draft.slack_channel_id,

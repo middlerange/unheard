@@ -83,7 +83,7 @@ export async function handleSlackEvents(request: Request) {
       { error: "Invalid Slack signature or disabled integration" },
       { status: 401 },
     );
-  if (!integration.enabled || data.type !== "event_callback") return ack();
+  if (data.type !== "event_callback") return ack();
   const event = data.event as Record<string, unknown> | undefined;
   if (
     !event ||
@@ -130,7 +130,7 @@ export async function handleSlackEvents(request: Request) {
       )
       .limit(1)
   )[0];
-  if (!draft) return ack();
+  if (!draft || (!integration.enabled && !draft.is_test)) return ack();
   await enqueueSlackJob(
     integration.team_id,
     "edit",
@@ -180,7 +180,6 @@ export async function handleSlackInteractions(request: Request) {
       { error: "Invalid Slack signature or disabled integration" },
       { status: 401 },
     );
-  if (!integration.enabled) return ack();
   const action = data.actions?.[0];
   if (
     data.type !== "block_actions" ||
@@ -212,6 +211,7 @@ export async function handleSlackInteractions(request: Request) {
   const draft = await getResearchDraft(integration.team_id, value.draftId);
   if (
     !draft ||
+    (!integration.enabled && !draft.is_test) ||
     draft.slack_channel_id !== data.channel.id ||
     draft.slack_message_ts !== data.message?.ts
   )

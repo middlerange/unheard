@@ -29,6 +29,8 @@ import {
   processResearchDraftJob,
   rewriteResearchDraftContent,
 } from "./research-drafts";
+import { createSlackTestReview } from "./slack-test-review";
+import { SLACK_TEST_EVIDENCE, SLACK_TEST_PROMPT } from "./slack-test-content";
 import type { ResearchSourceSeed } from "./research-types";
 import { RESEARCH_SOURCE_SEEDS } from "./research-sources";
 const state = vi.hoisted(() => ({ db: undefined as unknown }));
@@ -858,6 +860,98 @@ describe("research persistence and team isolation", () => {
         skipped: true,
       });
       expect(fetcher).toHaveBeenCalledTimes(4);
+    } finally {
+      fetcher.mockRestore();
+      if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = priorKey;
+    }
+  }, 20_000);
+  it("rewrites setup samples with real evidence loading and model validation while keeping disabled profiles unchanged", async () => {
+    execute({
+      queries: [
+        {
+          sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('test-rewrite','Test rewrite','test-rewrite',0,0)",
+        },
+        {
+          sql: "INSERT INTO channels(id,team_id,name,platform,group_name,research_enabled,system_prompt,created_at) VALUES('test-preview','test-rewrite','Preview only','linkedin','personal',0,'',0)",
+        },
+      ],
+    });
+    const test = await createSlackTestReview(
+      "test-rewrite",
+      "https://example.com",
+    );
+    const priorKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
+    const fetcher = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (url, init) => {
+        expect(String(url)).toBe("https://api.openai.com/v1/responses");
+        const request = JSON.parse(String(init?.body));
+        expect(request.model).toBe("gpt-6-luna");
+        const input = JSON.parse(request.input);
+        expect(input.source.content).toBe(SLACK_TEST_EVIDENCE);
+        expect(input.destinations).toEqual([
+          {
+            id: "test-preview",
+            platform: "linkedin",
+            name: "Preview only",
+            systemPrompt: SLACK_TEST_PROMPT,
+          },
+        ]);
+        expect(input.editorialInstruction).toBe("Make it shorter");
+        return Response.json({
+          status: "completed",
+          output: [
+            {
+              content: [
+                {
+                  type: "output_text",
+                  text: JSON.stringify({
+                    ready: true,
+                    reason: "Internal setup sample",
+                    targets: [
+                      {
+                        channelId: "test-preview",
+                        platform: "linkedin",
+                        content: `Inspect the latest preview before approving. ${input.source.url}`,
+                        thread: [],
+                        supportQuote:
+                          "A reviewer should inspect the latest preview before approving it.",
+                        redditTitle: null,
+                        subreddit: null,
+                      },
+                    ],
+                  }),
+                },
+              ],
+            },
+          ],
+          usage: { input_tokens: 60, output_tokens: 20 },
+        });
+      });
+    try {
+      const result = await rewriteResearchDraftContent(
+        test.draftId,
+        "test-rewrite",
+        "Make it shorter",
+      );
+      expect(result.content.targets[0].content).toContain(
+        "Inspect the latest preview",
+      );
+      expect(result.inputTokens).toBe(60);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      const snapshot = await getResearchSnapshot("test-rewrite");
+      expect(snapshot.drafts[0].isTest).toBe(true);
+      expect(snapshot.findings).toHaveLength(0);
+      expect(snapshot.runs[0].mode).toBe("test");
+      expect(
+        (await getResearchProfiles("test-rewrite")).profiles[0],
+      ).toMatchObject({ enabled: false, systemPrompt: "" });
+      expect(await processResearchDraftJob(snapshot.runs[0].id)).toEqual({
+        drafted: 0,
+        skipped: true,
+      });
     } finally {
       fetcher.mockRestore();
       if (priorKey === undefined) delete process.env.OPENAI_API_KEY;

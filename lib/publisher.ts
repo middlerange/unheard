@@ -18,6 +18,7 @@ import { htmlToText } from './text';
 import { resolvePostMedia } from './post-media';
 import { notifyPublished, notifyFailed } from './telegram';
 import { decrypt } from './crypto';
+import { assertNotTestPost } from './slack-post-lock';
 
 async function resolveTwitterCreds(channelId: string, teamId: string): Promise<TwitterCreds | undefined> {
   const channel = await getChannel(channelId, teamId);
@@ -184,6 +185,7 @@ async function publishTarget(target: PostWithDetails['targets'][number], allMedi
 }
 
 export async function publishApprovedPost(post: PostWithDetails, teamId: string): Promise<void> {
+  await assertNotTestPost(post.id, teamId);
   const now = Date.now();
   const pendingTargets = targetsPendingPublication(post.targets);
 

@@ -238,7 +238,7 @@ export async function hashPostSnapshot(
   );
 }
 export function buildSlackReviewPacket(
-  draft: Pick<Draft, "id" | "revision">,
+  draft: Pick<Draft, "id" | "revision"> & { is_test?: boolean },
   snapshot: ReturnType<typeof buildApprovalSnapshot>,
   finding: {
     title: string;
@@ -260,7 +260,9 @@ export function buildSlackReviewPacket(
       type: "header",
       text: {
         type: "plain_text",
-        text: `Research post · revision ${draft.revision}`,
+        text: draft.is_test
+          ? "Test review — nothing will publish"
+          : `Research post · revision ${draft.revision}`,
       },
     },
     {
@@ -326,7 +328,9 @@ export function buildSlackReviewPacket(
               ? `Already published · platform post ${alreadyPublished.get(target.target_id)}`
               : progress?.publishedCount
                 ? `Thread progress: ${progress.publishedCount}/${progress.totalCount} parts published. Will resume only remaining replies after approval.`
-                : "Will publish after approval",
+                : draft.is_test
+                  ? "Preview only — nothing will publish"
+                  : "Will publish after approval",
           },
         ],
       });
@@ -375,7 +379,9 @@ export function buildSlackReviewPacket(
     elements: [
       {
         type: "plain_text",
-        text: "Reply in this thread to request edits. Only the current revision’s Approve & publish button publishes. Plain replies never approve.",
+        text: draft.is_test
+          ? "Reply in this thread to request edits, then choose Approve test on the latest preview. Nothing will publish to the displayed profile."
+          : "Reply in this thread to request edits. Only the current revision’s Approve & publish button publishes. Plain replies never approve.",
       },
     ],
   });
@@ -385,15 +391,28 @@ export function buildSlackReviewPacket(
       {
         type: "button",
         action_id: "research_approve",
-        text: { type: "plain_text", text: "Approve & publish" },
+        text: {
+          type: "plain_text",
+          text: draft.is_test ? "Approve test" : "Approve & publish",
+        },
         style: "primary",
         confirm: {
-          title: { type: "plain_text", text: "Publish this exact revision?" },
+          title: {
+            type: "plain_text",
+            text: draft.is_test
+              ? "Approve this test revision?"
+              : "Publish this exact revision?",
+          },
           text: {
             type: "plain_text",
-            text: "This immediately publishes the copy above to every listed destination.",
+            text: draft.is_test
+              ? "This records your test approval. Nothing will publish to any social profile."
+              : "This immediately publishes the copy above to every listed destination.",
           },
-          confirm: { type: "plain_text", text: "Publish" },
+          confirm: {
+            type: "plain_text",
+            text: draft.is_test ? "Approve test" : "Publish",
+          },
           deny: { type: "plain_text", text: "Cancel" },
         },
         value: JSON.stringify({
@@ -420,7 +439,9 @@ export function buildSlackReviewPacket(
       "Draft is too long for a complete Slack preview. Shorten it before requesting approval",
     );
   return {
-    text: `Research post revision ${draft.revision}: ${finding.title}`,
+    text: draft.is_test
+      ? `Test review — nothing will publish · revision ${draft.revision}`
+      : `Research post revision ${draft.revision}: ${finding.title}`,
     blocks,
   };
 }
@@ -443,6 +464,7 @@ async function assertEnabledDestinations(
   draft: Draft,
   post: NonNullable<Awaited<ReturnType<typeof getPostWithDetails>>>,
 ) {
+  if (draft.is_test) return;
   const db = await getDb();
   const enabled = await db
     .select()
@@ -503,6 +525,7 @@ async function ensurePost(draft: Draft) {
         id: postId,
         team_id: draft.team_id,
         state: "awaiting_approval",
+        is_test: draft.is_test,
         channel_group:
           selectedGroups.size === 1 ? [...selectedGroups][0] : "research",
         publish_at: null,
@@ -545,7 +568,7 @@ async function reviewMessageId(value: string) {
 async function deliverReview(draft: Draft) {
   const db = await getDb(),
     integration = await getSlackIntegration(draft.team_id);
-  if (!integration?.enabled)
+  if (!integration || (!integration.enabled && !draft.is_test))
     throw new Error(
       "Slack approvals are disabled. Connect and enable Slack, then retry this draft",
     );
@@ -824,6 +847,27 @@ async function decideDraft(
   assertPublicationReady(post);
   await assertEnabledDestinations(draft, post);
   const now = Date.now();
+  if (draft.is_test) {
+    const result = await db
+      .update(schema.research_drafts)
+      .set({ status: "approved_test", updated_at: now })
+      .where(
+        and(
+          eq(schema.research_drafts.id, draft.id),
+          eq(schema.research_drafts.status, "pending"),
+          eq(schema.research_drafts.revision, payload.revision!),
+          eq(schema.research_drafts.snapshot_hash, payload.snapshotHash!),
+        ),
+      )
+      .run();
+    if (changed(result))
+      await sendThread(
+        draft.team_id,
+        draft,
+        "Test approved. Your latest revision and approval were recorded. Nothing was published to any social profile.",
+      );
+    return;
+  }
   const claim = await db
     .update(schema.research_drafts)
     .set({ status: "publishing", updated_at: now })
@@ -930,7 +974,8 @@ export async function processSlackJob(jobId: string) {
     else {
       const integration = await getSlackIntegration(job.team_id);
       if (
-        !integration?.enabled ||
+        !integration ||
+        (!integration.enabled && !draft.is_test) ||
         !payload.userId ||
         !(JSON.parse(integration.approver_user_ids) as string[]).includes(
           payload.userId,

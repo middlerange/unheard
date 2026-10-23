@@ -101,7 +101,7 @@ function SlackSettingsPage() {
     setTestResult(null);
     try {
       const result = await slackRequest<{ channelName: string }>('POST', { action: 'test' });
-      if (alive.current) setTestResult(`Test sent to #${result.channelName}. Check Slack to confirm it arrived.`);
+      if (alive.current) setTestResult(`Test review queued for #${result.channelName}. Reply in its Slack thread to request an edit, then choose Approve test. Nothing will publish.`);
     } catch (cause) { if (alive.current) setError(errorMessage(cause)); }
     finally { if (alive.current) setPending(null); }
   }
@@ -139,7 +139,7 @@ function SlackSettingsPage() {
           {optionsError && <Notice>{optionsError}</Notice>}
           <Button type="button" variant="ghost" className={cn(press, 'px-0 text-xs')} onClick={() => void loadOptions()} disabled={optionsLoading || Boolean(pending)}><RefreshCw className={optionsLoading ? 'animate-spin' : ''} />Refresh channels and people</Button>
           <DailyDraftToggle checked={enabled} disabled={Boolean(pending)} onChange={setEnabled} />
-          <div className="flex flex-wrap items-center gap-2 border-t border-[var(--color-border)] pt-5"><Button type="submit" disabled={Boolean(pending) || optionsLoading || !channelId || !reviewerIds.length || missingReviewers.length > 0 || !dirty} className={press}>{pending === 'save' ? <Loader2 className="animate-spin" /> : <Check />}Save approval settings</Button><Button type="button" variant="outline" disabled={Boolean(pending) || dirty || !settings.channelId || !settings.approverUserIds.length} onClick={() => void test()} className={press}>{pending === 'test' ? <Loader2 className="animate-spin" /> : <Send />}Send test</Button></div>
+          <div className="flex flex-wrap items-center gap-2 border-t border-[var(--color-border)] pt-5"><Button type="submit" disabled={Boolean(pending) || optionsLoading || !channelId || !reviewerIds.length || missingReviewers.length > 0 || !dirty} className={press}>{pending === 'save' ? <Loader2 className="animate-spin" /> : <Check />}Save approval settings</Button><Button type="button" variant="outline" disabled={Boolean(pending) || dirty || !settings.channelId || !settings.approverUserIds.length} onClick={() => void test()} className={press}>{pending === 'test' ? <Loader2 className="animate-spin" /> : <Send />}Send test review</Button></div>
           {dirty && <p className={cn('text-xs', muted)}>Save your changes before sending a test.</p>}
           {testResult && <p role="status" className="text-sm leading-6 text-emerald-300">{testResult}</p>}
         </form>}

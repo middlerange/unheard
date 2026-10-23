@@ -29,6 +29,19 @@ drafted are skipped. The Research page shows drafts and delivery errors.
 4. Save, test the connection, and enable delivery. Existing drafts can be sent
    from Research after setup is ready.
 
+**Send test review** sends an internal setup sample through the same signed thread
+edit and approval workflow. Reply to request an edit, then choose **Approve test**
+on the newest preview. It uses GPT-6 Luna for revisions, so those edits consume API
+tokens. One connected X, LinkedIn, Facebook, or Discord profile is needed for the
+preview; its research opt-in and instructions remain unchanged. Tests also work
+with daily delivery disabled. The message is labeled **Test review — nothing will
+publish** and approval records **Test approved**, never **Published**. This tests
+Slack review, not social delivery. Immutable test markers on both the draft and
+post permanently prevent publishing through other app paths, even after approval,
+rejection, or deletion of its research draft. The review and revision records stay
+available for inspection in Research. Test posts are excluded from ordinary post lists,
+calendar views, and the scheduled publishing queue.
+
 Team owners do not create Slack apps, paste tokens, or enter signing secrets.
 The shared Slack application is configured through deployment environment
 variables, as explained below. Publishing profile selection remains independent of account
@@ -100,7 +113,7 @@ disabled: this integration does not maintain refresh tokens. These settings
 remain outside the product UI. See [Slack distribution](https://docs.slack.dev/app-management/distribution/)
 and [token rotation](https://docs.slack.dev/authentication/using-token-rotation/).
 
-Apply `0026_daily_research_slack.sql` before deploying the updated Worker. It adds
+Apply `0026_daily_research_slack.sql` and `0027_slack_review_tests.sql` before deploying the updated Worker. It adds
 research drafts, Slack review jobs, profile settings, and OAuth state records.
 Keep `SESSION_SECRET`,
 `CREDENTIALS_ENCRYPTION_KEY`, and `OPENAI_API_KEY`. `wrangler.toml` includes

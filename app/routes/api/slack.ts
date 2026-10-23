@@ -26,7 +26,10 @@ export async function handleSlackSettings(request: Request) {
         ])
         .parse(await request.json());
       return input.action === "test"
-        ? testSlackConnection(teamId)
+        ? testSlackConnection(
+            teamId,
+            new URL(process.env.CONTENT_HUB_PUBLIC_URL || request.url).origin,
+          )
         : retrySlackReview(teamId, input.draftId);
     }
     return getSlackSettings(teamId);

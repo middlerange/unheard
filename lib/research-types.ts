@@ -20,7 +20,7 @@ export type ResearchSource = ResearchSourceSeed & {
 };
 export type ResearchRun = {
   id: string;
-  mode: "scan" | "collect";
+  mode: "scan" | "collect" | "test";
   status:
     "queued" | "collecting" | "ranking" | "drafting" | "completed" | "failed";
   days: number;
@@ -94,11 +94,13 @@ export type ResearchDraft = {
   whyItMatters: string;
   content: ResearchDraftContent;
   revision: number;
+  isTest: boolean;
   status:
     | "draft"
     | "delivering"
     | "pending"
     | "editing"
+    | "approved_test"
     | "approved"
     | "rejected"
     | "publishing"

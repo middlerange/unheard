@@ -195,7 +195,7 @@ export async function updateSlackSettings(teamId: string, input: unknown) {
     .onConflictDoUpdate({ target: slack_integrations.team_id, set: values });
   return getSlackSettings(teamId);
 }
-export async function testSlackConnection(teamId: string) {
+export async function testSlackConnection(teamId: string, origin: string) {
   const row = await getSlackIntegration(teamId);
   if (!row) throw new Error("Connect Slack first");
   const credentials = await getSlackCredentials(teamId);
@@ -204,13 +204,9 @@ export async function testSlackConnection(teamId: string) {
     row.channel_id,
     JSON.parse(row.approver_user_ids),
   );
-  await slackApi(credentials.botToken, "chat.postMessage", {
-    channel: row.channel_id,
-    text: "Content Hub Slack approval connection verified. Daily research drafts will appear here. Reply in a draft thread to request edits; only Approve & publish publishes a post.",
-    unfurl_links: false,
-    unfurl_media: false,
-  });
-  return result;
+  const { createSlackTestReview } = await import("./slack-test-review");
+  const review = await createSlackTestReview(teamId, origin);
+  return { ...result, ...review };
 }
 export async function disconnectSlack(teamId: string) {
   const db = await getDb();

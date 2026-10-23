@@ -32,6 +32,7 @@ import {
   getSlackSettings,
   updateSlackSettings,
   verifySlackRequest,
+  testSlackConnection,
 } from "./slack";
 import { handleSlackEvents, handleSlackInteractions } from "./slack-ingress";
 import {
@@ -44,8 +45,13 @@ import {
   buildSlackReviewPacket,
 } from "./slack-review";
 import { buildApprovalSnapshot } from "./approval";
-import { getPostWithDetails } from "./db/queries";
+import {
+  getPostWithDetails,
+  listPostsWithDetails,
+  getDueScheduledPosts,
+} from "./db/queries";
 import { targetsPendingPublication } from "./publisher";
+import { createSlackTestReview } from "./slack-test-review";
 import { assertNotSlackManagedPost } from "./slack-post-lock";
 
 const folder = mkdtempSync(join(tmpdir(), "content-hub-slack-")),
@@ -715,5 +721,211 @@ describe("Slack review threads and approval safety", () => {
     await expect(
       assertNotSlackManagedPost("unrelated", "a"),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("safe live Slack review tests", () => {
+  it("creates, edits and approves a signed test review without enabling daily profiles or calling the publisher", async () => {
+    let sequence = 0;
+    const api = vi.fn(
+      async (url: RequestInfo | URL) =>
+        new Response(
+          JSON.stringify(
+            String(url).endsWith("auth.test")
+              ? { ok: true, team_id: "T12345678", user_id: "UBOT12345" }
+              : String(url).endsWith("conversations.info")
+                ? {
+                    ok: true,
+                    channel: {
+                      id: "C12345678",
+                      name: "approvals",
+                      is_member: true,
+                    },
+                  }
+                : String(url).endsWith("users.info")
+                  ? {
+                      ok: true,
+                      user: {
+                        id: "U12345678",
+                        team_id: "T12345678",
+                        is_bot: false,
+                      },
+                    }
+                  : { ok: true, ts: `999.${++sequence}` },
+          ),
+        ),
+    );
+    vi.stubGlobal("fetch", api);
+    run(
+      "UPDATE channels SET research_enabled=0,system_prompt='' WHERE id='channel'",
+    );
+    run("UPDATE slack_integrations SET enabled=0 WHERE team_id='a'");
+    try {
+      const sent = await testSlackConnection("a", "https://example.com");
+      expect(sent.channelName).toBe("approvals");
+      expect((await processSlackJob(sent.jobId)).status).toBe("completed");
+      const repeated = await testSlackConnection("a", "https://example.com");
+      expect(repeated.draftId).not.toBe(sent.draftId);
+      expect((await getResearchDraft("a", repeated.draftId))?.is_test).toBe(
+        true,
+      );
+      const first = (await getResearchDraft("a", sent.draftId))!;
+      expect(first.is_test).toBe(true);
+      expect(
+        row(`SELECT is_test FROM posts WHERE id='${first.post_id}'`).is_test,
+      ).toBe(1);
+      const packets = JSON.stringify(api.mock.calls);
+      expect(packets).toContain("Test review — nothing will publish");
+      expect(packets).toContain("Approve test");
+      expect(packets).not.toContain("Approve & publish");
+      const original = JSON.parse(first.content);
+      state.rewrite.mockResolvedValue({
+        content: {
+          targets: original.targets.map((target: object) => ({
+            ...target,
+            content:
+              "Inspect the latest revision before approving. https://example.com/settings/slack",
+          })),
+        },
+        inputTokens: 50,
+        outputTokens: 20,
+      });
+      const edit = JSON.stringify({
+        type: "event_callback",
+        team_id: "T12345678",
+        event_id: "EvTestReviewEdit",
+        event: {
+          type: "message",
+          user: "U12345678",
+          channel: first.slack_channel_id,
+          thread_ts: first.slack_thread_ts,
+          text: "Shorten the opening",
+        },
+      });
+      expect((await handleSlackEvents(await signedRequest(edit))).status).toBe(
+        200,
+      );
+      expect((await processSlackJob("event-EvTestReviewEdit")).status).toBe(
+        "completed",
+      );
+      const revised = (await getResearchDraft("a", sent.draftId))!;
+      expect(revised.revision).toBe(2);
+      expect(revised.is_test).toBe(true);
+      expect(
+        row(`SELECT content FROM post_targets WHERE post_id='${first.post_id}'`)
+          .content,
+      ).toContain("Inspect the latest revision");
+      const approve = async (draft: typeof first, actionTs: string) => {
+        const body = new URLSearchParams({
+          payload: JSON.stringify({
+            type: "block_actions",
+            team: { id: "T12345678" },
+            user: { id: "U12345678" },
+            channel: { id: draft.slack_channel_id },
+            message: { ts: draft.slack_message_ts },
+            actions: [
+              {
+                action_id: "research_approve",
+                action_ts: actionTs,
+                value: JSON.stringify({
+                  draftId: draft.id,
+                  revision: draft.revision,
+                  snapshotHash: draft.snapshot_hash,
+                }),
+              },
+            ],
+          }),
+        }).toString();
+        await handleSlackInteractions(
+          await signedRequest(body, "interactions"),
+        );
+      };
+      await approve(first, "100.1");
+      expect(
+        run(
+          "SELECT id FROM slack_jobs WHERE kind='approve' AND json_extract(payload,'$.draftId')=?",
+          [first.id],
+        ).results,
+      ).toHaveLength(0);
+      await approve(revised, "100.2");
+      const job = run(
+        "SELECT id FROM slack_jobs WHERE kind='approve' AND json_extract(payload,'$.draftId')=?",
+        [first.id],
+      ).results[0];
+      expect((await processSlackJob(job.id)).status).toBe("completed");
+      expect((await getResearchDraft("a", first.id))?.status).toBe(
+        "approved_test",
+      );
+      expect(
+        row(`SELECT state FROM posts WHERE id='${first.post_id}'`).state,
+      ).toBe("awaiting_approval");
+      expect(
+        run(
+          "SELECT * FROM post_targets WHERE post_id=? AND platform_post_id IS NOT NULL",
+          [first.post_id],
+        ).results,
+      ).toHaveLength(0);
+      expect(JSON.stringify(api.mock.calls)).toContain("Test approved");
+      expect(state.published).not.toHaveBeenCalled();
+      await approve(revised, "100.3");
+      expect(
+        run(
+          "SELECT id FROM slack_jobs WHERE kind='approve' AND json_extract(payload,'$.draftId')=?",
+          [first.id],
+        ).results,
+      ).toHaveLength(1);
+      expect(
+        row(
+          "SELECT research_enabled,system_prompt FROM channels WHERE id='channel'",
+        ),
+      ).toEqual({ research_enabled: 0, system_prompt: "" });
+      expect(
+        row("SELECT enabled FROM slack_integrations WHERE team_id='a'").enabled,
+      ).toBe(0);
+      await expect(
+        assertNotSlackManagedPost(first.post_id!, "a"),
+      ).rejects.toThrow("Test review posts can never");
+      const post = (await getPostWithDetails(first.post_id!, "a"))!;
+      expect(
+        (await listPostsWithDetails("a")).some((item) => item.id === post.id),
+      ).toBe(false);
+      run("UPDATE posts SET state='scheduled',publish_at=1 WHERE id=?", [
+        post.id,
+      ]);
+      expect(
+        (await getDueScheduledPosts()).some((item) => item.id === post.id),
+      ).toBe(false);
+      const actualPublisher =
+        await vi.importActual<typeof import("./publisher")>("./publisher");
+      api.mockClear();
+      await expect(
+        actualPublisher.publishApprovedPost(post, "a"),
+      ).rejects.toThrow("Test review posts can never");
+      expect(api).not.toHaveBeenCalled();
+      expect(() =>
+        run("UPDATE research_drafts SET is_test=0 WHERE id=?", [first.id]),
+      ).toThrow("marker cannot be changed");
+      expect(() =>
+        run("UPDATE posts SET is_test=0 WHERE id=?", [first.post_id]),
+      ).toThrow("marker cannot be changed");
+      run("DELETE FROM research_drafts WHERE id=?", [first.id]);
+      await expect(
+        actualPublisher.publishApprovedPost(post, "a"),
+      ).rejects.toThrow("Test review posts can never");
+      expect(api).not.toHaveBeenCalled();
+    } finally {
+      run(
+        "UPDATE channels SET research_enabled=1,system_prompt='Write for product leaders' WHERE id='channel'",
+      );
+      run("UPDATE slack_integrations SET enabled=1 WHERE team_id='a'");
+    }
+  });
+  it("requires a text profile in the same team for a test preview", async () => {
+    await expect(
+      createSlackTestReview("b", "https://example.com"),
+    ).rejects.toThrow("Connect a text publishing profile");
+    expect(
+      run("SELECT * FROM research_drafts WHERE team_id='b'").results,
+    ).toHaveLength(0);
   });
 });
