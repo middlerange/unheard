@@ -69,6 +69,16 @@ describe("topic-driven public discovery", () => {
     vi.stubEnv("TREG_TOKEN", "");
     await expect(collectDiscoveredResearchSource(source, start, end, new Set())).rejects.toThrow("server search connection");
   });
+  it("uses edge-compatible manual redirects and never follows a redirect carrying the search token", async () => {
+    vi.stubEnv("TREG_TOKEN", "test-only-search-token");
+    const fetcher = vi.fn(async (_input: string | URL, options?: RequestInit) => {
+      expect(options?.redirect).toBe("manual");
+      return new Response(null, { status: 302, headers: { location: "https://unapproved.example/" } });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    await expect(collectDiscoveredResearchSource(source, start, end, new Set())).rejects.toThrow("HTTP 302");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
   it("uses arXiv's first submission time and labels abstract-only evidence, ignoring newer revisions", async () => {
     vi.stubEnv("TREG_TOKEN", "test-only-search-token");
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {

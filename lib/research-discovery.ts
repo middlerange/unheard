@@ -44,7 +44,7 @@ async function searchPublicResearch(query: string, windowStart: number, news: bo
     "X-Treg-Route-Waterfall": "0",
   };
   if (process.env.TREG_ORG) headers["X-Treg-Org"] = process.env.TREG_ORG;
-  const response = await fetch(url, { headers, redirect: "error", signal: AbortSignal.timeout(25_000) });
+  const response = await fetch(url, { headers, redirect: "manual", signal: AbortSignal.timeout(25_000) });
   if (!response.ok) {
     await response.body?.cancel();
     throw new Error(`Topic search returned HTTP ${response.status}`);

@@ -512,6 +512,7 @@ async function collectForRun(
     return { collected: existing.item_count };
   let count = 0;
   let error: string | null = null;
+  let failed = false;
   try {
     const collection = await collectDiscoveredResearchSource(
       source, run.created_at - run.days * 86_400_000, run.created_at,
@@ -609,11 +610,12 @@ async function collectForRun(
       }
     }
   } catch (caught) {
+    failed = true;
     error = researchSourceErrorMessage(caught);
   }
   await db
     .update(research_run_sources)
-    .set({ status: error ? "failed" : "completed", item_count: count, error })
+    .set({ status: failed ? "failed" : "completed", item_count: count, error })
     .where(eq(research_run_sources.id, stepId));
   await db
     .update(research_sources)
