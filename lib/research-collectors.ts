@@ -6,7 +6,7 @@ export type CollectedItem = {
   excerpt: string;
   publishedAt: number | null;
   content?: string;
-  contentProvenance?: "public_feed" | "article" | "transcript";
+  contentProvenance?: "public_feed" | "article" | "transcript" | "abstract";
   contentType: "article" | "video";
   transcriptStatus: "not_applicable" | "unavailable" | "available";
 };
@@ -127,7 +127,7 @@ export function plainResearchText(raw: string) {
   }
   return decoded
     .replace(/<(script|style|nav|footer|header)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
-    .replace(/<!--[\s\S]*?-->|<![^>]*>|<\/?[a-zA-Z][^>]*>/g, " ")
+    .replace(/<!--[\s\S]*?-->|<![^>]*>|<\/?[a-zA-Z](?:"[^"]*"|'[^']*'|[^'">])*>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -239,11 +239,43 @@ function htmlAttributes(tag: string): Record<string, string> {
   )].map(match => [match[1].toLowerCase(), match[2] ?? match[3] ?? match[4]]));
 }
 
+function htmlElements(html: string, name: string) {
+  const elements: Array<{ start: number; end: number; content: string }> = [];
+  const stack: Array<{ start: number; contentStart: number }> = [];
+  const tags = new RegExp(`<(/?)${name}\\b(?:"[^"]*"|'[^']*'|[^'">])*>`, "gi");
+  for (const tag of html.matchAll(tags)) {
+    if (!tag[1]) stack.push({ start: tag.index, contentStart: tag.index + tag[0].length });
+    else {
+      const opening = stack.pop();
+      if (opening) elements.push({ start: opening.start, end: tag.index + tag[0].length, content: html.slice(opening.contentStart, tag.index) });
+    }
+  }
+  return elements.sort((a, b) => a.start - b.start);
+}
+
 function articleRegion(html: string): string {
-  const region = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i)?.[1]
-    || html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1]
-    || "";
-  return region.replace(/<(nav|footer|aside)\b[^>]*>[\s\S]*?<\/\1>/gi, " ");
+  const clean = html.replace(/<!--[\s\S]*?-->|<(script|style|nav|footer|aside)\b(?:"[^"]*"|'[^']*'|[^'">])*>[\s\S]*?<\/\1>/gi, " ");
+  const mains = htmlElements(clean, "main");
+  const articles = htmlElements(clean, "article");
+  const headings = htmlElements(clean, "h1");
+  const title = plainResearchText(clean.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "").toLowerCase();
+  const matchingHeading = headings.find(heading => {
+    const text = plainResearchText(heading.content).toLowerCase();
+    return text.length >= 12 && (title === text || title.startsWith(`${text} |`) || title.startsWith(`${text} —`) || title.startsWith(`${text} -`));
+  });
+  const contains = (element: { start: number; end: number }, heading: { start: number; end: number }) => element.start <= heading.start && element.end >= heading.end;
+  const heading = matchingHeading
+    || headings.find(candidate => mains.some(main => contains(main, candidate)))
+    || headings.find(candidate => articles.some(article => contains(article, candidate)));
+  if (heading) {
+    const article = articles.filter(candidate => contains(candidate, heading)).sort((a, b) => a.content.length - b.content.length)[0];
+    const main = mains.find(candidate => contains(candidate, heading));
+    if (article) return article.content;
+    if (main) return main.content;
+    // Some newsletter pages have no semantic wrapper; require the page's own title.
+    if (matchingHeading) return clean.slice(matchingHeading.start);
+  }
+  return mains[0]?.content || articles.sort((a, b) => b.content.length - a.content.length)[0]?.content || "";
 }
 
 export function articleResearchDate(
@@ -264,7 +296,7 @@ export function articleResearchDate(
     } else if (value && typeof value === "object") {
       const row = value as Record<string, unknown>;
       const types = Array.isArray(row["@type"]) ? row["@type"] : [row["@type"]];
-      if (types.some(type => typeof type === "string" && /(?:^|[/#])(Article|BlogPosting|NewsArticle|Report|TechArticle)$/i.test(type))) articles.push(row);
+      if (types.some(type => typeof type === "string" && /(?:^|[/#])(Article|BlogPosting|NewsArticle|Report|TechArticle|SocialMediaPosting|WebPage)$/i.test(type))) articles.push(row);
       if (row["@graph"]) readStructured(row["@graph"]);
       if (row.mainEntity) readStructured(row.mainEntity);
     }
@@ -273,17 +305,31 @@ export function articleResearchDate(
     if (!/^application\/ld\+json$/i.test(htmlAttributes(script[1]).type || "")) continue;
     try { readStructured(JSON.parse(script[2])); } catch { /* Ignore malformed structured data. */ }
   }
-  const matching = articleUrl ? articles.filter(article => {
+  function structuredIdentity(article: Record<string, unknown>) {
     const page = article.mainEntityOfPage;
     let identity = article.url || article["@id"];
     if (!identity && typeof page === "string") identity = page;
     else if (!identity && page && typeof page === "object") identity = (page as Record<string, unknown>)["@id"];
+    return identity;
+  }
+  const matching = articleUrl ? articles.filter(article => {
+    const identity = structuredIdentity(article);
     try { return typeof identity === "string" && canonicalResearchUrl(identity) === canonicalResearchUrl(articleUrl); } catch { return false; }
   }) : [];
-  const article = matching[0] || (articles.length === 1 ? articles[0] : undefined);
+  const unscopedArticles = articles.filter(article => {
+    const types = list(article["@type"]);
+    return !types.some(type => typeof type === "string" && /(?:^|[/#])WebPage$/i.test(type))
+      && (!articleUrl || !structuredIdentity(article));
+  });
+  const article = matching[0] || (unscopedArticles.length === 1 ? unscopedArticles[0] : undefined);
   const structuredDate = parseResearchDate(article?.datePublished, now);
   if (structuredDate !== null) return structuredDate;
-  const region = articleRegion(html);
+  let region = articleRegion(html);
+  // Embedded repository/paper/related-story cards have their own publication dates.
+  const children = htmlElements(region, "article");
+  for (const child of children.filter(candidate => !children.some(parent => parent.start < candidate.start && parent.end >= candidate.end)).sort((a, b) => b.start - a.start)) {
+    region = region.slice(0, child.start) + " " + region.slice(child.end);
+  }
   for (const match of region.matchAll(/<time\b([^>]*)>([\s\S]*?)<\/time>/gi)) {
     const attributes = htmlAttributes(match[1]);
     if (/modified|updated/i.test(`${attributes.itemprop || ""} ${attributes.class || ""}`)) continue;
@@ -336,7 +382,7 @@ export function discoverResearchLinks(
         if (prefixes?.length && !scopedArticle) continue;
         // Publisher article paths also cover overlay links with no text inside.
         if (!scopedArticle && labelLength < 15) continue;
-        const score = (/\/p\/[^/]+/.test(path) ? 100 : 0)
+        const score = scopedArticle ? 100 : (/\/p\/[^/]+/.test(path) ? 100 : 0)
           + (/\/(blog|articles?|research|insights|posts|widget|news)\/[^/]+/i.test(path) ? 60 : 0)
           + (/\/\d{4}\/\d{1,2}\//.test(path) ? 70 : 0)
           + (labelLength >= 40 ? 5 : 0);
@@ -376,10 +422,7 @@ export async function collectResearchSource(
       const content = articleResearchText(html).slice(0, 14_000);
       return {
         url,
-        title: plainResearchText(
-          articleRegion(html).match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)?.[1]
-            || html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "",
-        ).slice(0, 300),
+        title: articleResearchTitle(html),
         excerpt: content.slice(0, 1600),
         publishedAt: articleResearchDate(html, url),
         ...(content.length >= 500 ? { content, contentProvenance: "article" as const } : {}),
@@ -493,4 +536,11 @@ export async function fetchPublicYoutubeTranscript(
 export function articleResearchText(html: string) {
   const region = articleRegion(html);
   return plainResearchText(region ? region.replace(/<\/?header\b[^>]*>/gi, "") : html);
+}
+
+export function articleResearchTitle(html: string) {
+  return plainResearchText(
+    htmlElements(articleRegion(html), "h1")[0]?.content
+      || html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "",
+  ).slice(0, 300);
 }

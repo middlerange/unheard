@@ -1,18 +1,5 @@
-export type ResearchSourceSeed = {
-  id: string;
-  name: string;
-  url: string;
-  feedUrl?: string;
-  kind: 'rss' | 'web' | 'youtube' | 'community';
-  category: 'practitioner' | 'research' | 'industry' | 'competitor' | 'community' | 'youtube';
-  author?: string;
-  enabled: boolean;
-  notes: string;
-  priority: 1 | 2 | 3;
-  channelId?: string;
-  articlePathPrefixes?: string[];
-  maxDiscoveryLinks?: number;
-};
+import type { ResearchSourceSeed } from "./research-types";
+export type { ResearchSourceSeed } from "./research-types";
 
 // Preserve the 43 mapped sources so teams can opt back in to market monitoring.
 // Default collection combines practitioners, original research, and primary industry announcements.
@@ -266,6 +253,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "original-canny-changelog",
+    "discoveryBlockedHosts": ["canny.io"],
     "name": "Canny changelog",
     "url": "https://feedback.canny.io/changelog",
     "kind": "rss",
@@ -986,5 +974,61 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
       "/posts/"
     ],
     "maxDiscoveryLinks": 20
+  },
+  {
+    "id": "latent-space",
+    "name": "Latent Space — original AI interviews and discovery",
+    "url": "https://latent.space",
+    "feedUrl": "https://latent.space/feed",
+    "kind": "rss",
+    "category": "practitioner",
+    "enabled": true,
+    "notes": "Public RSS verified 23 October 2026. High cadence: three entries fell within the fixed audit window, including two original interviews on 22 October and one AINews briefing on 23 October. Prefer first-hand interviews and engineering experiments. AINews is secondary curation: follow primary links, preserve original dates, and deduplicate underlying stories; do not treat a fresh roundup as newly published research. Public feed text may be an excerpt, not a complete interview transcript.",
+    "priority": 1
+  },
+  {
+    "id": "discovery-ai-workflows",
+    "name": "Discovery — AI product workflows and production experiments",
+    "url": "https://treg.to",
+    "kind": "search",
+    "discoverySearchType": "news",
+    "category": "research",
+    "enabled": true,
+    "notes": "Three topic queries: AI workflow capabilities, AI product pricing changes, and production agent experiments. Discovery uses the free-only provider; no paid fallback. Search results are leads, never evidence or verified publication dates. Fetch the original public page and verify its original date within the requested window, source identity, and readable evidence before ranking. Preserve publisher claims and limitations; exclude thin promotion and job listings.",
+    "priority": 1,
+    "discoveryQueries": [
+      "AI workplace productivity study -jobs -careers",
+      "AI agents evaluation production -jobs -careers",
+      "AI product API launch workflow pricing -jobs -careers"
+    ]
+  },
+  {
+    "id": "discovery-product-research",
+    "name": "Discovery — human-AI studies and original product evidence",
+    "url": "https://treg.to",
+    "kind": "search",
+    "category": "research",
+    "enabled": true,
+    "notes": "Three topic queries: new human-AI agent papers, workplace collaboration studies, and university field research. Discovery uses the free-only provider; no paid fallback. Verify original publication dates and readable primary evidence before ranking; search-result dates and updated timestamps do not establish freshness. Record study populations, metric definitions and limitations, and reject unsupported summaries or generic SEO.",
+    "priority": 1,
+    "discoveryQueries": [
+      "site:arxiv.org human AI agents evaluation productivity -jobs -careers",
+      "AI human collaboration experiment study workplace productivity -jobs -careers",
+      "AI field experiment workplace productivity research university -jobs -careers"
+    ]
+  },
+  {
+    "id": "discovery-practitioner-experiments",
+    "name": "Discovery — first-hand practitioner experiments",
+    "url": "https://treg.to",
+    "kind": "search",
+    "category": "practitioner",
+    "enabled": true,
+    "notes": "Two topic queries: production agent case studies and first-hand AI coding workflow experiments. Discovery uses the free-only provider; no paid fallback. Follow the original author, verify the original publication date within the requested window, and collect public supporting text before ranking. Keep self-reports distinct from controlled evidence, skip recycled commentary and course promotions, and never access a private discussion or paid continuation.",
+    "priority": 1,
+    "discoveryQueries": [
+      "AI agents production lessons experiment evaluation engineering case study -jobs -careers",
+      "AI coding experiment what I learned engineering workflow -jobs -careers"
+    ]
   }
 ];

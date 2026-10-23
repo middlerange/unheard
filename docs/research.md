@@ -8,14 +8,47 @@ and customer communication.
 ## Sources and coverage
 
 The catalog in `lib/research-sources.ts` preserves all 43 original entries and adds
-22 curated sources. Its 25 enabled defaults emphasize individual practitioners,
-original research, and selected product interview channels. All 23 competitor
-sources are disabled by default. Each team can switch sources on or off.
+48 sources: 91 entries with 51 enabled defaults. These combine individual
+practitioners, original research, primary industry announcements, product
+interviews, and three optional discovery lanes. All 23 competitor sources remain
+disabled by default. Each team's existing source preferences are preserved.
+
+The three search sources contain eight targeted queries:
+
+- AI workflows: new product capabilities, pricing changes, and production-agent
+  experiments.
+- Product research: human-AI usability studies, AI-adoption field research, and
+  original activation, retention, or onboarding evidence.
+- Practitioner experiments: first-hand AI/product-discovery tests and shipped
+  onboarding, activation, or customer-feedback case studies.
+
+Search collection uses `collectDiscoveredResearchSource` with a free-only
+provider and no paid fallback. Three queries use the news vertical and five use
+web discovery. The eight searches inspect at most 40 original pages per run,
+including arXiv submission-date lookups. Its optional `TREG_TOKEN` and `TREG_ORG`
+configuration stays in the server environment; it is never sent to the browser.
+An unavailable credential or provider is a coverage limitation, not evidence of
+no updates. Search snippets and result dates are discovery leads only: original
+public pages must supply verified publication dates and readable evidence before
+ranking. A roundup or social reshare does not make the underlying article new.
+Latent Space includes both original interviews and secondary AINews curation;
+follow primary links and deduplicate the underlying stories.
+
+Fresh feed articles without substantial text are fetched before the first
+editorial screen (at most 24 per source, three at a time). Search-relative dates
+are never used for eligibility. arXiv records use the first version's exact
+submission time; abstract-only evidence is labeled and cannot support claims
+about unseen methods or results. Search discovery excludes configured competitor
+domains, social platforms and job listings before fetching.
 
 Collection uses RSS/Atom feeds and bounded article discovery from approved public
 sites. It records verified publication dates; undated items are excluded from
-30-day ranking. Feed history varies, and a first scan cannot guarantee complete
-coverage of the preceding month. Daily collection builds the team's own history.
+24-hour and 30-day ranking. Feeds return at most their first 60 entries; web
+discovery reads one index and a bounded set of at most 40 article links, without
+archive pagination. Feed history varies, and a first scan cannot guarantee
+complete coverage of the preceding month. Date-only values do not establish an
+exact publication time. Daily collection builds the team's own history; some
+sources publish weekly or irregularly rather than every day.
 YouTube Atom feeds usually expose only recent uploads. Public caption tracks are
 attempted for up to six new or previously unavailable videos per channel per run,
 with long-form interviews prioritized. A description is never treated as a

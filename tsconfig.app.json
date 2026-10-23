@@ -8,6 +8,7 @@
     ".vinxi",
     "dist",
     "scripts",
-    "chrome-extension"
+    "chrome-extension",
+    "artifacts"
   ]
 }

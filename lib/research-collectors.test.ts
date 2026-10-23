@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   articleResearchDate,
+  articleResearchText,
   collectResearchSource,
   discoverResearchLinks,
   fetchResearchText,
@@ -20,6 +21,47 @@ const evidence = "A public research finding about customer adoption and product 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("public research evidence and publication dates", () => {
+  it("reads the main article instead of embedded Hugging Face repository and DeepMind related cards", () => {
+    for (const card of [
+      '<article class="overview-card-wrapper"><h3>Repository card</h3><time class="published" datetime="2026-08-20">Paper published</time></article>',
+      '<article class="card card-blog"><h2>Related research</h2><time class="published" datetime="2025-07-01">July 2025</time></article>',
+    ]) {
+      const html = `<title>Original research | Publisher</title><main><header><h1 class="max-md:[&amp;>span]:block">Original research</h1></header><p>${evidence}</p>${card}<p>Final article conclusion.</p></main>`;
+      expect(articleResearchText(html)).toContain(evidence.trim());
+      expect(articleResearchText(html)).toContain("Original research");
+      expect(articleResearchText(html)).toContain("Final article conclusion.");
+      expect(articleResearchText(html)).not.toContain('span]:block');
+      expect(articleResearchDate(html, "https://example.com/story", NOW)).toBeNull();
+    }
+  });
+
+  it("uses the article heading that matches the page title rather than an earlier unrelated article", () => {
+    const html = `<title>Original research | Publisher</title><main><article><h1>Related story</h1>Published October 23, 2026</article><article><header><h1>Original research</h1><time itemprop="datePublished" datetime="2026-10-22T18:00:00Z">October 22</time></header><p>${evidence}</p></article></main>`;
+    expect(articleResearchText(html)).toContain(evidence.trim());
+    expect(articleResearchText(html)).not.toContain("Related story");
+    expect(articleResearchDate(html, undefined, NOW)).toBe(Date.parse("2026-10-22T18:00:00Z"));
+  });
+
+  it("accepts an explicitly published date on a title-scoped newsletter page without semantic wrappers", () => {
+    const html = `<title>3 Product Discovery Observations</title><body><h1>Newsletter creator</h1><h1 class="post-title">3 Product Discovery Observations</h1><table><tr><td>PUBLISHED</td><td><strong>Oct 23, 2026</strong></td></tr></table><p>${evidence}</p><footer>Published October 24, 2026</footer></body>`;
+    expect(articleResearchDate(html, undefined, NOW)).toBe(Date.parse("2026-10-23T00:00:00Z"));
+    expect(articleResearchText(html)).not.toContain("Newsletter creator");
+    expect(articleResearchDate('<title>Unrelated page</title><h1>Creator</h1><p>Published October 23, 2026</p>', undefined, NOW)).toBeNull();
+  });
+
+  it("reads matching WebPage publication metadata without adopting unrelated or modified dates", () => {
+    const schema = (row: Record<string, unknown>) => `<script type="application/ld+json">${JSON.stringify(row)}</script>`;
+    expect(articleResearchDate(schema({ "@type": "WebPage", "@id": "https://example.com/report", datePublished: "2026-07-22T10:05:26Z", dateModified: "2026-10-23" }), "https://example.com/report", NOW)).toBe(Date.parse("2026-07-22T10:05:26Z"));
+    expect(articleResearchDate(schema({ "@type": "WebPage", datePublished: "2026-10-23" }), "https://example.com/report", NOW)).toBeNull();
+    expect(articleResearchDate(schema({ "@type": "BlogPosting", url: "https://example.com/related", datePublished: "2026-10-23" }), "https://example.com/report", NOW)).toBeNull();
+    expect(articleResearchDate('<main><h1>Report</h1><p>Date October 23, 2026</p><time datetime="2026-10-23">October 23</time></main>', undefined, NOW)).toBeNull();
+  });
+
+  it("preserves Hugging Face SocialMediaPosting publication time instead of a date-only fallback", () => {
+    const html = `<script type="application/ld+json">${JSON.stringify({ "@type": "SocialMediaPosting", "@id": "https://huggingface.co/blog/microsoft/thinkingbox-training", datePublished: "2026-10-22T22:24:34.816Z", dateModified: "2026-10-23T10:00:00Z" })}</script><main><h1>Turning Database Grading into RL Rewards</h1><p>Published October 22, 2026</p></main>`;
+    expect(articleResearchDate(html, "https://huggingface.co/blog/microsoft/thinkingbox-training", NOW)).toBe(Date.parse("2026-10-22T22:24:34.816Z"));
+  });
+
   it("retains substantial public RSS content and labels it without fetching premium continuations", () => {
     const body = `${evidence} Subscribe to read the rest of this premium post.`;
     const rss = `<rss><channel><item><title>A useful public introduction</title><link>https://example.com/p/story</link><pubDate>Thu, 22 Oct 2026 10:00:00 GMT</pubDate><description>Public teaser</description><content:encoded><![CDATA[<p>${body}</p>]]></content:encoded></item></channel></rss>`;
@@ -78,6 +120,14 @@ describe("public research evidence and publication dates", () => {
 });
 
 describe("bounded public source discovery", () => {
+  it("gives configured article sections equal priority and preserves the publisher index order", () => {
+    const html = `<main><a href="/engineering/new-engineering">New engineering</a>${Array.from({ length: 12 }, (_, index) => `<a href="/research/report-${index}">Research report with a longer descriptive title ${index}</a>`).join("")}<a href="/engineering/older-engineering">Older engineering</a></main>`;
+    expect(discoverResearchLinks(html, { ...source, articlePathPrefixes: ["/engineering/", "/research/"], maxDiscoveryLinks: 12 })).toEqual([
+      "https://example.com/engineering/new-engineering",
+      ...Array.from({ length: 11 }, (_, index) => `https://example.com/research/report-${index}`),
+    ]);
+  });
+
   it("allows exact www aliases while rejecting unrelated subdomains and redirect destinations", async () => {
     expect([...sourceHosts(source)].sort()).toEqual(["example.com", "www.example.com"]);
     expect(sourceHosts({ ...source, url: "https://www.example.com/research" })).toEqual(sourceHosts(source));

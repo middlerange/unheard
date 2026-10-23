@@ -4,7 +4,7 @@ export type ResearchSourceSeed = {
   name: string;
   url: string;
   feedUrl?: string;
-  kind: "rss" | "web" | "youtube" | "community";
+  kind: "rss" | "web" | "youtube" | "community" | "search";
   category:
     "practitioner" | "research" | "industry" | "competitor" | "community" | "youtube";
   author?: string;
@@ -14,6 +14,9 @@ export type ResearchSourceSeed = {
   channelId?: string;
   articlePathPrefixes?: string[];
   maxDiscoveryLinks?: number;
+  discoveryQueries?: string[];
+  discoverySearchType?: "web" | "news";
+  discoveryBlockedHosts?: string[];
 };
 export type ResearchSource = ResearchSourceSeed & {
   lastCollectedAt: number | null;

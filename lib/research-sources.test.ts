@@ -64,4 +64,37 @@ describe('research source selection', () => {
     expect(RESEARCH_SOURCE_SEEDS.find(source => source.id === 'anthropic-engineering')?.articlePathPrefixes)
       .toEqual(['/engineering/', '/research/']);
   });
+
+  it('adds bounded topic discovery without enabling competitor sources', () => {
+    const discovery = RESEARCH_SOURCE_SEEDS.filter(source => source.kind === 'search');
+    expect(discovery.map(source => source.id).sort()).toEqual([
+      'discovery-ai-workflows', 'discovery-practitioner-experiments', 'discovery-product-research',
+    ]);
+    expect(discovery.map(source => source.discoveryQueries?.length).sort()).toEqual([2, 3, 3]);
+    const queries = discovery.flatMap(source => source.discoveryQueries ?? []);
+    expect(new Set(queries).size).toBe(8);
+    for (const source of discovery) {
+      expect(source.enabled).toBe(true);
+      expect(['practitioner', 'research']).toContain(source.category);
+      expect(source.url).toBe('https://treg.to');
+      expect(source.feedUrl).toBeUndefined();
+      expect(source.notes).toContain('free-only');
+      expect(source.notes).toContain('no paid fallback');
+      expect(source.notes).toMatch(/original publication date|original date/);
+      for (const query of source.discoveryQueries ?? []) {
+        expect(query).toContain('-jobs');
+        expect(query).toContain('-careers');
+        expect(query).toMatch(/workflow|pricing|production|usability|study|research|experiment|case study|evaluation/);
+      }
+    }
+    expect(RESEARCH_SOURCE_SEEDS.filter(source => source.category === 'competitor').every(source => !source.enabled)).toBe(true);
+  });
+
+  it('distinguishes Latent Space primary interviews from secondary roundup discovery', () => {
+    const source = RESEARCH_SOURCE_SEEDS.find(source => source.id === 'latent-space')!;
+    expect(source).toMatchObject({ enabled: true, kind: 'rss', url: 'https://latent.space', feedUrl: 'https://latent.space/feed' });
+    expect(source.notes).toContain('two original interviews');
+    expect(source.notes).toContain('secondary curation');
+    expect(source.notes).toContain('preserve original dates');
+  });
 });
