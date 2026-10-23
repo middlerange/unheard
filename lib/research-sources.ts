@@ -4,16 +4,18 @@ export type ResearchSourceSeed = {
   url: string;
   feedUrl?: string;
   kind: 'rss' | 'web' | 'youtube' | 'community';
-  category: 'practitioner' | 'research' | 'competitor' | 'community' | 'youtube';
+  category: 'practitioner' | 'research' | 'industry' | 'competitor' | 'community' | 'youtube';
   author?: string;
   enabled: boolean;
   notes: string;
   priority: 1 | 2 | 3;
   channelId?: string;
+  articlePathPrefixes?: string[];
+  maxDiscoveryLinks?: number;
 };
 
 // Preserve the 43 mapped sources so teams can opt back in to market monitoring.
-// Default collection favors public practitioner writing, interviews, and original research.
+// Default collection combines practitioners, original research, and primary industry announcements.
 export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   {
     "id": "original-lennys-archive",
@@ -718,5 +720,270 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "enabled": true,
     "notes": "Public report index verified 23 October 2026. Original B2B SaaS and product-growth benchmarks; sponsored research requires method and sample scrutiny. Follow public dated reports; skip gated downloads and undated interactive dashboards.",
     "priority": 2
+  },
+  {
+    "id": "openai-news",
+    "name": "OpenAI — official news and adoption",
+    "url": "https://openai.com/news/",
+    "feedUrl": "https://openai.com/news/rss.xml",
+    "kind": "rss",
+    "category": "industry",
+    "enabled": true,
+    "notes": "Public feed entries and publication dates verified 23 October 2026. High cadence, with several dated entries per week. Product capabilities, pricing, agent workflows, and first-party adoption cases. Filter corporate affairs and unrelated science. Treat customer outcomes as vendor-reported and follow original study methods.",
+    "priority": 1
+  },
+  {
+    "id": "anthropic-news",
+    "name": "Anthropic — official product news",
+    "url": "https://www.anthropic.com/news",
+    "kind": "web",
+    "category": "industry",
+    "enabled": true,
+    "notes": "Public dated news index verified 23 October 2026; latest entries 22 October. Several updates per week. Prioritize new AI capabilities, agent standards, workflow adoption and pricing changes; skip hiring, offices and public-affairs announcements. Verify original article dates.",
+    "priority": 1,
+    "articlePathPrefixes": [
+      "/news/"
+    ],
+    "maxDiscoveryLinks": 24
+  },
+  {
+    "id": "anthropic-research",
+    "name": "Anthropic — research and AI adoption",
+    "url": "https://www.anthropic.com/research",
+    "kind": "web",
+    "category": "research",
+    "enabled": true,
+    "notes": "Public dated research index verified 23 October 2026; entries dated 22, 20 and 16 October. Original evaluation, usage and workplace research. Prioritize measured behavior, adoption and workflow limits; filter unrelated biological and mathematical science. Report sample and study limits.",
+    "priority": 1,
+    "articlePathPrefixes": [
+      "/research/"
+    ],
+    "maxDiscoveryLinks": 20
+  },
+  {
+    "id": "anthropic-engineering",
+    "name": "Anthropic — engineering AI agents",
+    "url": "https://www.anthropic.com/engineering",
+    "kind": "web",
+    "category": "research",
+    "enabled": true,
+    "notes": "Public dated engineering index verified 23 October 2026. Low and irregular cadence: latest entry 13 October, previous 25 May. First-hand agent evaluation, context management, reliability and implementation studies. Preserve caveats; do not describe internal experiments as universal productivity gains.",
+    "priority": 2,
+    "articlePathPrefixes": [
+      "/engineering/"
+    ],
+    "maxDiscoveryLinks": 12
+  },
+  {
+    "id": "google-deepmind-research",
+    "name": "Google DeepMind — research and models",
+    "url": "https://deepmind.google/blog/",
+    "feedUrl": "https://deepmind.google/blog/rss.xml",
+    "kind": "rss",
+    "category": "research",
+    "enabled": true,
+    "notes": "Public feed entries and publication dates verified 23 October 2026. Several releases and research entries per month; latest 22 October. Agent capabilities, evaluations, multimodal interfaces and model efficiency. Filter unrelated physical-science coverage and deduplicate announcements also covered by Google AI.",
+    "priority": 1
+  },
+  {
+    "id": "google-ai-news",
+    "name": "Google — AI product announcements",
+    "url": "https://blog.google/innovation-and-ai/technology/ai/",
+    "feedUrl": "https://blog.google/innovation-and-ai/technology/ai/rss/",
+    "kind": "rss",
+    "category": "industry",
+    "enabled": true,
+    "notes": "Public feed entries and publication dates verified 23 October 2026. Canonical feed redirects from the older /technology/ai/rss/ URL. Weekly or irregular cadence; latest 21 October. Product workflow changes, AI adoption research and new interaction patterns. Deduplicate DeepMind announcements and exclude generic promotional recaps.",
+    "priority": 1
+  },
+  {
+    "id": "huggingface-blog",
+    "name": "Hugging Face — open AI models and workflows",
+    "url": "https://huggingface.co/blog",
+    "feedUrl": "https://huggingface.co/blog/feed.xml",
+    "kind": "rss",
+    "category": "industry",
+    "enabled": true,
+    "notes": "Public feed entries and publication dates verified 23 October 2026. High cadence: multiple entries on 22 and 21 October. Open models, evaluations, on-device deployment, inference costs and practical agent building. Posts include outside organizations; verify authorship and distinguish original measurements from unvalidated model marketing.",
+    "priority": 1
+  },
+  {
+    "id": "microsoft-research",
+    "name": "Microsoft Research — original studies",
+    "url": "https://www.microsoft.com/en-us/research/blog/",
+    "feedUrl": "https://www.microsoft.com/en-us/research/feed/",
+    "kind": "rss",
+    "category": "research",
+    "enabled": true,
+    "notes": "Public feed entries and publication dates verified 23 October 2026. Several entries per week; latest 22, 21 and 20 October. Human-AI collaboration, evaluations, interactive tools and workflow research. Follow original papers and report study populations; skip unrelated mathematics, recruiting and institutional announcements.",
+    "priority": 1
+  },
+  {
+    "id": "github-ai-workflows",
+    "name": "GitHub — AI and developer workflows",
+    "url": "https://github.blog/ai-and-ml/",
+    "kind": "web",
+    "category": "industry",
+    "enabled": true,
+    "notes": "Public index and RSS publication dates verified 23 October 2026; entries 20, 19 and 13 October. Several posts per week. First-hand AI adoption, developer research and product workflow changes. Use scoped index discovery because the full-content RSS feed is unusually large. Filter beginner tutorials, generic SEO and unrelated security announcements.",
+    "priority": 1,
+    "articlePathPrefixes": [
+      "/ai-and-ml/"
+    ],
+    "maxDiscoveryLinks": 20
+  },
+  {
+    "id": "cloudflare-engineering",
+    "name": "Cloudflare — agents and engineering",
+    "url": "https://blog.cloudflare.com/",
+    "feedUrl": "https://blog.cloudflare.com/rss/",
+    "kind": "rss",
+    "category": "industry",
+    "enabled": true,
+    "notes": "Public feed entries and publication dates verified 23 October 2026. High cadence: daily or several entries per week; latest 22 October. Practical agent infrastructure, AI discovery, inference economics and customer implementation cases. Exclude routine WAF, network, compliance and security bulletins without a product or growth implication.",
+    "priority": 2
+  },
+  {
+    "id": "stripe-product-research",
+    "name": "Stripe — SaaS economics and product cases",
+    "url": "https://stripe.com/blog",
+    "feedUrl": "https://stripe.com/blog/feed.rss",
+    "kind": "rss",
+    "category": "industry",
+    "enabled": true,
+    "notes": "Public feed entries and publication dates verified 23 October 2026. Several posts per week; latest 22 October, with SaaS research 19 October and AI monetization 13 October. Prioritize original SaaS surveys, pricing, conversion and AI business models; exclude routine finance product announcements without transferable lessons.",
+    "priority": 1
+  },
+  {
+    "id": "nielsen-norman-research",
+    "name": "Nielsen Norman Group — UX research",
+    "url": "https://www.nngroup.com/articles/",
+    "feedUrl": "https://www.nngroup.com/feed/rss/",
+    "kind": "rss",
+    "category": "research",
+    "enabled": true,
+    "notes": "Public feed entries and publication dates verified 23 October 2026. Weekly batches; entries 16 and 9 October. Original usability studies, AI interaction design, user understanding and research methods. Distinguish empirical studies from reference glossaries and opinion; preserve participant counts and limitations.",
+    "priority": 1
+  },
+  {
+    "id": "ethan-mollick-one-useful-thing",
+    "name": "One Useful Thing — Ethan Mollick",
+    "url": "https://www.oneusefulthing.org/",
+    "feedUrl": "https://www.oneusefulthing.org/feed",
+    "kind": "rss",
+    "category": "practitioner",
+    "enabled": true,
+    "notes": "Public feed entries and publication dates verified 23 October 2026. Irregular cadence, roughly every few weeks in the recent sample: 20 October, 1 October and 18 September. First-hand AI workflow experiments and research interpretation. Follow linked original papers; separate demonstrations and personal experience from controlled study results.",
+    "priority": 1,
+    "author": "Ethan Mollick"
+  },
+  {
+    "id": "spotify-engineering",
+    "name": "Spotify Engineering — experiments and AI",
+    "url": "https://engineering.atspotify.com/",
+    "feedUrl": "https://engineering.atspotify.com/feed",
+    "kind": "rss",
+    "category": "research",
+    "enabled": true,
+    "notes": "Public feed entries and publication dates verified 23 October 2026. Several entries per month; latest 16 and 8 October, with experimentation and engineering lessons in September. First-hand measurement, personalization, experiments and AI development studies. Skip infrastructure-only posts without a transferable product decision.",
+    "priority": 2
+  },
+  {
+    "id": "airbnb-engineering",
+    "name": "Airbnb — engineering and data science",
+    "url": "https://airbnb.tech/",
+    "feedUrl": "https://airbnb.tech/feed/",
+    "kind": "rss",
+    "category": "research",
+    "enabled": true,
+    "notes": "Public feed entries and publication dates verified 23 October 2026. Roughly weekly recent cadence: 13 and 6 October, 29 and 23 September. First-hand experimentation, search, personalization and AI product implementation. Require a clear transferable product or measurement lesson; avoid treating marketplace outcomes as B2B benchmarks.",
+    "priority": 2
+  },
+  {
+    "id": "netflix-engineering",
+    "name": "Netflix TechBlog — experiments and personalization",
+    "url": "https://netflixtechblog.com/",
+    "feedUrl": "https://netflixtechblog.com/feed",
+    "kind": "rss",
+    "category": "research",
+    "enabled": true,
+    "notes": "Public feed entries and publication dates verified 23 October 2026. Several technical posts per month; entries 22, 16 and 14 October. Primary experiments, recommendation measurement and AI interface cases. Prioritize adoption and experimentation lessons; filter storage, infrastructure and systems posts with no product implication.",
+    "priority": 2
+  },
+  {
+    "id": "slack-engineering",
+    "name": "Slack — engineering AI workflows",
+    "url": "https://slack.engineering/",
+    "feedUrl": "https://slack.engineering/feed/",
+    "kind": "rss",
+    "category": "research",
+    "enabled": true,
+    "notes": "Public feed entries and publication dates verified 23 October 2026. Low recent cadence: latest 14 July, preceded by June and May posts. Primary agent-context, AI reliability and workplace-product studies. Useful for discovery backfills and future updates, not a dependable daily-news source; filter infrastructure-only posts.",
+    "priority": 2
+  },
+  {
+    "id": "stanford-hai-research",
+    "name": "Stanford HAI — AI adoption research",
+    "url": "https://hai.stanford.edu/news",
+    "kind": "web",
+    "category": "research",
+    "enabled": true,
+    "notes": "Public institutional news index verified 23 October 2026; research coverage dated 21 and 7 October. Weekly or irregular cadence. Human-AI interaction, workplace adoption and original economic studies. Follow linked papers, verify the full publication year on each article, and exclude event, personnel and third-party media coverage.",
+    "priority": 2,
+    "articlePathPrefixes": [
+      "/news/"
+    ],
+    "maxDiscoveryLinks": 20
+  },
+  {
+    "id": "simon-willison",
+    "name": "Simon Willison — AI experiments and discovery",
+    "url": "https://simonwillison.net/",
+    "feedUrl": "https://simonwillison.net/atom/everything/",
+    "kind": "rss",
+    "category": "practitioner",
+    "author": "Simon Willison",
+    "enabled": true,
+    "notes": "Public Atom entries verified 23 October 2026; multiple entries dated 22 October. High cadence: daily experiments and primary-source discovery on AI models, agents, evaluation and tool design. Distinguish first-hand tests from quoted or linked commentary, follow original sources, and filter personal interests without a useful product implication.",
+    "priority": 1
+  },
+  {
+    "id": "addy-osmani-elevate",
+    "name": "Elevate — Addy Osmani",
+    "url": "https://addyo.substack.com/",
+    "feedUrl": "https://addyo.substack.com/feed",
+    "kind": "rss",
+    "category": "practitioner",
+    "author": "Addy Osmani",
+    "enabled": true,
+    "notes": "Public RSS verified 23 October 2026; latest visible issue dated 14 October. Regular but not daily publication on agent engineering, verification and effective AI workflows. Attribute experiments, separate opinion from measured results, and filter generic leadership or career material.",
+    "priority": 1
+  },
+  {
+    "id": "alexey-on-data",
+    "name": "Alexey On Data — AI Shipping Blog",
+    "url": "https://aishippingblog.com/",
+    "feedUrl": "https://aishippingblog.com/feed",
+    "kind": "rss",
+    "category": "practitioner",
+    "author": "Alexey Grigorev",
+    "enabled": true,
+    "notes": "Public RSS verified 23 October 2026; latest issue 20 October. Canonical domain verified from the redirect of alexeyondata.substack.com/feed. Several recent issues per month. First-hand AI system experiments, operational postmortems and agent workflows; filter course promotions and require practical transferable lessons.",
+    "priority": 1
+  },
+  {
+    "id": "tim-herbig-product-practice",
+    "name": "Product Practice — Tim Herbig",
+    "url": "https://newsletter.herbig.co/",
+    "kind": "web",
+    "category": "practitioner",
+    "author": "Tim Herbig",
+    "enabled": true,
+    "notes": "Public dated newsletter archive verified 23 October 2026; issues dated 23, 11 and 5 October. Roughly weekly product strategy, discovery, evidence and practical AI workflows. Discover public /posts/ articles: newsletter feed endpoints returned 404, while herbig.co/feed is a separate infrequent blog. Filter workshop promotions and follow original studies.",
+    "priority": 1,
+    "articlePathPrefixes": [
+      "/posts/"
+    ],
+    "maxDiscoveryLinks": 20
   }
 ];

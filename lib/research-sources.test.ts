@@ -30,4 +30,36 @@ describe('research source selection', () => {
       }
     }
   });
+
+  it('covers primary AI announcements, original research and operator experiments by default', () => {
+    const enabled = RESEARCH_SOURCE_SEEDS.filter(source => source.enabled);
+    const industryHosts = enabled.filter(source => source.category === 'industry').map(source => new URL(source.url).hostname);
+    expect(industryHosts).toEqual(expect.arrayContaining([
+      'openai.com', 'www.anthropic.com', 'blog.google', 'huggingface.co', 'github.blog', 'stripe.com',
+    ]));
+    const researchHosts = enabled.filter(source => source.category === 'research').map(source => new URL(source.url).hostname);
+    expect(researchHosts).toEqual(expect.arrayContaining([
+      'deepmind.google', 'www.microsoft.com', 'www.nngroup.com', 'hai.stanford.edu', 'airbnb.tech', 'netflixtechblog.com',
+    ]));
+    expect(enabled.find(source => source.author === 'Ethan Mollick')?.category).toBe('practitioner');
+    expect(enabled.filter(source => source.category === 'practitioner').map(source => source.author))
+      .toEqual(expect.arrayContaining(['Simon Willison', 'Addy Osmani', 'Alexey Grigorev', 'Tim Herbig']));
+  });
+
+  it('bounds new web discovery to publisher article paths', () => {
+    for (const id of ['anthropic-news', 'anthropic-research', 'anthropic-engineering', 'github-ai-workflows', 'stanford-hai-research', 'tim-herbig-product-practice']) {
+      const source = RESEARCH_SOURCE_SEEDS.find(item => item.id === id)!;
+      expect(source.kind).toBe('web');
+      expect(source.maxDiscoveryLinks).toBeGreaterThan(0);
+      expect(source.maxDiscoveryLinks).toBeLessThanOrEqual(24);
+      expect(source.articlePathPrefixes?.length).toBeGreaterThan(0);
+      for (const prefix of source.articlePathPrefixes ?? []) {
+        expect(prefix).toMatch(/^\/[^/]+\/$/);
+      }
+    }
+    expect(RESEARCH_SOURCE_SEEDS.find(source => source.id === 'google-ai-news')?.feedUrl)
+      .toBe('https://blog.google/innovation-and-ai/technology/ai/rss/');
+    expect(RESEARCH_SOURCE_SEEDS.find(source => source.id === 'alexey-on-data')?.feedUrl)
+      .toBe('https://aishippingblog.com/feed');
+  });
 });

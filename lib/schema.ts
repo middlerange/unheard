@@ -413,6 +413,7 @@ export const research_runs = sqliteTable('research_runs', {
   created_at: integer('created_at').notNull(), completed_at: integer('completed_at'),
   source_count: integer('source_count').notNull().default(0), collected_count: integer('collected_count').notNull().default(0), findings_count: integer('findings_count').notNull().default(0),
   input_tokens: integer('input_tokens').notNull().default(0), output_tokens: integer('output_tokens').notNull().default(0), cache_hits: integer('cache_hits').notNull().default(0),
+  diagnostics: text('diagnostics').notNull().default('{}'),
   error: text('error'), icp: text('icp').notNull(), source_ids: text('source_ids').notNull().default('[]'),
 });
 export const research_run_sources = sqliteTable('research_run_sources', {
@@ -422,6 +423,7 @@ export const research_run_sources = sqliteTable('research_run_sources', {
 export const research_items = sqliteTable('research_items', {
   id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }), source_id: text('source_id').notNull(),
   canonical_url: text('canonical_url').notNull(), title: text('title').notNull(), excerpt: text('excerpt').notNull(), published_at: integer('published_at'),
+  content_provenance: text('content_provenance').notNull().default('unknown'),
   content: text('content'), content_hash: text('content_hash'), collected_at: integer('collected_at').notNull(), content_type: text('content_type').notNull().default('article'), transcript_status: text('transcript_status').notNull().default('not_applicable'),
 });
 export const research_cache = sqliteTable('research_cache', {

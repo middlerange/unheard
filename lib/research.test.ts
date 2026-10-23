@@ -305,7 +305,8 @@ describe("research persistence and team isolation", () => {
       error: "test finished",
     });
   }, 20_000);
-  it("collects RSS over HTTP once per source step and leaves undated items unknown", async () => {
+  it("collects RSS once per step, recovers missing dates/public evidence, and preserves an established publication date", async () => {
+    globalThis.__contentHubResearchWorkflow__ = { create: vi.fn(async () => ({})) };
     const seed = RESEARCH_SOURCE_SEEDS.find(
       (source) => source.feedUrl && source.kind === "rss",
     )!;
@@ -364,10 +365,40 @@ describe("research persistence and team isolation", () => {
       ).toEqual([{ published_at: null }]);
       await processResearchJob({ operation: "rank", runId: run.id });
       expect((await getResearchSnapshot("b")).runs[0].status).toBe("completed");
+      const published = Date.parse("2026-10-22T10:00:00Z");
+      const publicText = "A public practitioner lesson explaining how interviews improve customer adoption. ".repeat(12).trim();
+      fetcher.mockResolvedValueOnce(new Response(
+        `<rss><channel><item><title>Updated original practitioner lesson</title><link>${hostname}/research-test-story</link><description>More useful public context</description><pubDate>Thu, 22 Oct 2026 10:00:00 GMT</pubDate><content:encoded><![CDATA[<p>${publicText}</p>]]></content:encoded></item></channel></rss>`,
+        { headers: { "content-type": "application/rss+xml" } },
+      ));
+      const second = await createResearchRun("b", { mode: "collect", days: 30 });
+      expect(await processResearchJob({ operation: "collect", runId: second.run.id, sourceId: seed.id })).toMatchObject({ collected: 0 });
+      expect(execute({ queries: [{ sql: "SELECT title,excerpt,published_at,content,content_provenance FROM research_items WHERE team_id='b'" }] })[0].results).toEqual([{
+        title: "Updated original practitioner lesson", excerpt: "More useful public context",
+        published_at: published, content: publicText, content_provenance: "public_feed",
+      }]);
+      await processResearchJob({ operation: "rank", runId: second.run.id });
+      const articleText = "Full public article evidence with the study methodology, outcomes, and relevant limitations. ".repeat(24).trim();
+      execute({ queries: [{
+        sql: "UPDATE research_items SET content=?,content_provenance='article',content_hash='verified-article-hash' WHERE team_id='b'",
+        params: [articleText],
+      }] });
+      fetcher.mockResolvedValueOnce(new Response(
+        `<rss><channel><item><title>Latest metadata for the same article</title><link>${hostname}/research-test-story</link><description>Another metadata refresh</description><pubDate>Fri, 23 Oct 2026 10:00:00 GMT</pubDate><content:encoded><![CDATA[<p>${publicText}</p>]]></content:encoded></item></channel></rss>`,
+        { headers: { "content-type": "application/rss+xml" } },
+      ));
+      const third = await createResearchRun("b", { mode: "collect", days: 30 });
+      expect(await processResearchJob({ operation: "collect", runId: third.run.id, sourceId: seed.id })).toMatchObject({ collected: 0 });
+      expect(execute({ queries: [{ sql: "SELECT title,excerpt,published_at,content,content_provenance,content_hash FROM research_items WHERE team_id='b'" }] })[0].results).toEqual([{
+        title: "Latest metadata for the same article", excerpt: "Another metadata refresh",
+        published_at: published, content: articleText, content_provenance: "article", content_hash: "verified-article-hash",
+      }]);
+      await processResearchJob({ operation: "rank", runId: third.run.id });
+      expect(fetcher).toHaveBeenCalledTimes(3);
     } finally {
       fetcher.mockRestore();
     }
-  }, 20_000);
+  }, 30_000);
   it("screens older eligible items beyond the first metadata batch and caches model responses", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(
       (source) => source.feedUrl && source.kind === "rss",
@@ -376,7 +407,7 @@ describe("research persistence and team isolation", () => {
     const articleUrl = `${new URL(seed.url).origin}/valuable-older-article`;
     const evidence =
       "The actual practitioner evidence is a concrete lesson about onboarding.";
-    const content = `${evidence} ${"Detailed first hand lessons and practical context. ".repeat(20)}`;
+    const content = `${evidence} ${"Detailed first hand lessons and practical context. ".repeat(80)}`;
     execute({
       queries: [
         {
@@ -398,7 +429,7 @@ describe("research persistence and team isolation", () => {
           params: ["ranking-step", "ranking-run", seed.id, "completed"],
         },
         ...Array.from({ length: 81 }, (_, index) => ({
-          sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at) VALUES(?,?,?,?,?,?,?,?)",
+          sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,?)",
           params: [
             `rank-item-${index}`,
             "a",
@@ -412,6 +443,8 @@ describe("research persistence and team isolation", () => {
             "Metadata context",
             now - index * 60_000,
             now,
+            index === 80 ? content : null,
+            index === 80 ? "public_feed" : "unknown",
           ],
         })),
       ],
@@ -429,7 +462,11 @@ describe("research persistence and team isolation", () => {
             "Act as a strict",
           );
           let value: unknown;
-          if (extraction)
+          if (extraction) {
+            expect(input.items[0]).toMatchObject({
+              content, contentProvenance: "public_feed",
+            });
+            expect(request.instructions).toContain("never infer a paid continuation");
             value = {
               findings: [
                 {
@@ -444,7 +481,11 @@ describe("research persistence and team isolation", () => {
                 },
               ],
             };
-          else {
+          } else {
+            const older = input.items.find((item: { id: string }) => item.id === "rank-item-80");
+            if (older) expect(older).toMatchObject({
+              publicText: content.slice(0, 2500), contentProvenance: "public_feed",
+            });
             screenedIds.push(
               ...input.items.map((item: { id: string }) => item.id),
             );
@@ -466,8 +507,7 @@ describe("research persistence and team isolation", () => {
             usage: { input_tokens: 20, output_tokens: 10 },
           });
         }
-        expect(String(url)).toBe(articleUrl);
-        return new Response(`<article>${content}</article>`);
+        throw new Error(`Retained public feed evidence should not require an article fetch: ${String(url)}`);
       });
     try {
       await processResearchJob({ operation: "rank", runId: "ranking-run" });
@@ -478,6 +518,10 @@ describe("research persistence and team isolation", () => {
           (finding) => finding.itemId === "rank-item-80",
         ),
       ).toBe(true);
+      expect((await getResearchSnapshot("a")).runs.find(run => run.id === "ranking-run")?.diagnostics).toMatchObject({
+        eligibleCount: 81, screenedCount: 81, shortlistedCount: 1, evidenceCount: 1,
+        outcome: "Reviewed public evidence for 1 shortlisted stories.",
+      });
       expect(
         execute({
           queries: [
@@ -495,7 +539,7 @@ describe("research persistence and team isolation", () => {
         ],
       });
       await processResearchJob({ operation: "rank", runId: "ranking-run" });
-      expect(fetcher).toHaveBeenCalledTimes(4);
+      expect(fetcher).toHaveBeenCalledTimes(3);
       expect(
         execute({
           queries: [
@@ -761,6 +805,14 @@ describe("research persistence and team isolation", () => {
             now,
           ],
         })),
+        {
+          sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content_type,transcript_status) VALUES('unreadable-video','empty-daily',?,'https://example.com/video','Fresh video','No public transcript',?,?,'video','unavailable')",
+          params: [seed.id, now - 1000, now],
+        },
+        {
+          sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at) VALUES('other-source-undated','empty-daily','not-in-this-run','https://example.com/other-source','Unselected source','Does not affect coverage',NULL,?)",
+          params: [now],
+        },
       ],
     });
     const fetcher = vi.spyOn(globalThis, "fetch");
@@ -774,6 +826,11 @@ describe("research persistence and team isolation", () => {
         inputTokens: 0,
         outputTokens: 0,
         findingsCount: 0,
+        diagnostics: {
+          eligibleCount: 0, undatedCount: 1, unavailableVideoCount: 1,
+          screenedCount: 0, shortlistedCount: 0, evidenceCount: 0,
+          outcome: "No dated, readable items in this window. Check source coverage and unavailable transcripts.",
+        },
       });
       expect(snapshot.findings).toHaveLength(0);
     } finally {
@@ -836,7 +893,8 @@ describe("research persistence and team isolation", () => {
     execute({
       queries: [
         {
-          sql: "UPDATE research_runs SET source_ids='[\"practitioner\"]' WHERE id='editorial-run'",
+          sql: "UPDATE research_runs SET source_ids=?,diagnostics=? WHERE id='editorial-run'",
+          params: [JSON.stringify(["practitioner"]), JSON.stringify({ eligibleCount: 3, screenedCount: 3, shortlistedCount: 3, evidenceCount: 3 })],
         },
         {
           sql: "INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp) VALUES('editorial-manual-run','editorial','scan','completed',30,?,'ICP')",
@@ -934,6 +992,11 @@ describe("research persistence and team isolation", () => {
         status: "completed",
         inputTokens: 90,
         outputTokens: 120,
+        diagnostics: {
+          eligibleCount: 3, screenedCount: 3, shortlistedCount: 3, evidenceCount: 3,
+          draftCandidatesCount: 3, draftedCount: 2,
+          outcome: "Created 2 drafts; review delivery is tracked with each draft.",
+        },
       });
       expect(
         execute({

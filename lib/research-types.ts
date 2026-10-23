@@ -6,17 +6,30 @@ export type ResearchSourceSeed = {
   feedUrl?: string;
   kind: "rss" | "web" | "youtube" | "community";
   category:
-    "practitioner" | "research" | "competitor" | "community" | "youtube";
+    "practitioner" | "research" | "industry" | "competitor" | "community" | "youtube";
   author?: string;
   enabled: boolean;
   notes: string;
   priority: 1 | 2 | 3;
   channelId?: string;
+  articlePathPrefixes?: string[];
+  maxDiscoveryLinks?: number;
 };
 export type ResearchSource = ResearchSourceSeed & {
   lastCollectedAt: number | null;
   lastError: string | null;
   itemCount: number;
+};
+export type ResearchRunDiagnostics = {
+  eligibleCount?: number;
+  undatedCount?: number;
+  unavailableVideoCount?: number;
+  screenedCount?: number;
+  shortlistedCount?: number;
+  evidenceCount?: number;
+  draftCandidatesCount?: number;
+  draftedCount?: number;
+  outcome?: string;
 };
 export type ResearchRun = {
   id: string;
@@ -34,6 +47,7 @@ export type ResearchRun = {
   outputTokens: number;
   cacheHits: number;
   error: string | null;
+  diagnostics?: ResearchRunDiagnostics;
 };
 export type ResearchFinding = {
   id: string;

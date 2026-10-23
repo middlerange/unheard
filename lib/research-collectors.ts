@@ -6,6 +6,7 @@ export type CollectedItem = {
   excerpt: string;
   publishedAt: number | null;
   content?: string;
+  contentProvenance?: "public_feed" | "article" | "transcript";
   contentType: "article" | "video";
   transcriptStatus: "not_applicable" | "unavailable" | "available";
 };
@@ -41,11 +42,14 @@ export function assertPublicResearchUrl(
   return url;
 }
 export function sourceHosts(source: ResearchSourceSeed) {
-  return new Set(
+  const hosts = new Set(
     [source.url, source.feedUrl]
       .filter(Boolean)
       .map((url) => new URL(url!).hostname),
   );
+  const host = new URL(source.url).hostname;
+  hosts.add(host.startsWith("www.") ? host.slice(4) : `www.${host}`);
+  return hosts;
 }
 export async function fetchResearchText(
   raw: string,
@@ -121,7 +125,13 @@ export function parseResearchDate(
   now = Date.now(),
 ): number | null {
   if (typeof raw !== "string" || !raw.trim()) return null;
-  const parsed = Date.parse(raw);
+  const value = raw.trim();
+  const dateOnly = /^[A-Za-z]+\s+\d{1,2},?\s+\d{4}$/.test(value);
+  const unzonedIso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(value);
+  let normalized = value;
+  if (dateOnly) normalized = `${value} UTC`;
+  else if (unzonedIso) normalized = `${value}Z`;
+  const parsed = Date.parse(normalized);
   return Number.isFinite(parsed) && parsed > 0 && parsed <= now + 86_400_000
     ? parsed
     : null;
@@ -172,6 +182,9 @@ export function parseResearchFeed(
       assertPublicResearchUrl(url, sourceHosts(source));
       const title = plainResearchText(nodeText(entry.title)).slice(0, 300);
       if (!title || !raw) return [];
+      const publicBody = source.kind === "youtube" ? "" : plainResearchText(
+        nodeText(entry["content:encoded"] || entry.content),
+      ).slice(0, 14_000);
       return [
         {
           url,
@@ -190,6 +203,10 @@ export function parseResearchFeed(
           publishedAt: parseResearchDate(
             nodeText(entry.pubDate || entry.published || entry["dc:date"]),
           ),
+          ...(publicBody.length >= 500 ? {
+            content: publicBody,
+            contentProvenance: "public_feed" as const,
+          } : {}),
           contentType:
             source.kind === "youtube"
               ? ("video" as const)
@@ -205,32 +222,90 @@ export function parseResearchFeed(
     }
   });
 }
-export function articleResearchDate(html: string): number | null {
-  const meta =
-    html.match(
-      /<meta\b[^>]*(?:property|name)=["'](?:article:published_time|datePublished|date|pubdate)["'][^>]*content=["']([^"']+)["']/i,
-    )?.[1] ||
-    html.match(
-      /<meta\b[^>]*content=["']([^"']+)["'][^>]*(?:property|name)=["'](?:article:published_time|datePublished|date|pubdate)["']/i,
-    )?.[1] ||
-    html.match(/"datePublished"\s*:\s*"([^"]+)"/)?.[1] ||
-    html.match(/<time\b[^>]*datetime=["']([^"']+)["']/i)?.[1];
-  return parseResearchDate(meta);
+function htmlAttributes(tag: string): Record<string, string> {
+  return Object.fromEntries([...tag.matchAll(
+    /([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g,
+  )].map(match => [match[1].toLowerCase(), match[2] ?? match[3] ?? match[4]]));
+}
+
+function articleRegion(html: string): string {
+  const region = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i)?.[1]
+    || html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1]
+    || "";
+  return region.replace(/<(nav|footer|aside)\b[^>]*>[\s\S]*?<\/\1>/gi, " ");
+}
+
+export function articleResearchDate(
+  html: string,
+  articleUrl?: string,
+  now = Date.now(),
+): number | null {
+  for (const tag of html.matchAll(/<meta\b[^>]*>/gi)) {
+    const attributes = htmlAttributes(tag[0]);
+    if (!/^(article:published_time|datePublished|pubdate)$/i.test(attributes.property || attributes.name || "")) continue;
+    const date = parseResearchDate(attributes.content, now);
+    if (date !== null) return date;
+  }
+  const articles: Array<Record<string, unknown>> = [];
+  function readStructured(value: unknown): void {
+    if (Array.isArray(value)) {
+      value.forEach(readStructured);
+    } else if (value && typeof value === "object") {
+      const row = value as Record<string, unknown>;
+      const types = Array.isArray(row["@type"]) ? row["@type"] : [row["@type"]];
+      if (types.some(type => typeof type === "string" && /(?:^|[/#])(Article|BlogPosting|NewsArticle|Report|TechArticle)$/i.test(type))) articles.push(row);
+      if (row["@graph"]) readStructured(row["@graph"]);
+      if (row.mainEntity) readStructured(row.mainEntity);
+    }
+  }
+  for (const script of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+    if (!/^application\/ld\+json$/i.test(htmlAttributes(script[1]).type || "")) continue;
+    try { readStructured(JSON.parse(script[2])); } catch { /* Ignore malformed structured data. */ }
+  }
+  const matching = articleUrl ? articles.filter(article => {
+    const page = article.mainEntityOfPage;
+    let identity = article.url || article["@id"];
+    if (!identity && typeof page === "string") identity = page;
+    else if (!identity && page && typeof page === "object") identity = (page as Record<string, unknown>)["@id"];
+    try { return typeof identity === "string" && canonicalResearchUrl(identity) === canonicalResearchUrl(articleUrl); } catch { return false; }
+  }) : [];
+  const article = matching[0] || (articles.length === 1 ? articles[0] : undefined);
+  const structuredDate = parseResearchDate(article?.datePublished, now);
+  if (structuredDate !== null) return structuredDate;
+  const region = articleRegion(html);
+  for (const match of region.matchAll(/<time\b([^>]*)>([\s\S]*?)<\/time>/gi)) {
+    const attributes = htmlAttributes(match[1]);
+    if (/modified|updated/i.test(`${attributes.itemprop || ""} ${attributes.class || ""}`)) continue;
+    const preceding = plainResearchText(region.slice(Math.max(0, match.index - 80), match.index));
+    const explicit = /^datePublished$/i.test(attributes.itemprop || "")
+      || /\bpubdate(?:\s|=|$)/i.test(match[1])
+      || /\b(published|entry-date|post-date|published-date|posted-on)\b/i.test(attributes.class || "")
+      || /\bPublished(?:\s+on)?\s*:?\s*$/i.test(preceding);
+    if (!explicit) continue;
+    const date = parseResearchDate(attributes.datetime, now);
+    if (date !== null) return date;
+  }
+  const published = plainResearchText(region.replace(/<\/?header\b[^>]*>/gi, "")).match(
+    /\bPublished(?:\s+on)?\s*:?\s+((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:st|nd|rd|th)?[,]?\s+\d{4}|\d{4}-\d{2}-\d{2})\b/i,
+  )?.[1];
+  return parseResearchDate(published?.replace(/(\d)(st|nd|rd|th)\b/gi, "$1"), now);
 }
 export function discoverResearchLinks(
   html: string,
   source: ResearchSourceSeed,
 ): string[] {
-  const urls = new Set<string>();
-  const region =
-    html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1] ||
-    html.replace(/<(nav|header|footer|aside)\b[^>]*>[\s\S]*?<\/\1>/gi, " ");
+  const urls = new Map<string, number>();
+  const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1];
+  const region = main
+    ? main.replace(/<(nav|footer|aside)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    : html.replace(/<(nav|header|footer|aside)\b[^>]*>[\s\S]*?<\/\1>/gi, " ");
   for (const match of region.matchAll(
     /<a\b([^>]*?)href=["']([^"']+)["']([^>]*)>([\s\S]*?)<\/a>/gi,
   )) {
     const attributes = `${match[1]} ${match[3]}`;
     const accessibleTitle =
-      attributes.match(/\b(?:aria-label|title)=["']([^"']+)["']/i)?.[1] || "";
+      attributes.match(/\b(?:aria-label|title)=["']([^"']+)["']/i)?.[1]
+      || match[4].match(/<img\b[^>]*alt=["']([^"']+)["']/i)?.[1] || "";
     if (
       Math.max(
         plainResearchText(match[4]).length,
@@ -243,19 +318,23 @@ export function discoverResearchLinks(
         new URL(match[2].replace(/&amp;/g, "&"), source.url).href,
       );
       assertPublicResearchUrl(url, sourceHosts(source));
-      if (
-        url !== canonicalResearchUrl(source.url) &&
-        !/\/(tag|category|about|contact|privacy|login|subscribe|archive)(\/|$)/i.test(
-          new URL(url).pathname,
-        )
-      )
-        urls.add(url);
+      const path = new URL(url).pathname;
+      if (url === canonicalResearchUrl(source.url)
+        || /\/(tags?|categor(?:y|ies)|about|contact|privacy|terms|login|sign-?in|subscribe|archive|search|authors?|careers|jobs|pricing|demo)(\/|$)/i.test(path)
+        || /\.(pdf|zip|png|jpe?g|gif|mp[34])$/i.test(path)) continue;
+      const prefixes = source.articlePathPrefixes;
+      if (prefixes?.length && !prefixes.some(prefix => path.startsWith(`${prefix.replace(/\/$/, "")}/`))) continue;
+      const score = (/\/p\/[^/]+/.test(path) ? 100 : 0)
+        + (/\/(blog|articles?|research|insights|posts|widget|news)\/[^/]+/i.test(path) ? 60 : 0)
+        + (/\/\d{4}\/\d{1,2}\//.test(path) ? 70 : 0)
+        + (Math.max(plainResearchText(match[4]).length, accessibleTitle.length) >= 40 ? 5 : 0);
+      urls.set(url, Math.max(urls.get(url) || 0, score));
     } catch {
       /* An external or invalid link is not a source article. */
     }
-    if (urls.size >= 8) break;
   }
-  return [...urls];
+  const limit = Math.min(40, Math.max(1, source.maxDiscoveryLinks ?? 24));
+  return [...urls].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([url]) => url);
 }
 export async function collectResearchSource(
   source: ResearchSourceSeed,
@@ -273,21 +352,25 @@ export async function collectResearchSource(
     throw new Error(
       "No public article links found in the source content region",
     );
-  const results = await Promise.allSettled(
-    links.map(async (url) => {
+  const results: PromiseSettledResult<CollectedItem>[] = [];
+  for (let start = 0; start < links.length; start += 4) {
+    results.push(...await Promise.allSettled(links.slice(start, start + 4).map(async (url) => {
       const html = await fetchResearchText(url, sourceHosts(source));
+      const content = articleResearchText(html).slice(0, 14_000);
       return {
         url,
         title: plainResearchText(
-          html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "",
+          articleRegion(html).match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)?.[1]
+            || html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "",
         ).slice(0, 300),
-        excerpt: articleResearchText(html).slice(0, 1600),
-        publishedAt: articleResearchDate(html),
+        excerpt: content.slice(0, 1600),
+        publishedAt: articleResearchDate(html, url),
+        ...(content.length >= 500 ? { content, contentProvenance: "article" as const } : {}),
         contentType: "article" as const,
         transcriptStatus: "not_applicable" as const,
       };
-    }),
-  );
+    })));
+  }
   const items = results.flatMap((result) =>
     result.status === "fulfilled" && result.value.title ? [result.value] : [],
   );
@@ -391,7 +474,6 @@ export async function fetchPublicYoutubeTranscript(
 }
 
 export function articleResearchText(html: string) {
-  const article = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i)?.[1];
-  const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1];
-  return plainResearchText(article || main || html);
+  const region = articleRegion(html);
+  return plainResearchText(region ? region.replace(/<\/?header\b[^>]*>/gi, "") : html);
 }
