@@ -61,5 +61,7 @@ describe('research source selection', () => {
       .toBe('https://blog.google/innovation-and-ai/technology/ai/rss/');
     expect(RESEARCH_SOURCE_SEEDS.find(source => source.id === 'alexey-on-data')?.feedUrl)
       .toBe('https://aishippingblog.com/feed');
+    expect(RESEARCH_SOURCE_SEEDS.find(source => source.id === 'anthropic-engineering')?.articlePathPrefixes)
+      .toEqual(['/engineering/', '/research/']);
   });
 });

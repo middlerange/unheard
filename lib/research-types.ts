@@ -29,6 +29,7 @@ export type ResearchRunDiagnostics = {
   evidenceCount?: number;
   draftCandidatesCount?: number;
   draftedCount?: number;
+  rejectedStories?: Array<{ title: string; score: number | null; reason: string }>;
   outcome?: string;
 };
 export type ResearchRun = {

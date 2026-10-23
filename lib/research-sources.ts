@@ -770,7 +770,8 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "notes": "Public dated engineering index verified 23 October 2026. Low and irregular cadence: latest entry 13 October, previous 25 May. First-hand agent evaluation, context management, reliability and implementation studies. Preserve caveats; do not describe internal experiments as universal productivity gains.",
     "priority": 2,
     "articlePathPrefixes": [
-      "/engineering/"
+      "/engineering/",
+      "/research/"
     ],
     "maxDiscoveryLinks": 12
   },

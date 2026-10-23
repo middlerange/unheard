@@ -2,7 +2,7 @@ import { z } from "zod";
 import { beginResearchUsage, finishResearchUsage, type ResearchUsageContext } from "./research-usage";
 import type { ModelUsage } from "./research-pricing";
 export const RESEARCH_MODEL = "gpt-6-luna";
-export const RESEARCH_PROMPT_VERSION = "research-v2";
+export const RESEARCH_PROMPT_VERSION = "research-v3";
 const text = z.string().max(1600);
 export const researchEvidenceSchema = z.object({
   findings: z

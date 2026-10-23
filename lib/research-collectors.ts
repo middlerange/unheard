@@ -109,14 +109,25 @@ export async function fetchResearchText(
   throw new Error("Too many redirects");
 }
 export function plainResearchText(raw: string) {
-  return raw
+  const entities: Record<string, string> = {
+    amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
+  };
+  let decoded = raw;
+  for (let pass = 0; pass < 2; pass++) {
+    const next = decoded.replace(/&(#(?:x[0-9a-f]{1,6}|\d{1,7})|amp|lt|gt|quot|apos|nbsp);/gi, (entity, name: string) => {
+      if (!name.startsWith("#")) return entities[name.toLowerCase()];
+      const hex = /^#x/i.test(name);
+      const codepoint = Number.parseInt(name.slice(hex ? 2 : 1), hex ? 16 : 10);
+      return codepoint > 0 && codepoint <= 0x10ffff && !(codepoint >= 0xd800 && codepoint <= 0xdfff)
+        ? String.fromCodePoint(codepoint)
+        : entity;
+    });
+    if (next === decoded) break;
+    decoded = next;
+  }
+  return decoded
     .replace(/<(script|style|nav|footer|header)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;|&apos;/g, "'")
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/<!--[\s\S]*?-->|<![^>]*>|<\/?[a-zA-Z][^>]*>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -296,42 +307,48 @@ export function discoverResearchLinks(
 ): string[] {
   const urls = new Map<string, number>();
   const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1];
-  const region = main
+  const region = main !== undefined
     ? main.replace(/<(nav|footer|aside)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
     : html.replace(/<(nav|header|footer|aside)\b[^>]*>[\s\S]*?<\/\1>/gi, " ");
-  for (const match of region.matchAll(
-    /<a\b([^>]*?)href=["']([^"']+)["']([^>]*)>([\s\S]*?)<\/a>/gi,
-  )) {
-    const attributes = `${match[1]} ${match[3]}`;
-    const accessibleTitle =
-      attributes.match(/\b(?:aria-label|title)=["']([^"']+)["']/i)?.[1]
-      || match[4].match(/<img\b[^>]*alt=["']([^"']+)["']/i)?.[1] || "";
-    if (
-      Math.max(
+  function readLinks(content: string): void {
+    for (const match of content.matchAll(
+      /<a\b([^>]*?)href=["']([^"']+)["']([^>]*)>([\s\S]*?)<\/a>/gi,
+    )) {
+      const attributes = `${match[1]} ${match[3]}`;
+      const accessibleTitle =
+        attributes.match(/\b(?:aria-label|title)=["']([^"']+)["']/i)?.[1]
+        || match[4].match(/<img\b[^>]*alt=["']([^"']+)["']/i)?.[1] || "";
+      const labelLength = Math.max(
         plainResearchText(match[4]).length,
         plainResearchText(accessibleTitle).length,
-      ) < 15
-    )
-      continue;
-    try {
-      const url = canonicalResearchUrl(
-        new URL(match[2].replace(/&amp;/g, "&"), source.url).href,
       );
-      assertPublicResearchUrl(url, sourceHosts(source));
-      const path = new URL(url).pathname;
-      if (url === canonicalResearchUrl(source.url)
-        || /\/(tags?|categor(?:y|ies)|about|contact|privacy|terms|login|sign-?in|subscribe|archive|search|authors?|careers|jobs|pricing|demo)(\/|$)/i.test(path)
-        || /\.(pdf|zip|png|jpe?g|gif|mp[34])$/i.test(path)) continue;
-      const prefixes = source.articlePathPrefixes;
-      if (prefixes?.length && !prefixes.some(prefix => path.startsWith(`${prefix.replace(/\/$/, "")}/`))) continue;
-      const score = (/\/p\/[^/]+/.test(path) ? 100 : 0)
-        + (/\/(blog|articles?|research|insights|posts|widget|news)\/[^/]+/i.test(path) ? 60 : 0)
-        + (/\/\d{4}\/\d{1,2}\//.test(path) ? 70 : 0)
-        + (Math.max(plainResearchText(match[4]).length, accessibleTitle.length) >= 40 ? 5 : 0);
-      urls.set(url, Math.max(urls.get(url) || 0, score));
-    } catch {
-      /* An external or invalid link is not a source article. */
+      try {
+        const url = canonicalResearchUrl(
+          new URL(match[2].replace(/&amp;/g, "&"), source.url).href,
+        );
+        assertPublicResearchUrl(url, sourceHosts(source));
+        const path = new URL(url).pathname;
+        if (url === canonicalResearchUrl(source.url)
+          || /\/(tags?|categor(?:y|ies)|about|contact|privacy|terms|login|sign-?in|subscribe|archive|search|authors?|teams?|people|topics?|careers|jobs|pricing|demo)(\/|$)/i.test(path)
+          || /\.(pdf|zip|png|jpe?g|gif|mp[34])$/i.test(path)) continue;
+        const prefixes = source.articlePathPrefixes;
+        const scopedArticle = prefixes?.some(prefix => path.startsWith(`${prefix.replace(/\/$/, "")}/`));
+        if (prefixes?.length && !scopedArticle) continue;
+        // Publisher article paths also cover overlay links with no text inside.
+        if (!scopedArticle && labelLength < 15) continue;
+        const score = (/\/p\/[^/]+/.test(path) ? 100 : 0)
+          + (/\/(blog|articles?|research|insights|posts|widget|news)\/[^/]+/i.test(path) ? 60 : 0)
+          + (/\/\d{4}\/\d{1,2}\//.test(path) ? 70 : 0)
+          + (labelLength >= 40 ? 5 : 0);
+        urls.set(url, Math.max(urls.get(url) || 0, score));
+      } catch {
+        /* An external or invalid link is not a source article. */
+      }
     }
+  }
+  readLinks(region);
+  if (!urls.size && main !== undefined && source.articlePathPrefixes?.length) {
+    readLinks(html.replace(/<(script|style|nav|footer|aside)\b[^>]*>[\s\S]*?<\/\1>/gi, " "));
   }
   const limit = Math.min(40, Math.max(1, source.maxDiscoveryLinks ?? 24));
   return [...urls].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([url]) => url);

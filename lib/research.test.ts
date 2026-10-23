@@ -24,7 +24,7 @@ import {
   signResearchRequest,
   verifyResearchRequest,
 } from "./research-internal";
-import { validateResearchEvidence } from "./research-model";
+import { researchHash, validateResearchEvidence } from "./research-model";
 import { callResearchModel } from "./research-model";
 import { beginResearchUsage, finishResearchUsage, getResearchUsage } from "./research-usage";
 import {
@@ -399,6 +399,98 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
     }
   }, 30_000);
+  it("updates accepted assessments without losing saved ideas and never drafts an older finding rejected by the current scan", async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.feedUrl && source.kind === "rss")!;
+    const now = Date.now();
+    const strongQuote = "The optional marketing consent never blocks account creation, while every required consent must be accepted.";
+    const weakQuote = "Our launch campaign celebrates the new brand with a collection of broad productivity tips.";
+    const rejectedReason = "A promotional campaign with no concrete product decision, implementation detail, or useful profile-specific lesson.";
+    const items = [
+      { id: "assessed-strong", title: "A documented signup design tradeoff", quote: strongQuote },
+      { id: "assessed-weak", title: "A generic launch campaign", quote: weakQuote },
+    ];
+    const findingIds = await Promise.all(items.map(item => researchHash(`assessments:${item.id}`)));
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('assessments','Assessments','assessments',?,?)", params: [now, now] },
+      { sql: "INSERT INTO ideas(id,team_id,text,created_at,updated_at) VALUES('assessment-idea','assessments','A saved product lesson',?,?)", params: [now - 120_000, now - 120_000] },
+      { sql: "INSERT INTO channels(id,team_id,name,platform,group_name,research_enabled,system_prompt,created_at) VALUES('assessments-linkedin','assessments','Product lessons','linkedin','custom',1,'Write practical onboarding observations for product managers',?)", params: [now] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp) VALUES('assessments-previous','assessments','scan','completed',30,?,'Product managers')", params: [now - 120_000] },
+      {
+        sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES('assessments-run','assessments','scan','collecting',1,1,?,'Product managers evaluating onboarding decisions',1,?)",
+        params: [now, JSON.stringify([seed.id])],
+      },
+      { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES('assessments-step','assessments-run',?,'completed')", params: [seed.id] },
+      ...items.map(item => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,'assessments',?,?,?,?,?,?,?,'public_feed')",
+        params: [item.id, seed.id, `${new URL(seed.url).origin}/${item.id}`, item.title, item.quote, now - 60_000, now, `${item.quote} ${"Public context for this specific account. ".repeat(20)}`],
+      })),
+      ...items.map((item, index) => ({
+        sql: "INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,status,idea_id,created_at,family_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        params: [findingIds[index], "assessments", "assessments-previous", item.id, seed.id, item.title, `${new URL(seed.url).origin}/${item.id}`, now - 60_000, index === 0 ? 78 : 90, "Earlier summary", "Earlier implication", "Earlier angle", item.quote, "Earlier limitation", index === 0 ? "saved" : "new", index === 0 ? "assessment-idea" : null, now - 120_000, `previous-family-${index}`],
+      })),
+    ] });
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-assessments-key";
+    const draftedTitles: string[] = [];
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (!String(url).startsWith("https://api.openai.com/")) throw new Error("Public feed evidence should already be available");
+      const request = JSON.parse(String(init?.body));
+      const input = JSON.parse(request.input);
+      if (input.source) {
+        draftedTitles.push(input.source.title);
+        return Response.json({
+          status: "completed", usage: { input_tokens: 100, output_tokens: 50 },
+          output: [{ content: [{ type: "output_text", text: JSON.stringify({
+            ready: true, reason: "A specific documented onboarding decision.",
+            targets: [{ channelId: "assessments-linkedin", platform: "linkedin", content: `Required and optional consent follow different signup paths. Audit alternate authentication paths before changing gates. Source: ${input.source.url}`, thread: [], supportQuote: strongQuote, redditTitle: null, subreddit: null }],
+          }) }] }],
+        });
+      }
+      expect(input.items.map((item: { id: string }) => item.id).sort()).toEqual(items.map(item => item.id).sort());
+      if (request.text.format.schema.properties.findings) {
+        expect(request.text.format.schema.properties.findings).toMatchObject({ minItems: 2, maxItems: 2 });
+      }
+      const value = request.text.format.schema.properties.itemIds
+        ? { itemIds: items.map(item => item.id) }
+        : { findings: items.map((item, index) => ({
+          itemId: item.id,
+          score: index === 0 ? 86 : 62,
+          summary: index === 0 ? "Required and optional consent follow separate signup paths." : "A broad promotional launch.",
+          whyItMatters: index === 0 ? "Product teams must consider every account-creation path." : "No meaningful product implication is documented.",
+          contentAngle: index === 0 ? "Audit alternate authentication paths before changing consent gates." : "No supported editorial angle.",
+          evidence: item.quote,
+          limitations: index === 0 ? "A descriptive first-party public-feed account; no conversion impact was measured." : rejectedReason,
+          familyKey: index === 0 ? "signup-consent-design" : "generic-launch-campaign",
+        })) };
+      return Response.json({
+        status: "completed", usage: { input_tokens: 100, output_tokens: 50 },
+        output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }],
+      });
+    });
+    try {
+      await processResearchJob({ operation: "rank", runId: "assessments-run" });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(execute({ queries: [{ sql: "SELECT item_id,score FROM research_findings WHERE team_id='assessments' AND run_id='assessments-run'" }] })[0].results)
+        .toEqual([{ item_id: "assessed-strong", score: 86 }]);
+      expect(execute({ queries: [{ sql: "SELECT score,status,idea_id,created_at,summary FROM research_findings WHERE item_id='assessed-strong' AND team_id='assessments'" }] })[0].results)
+        .toEqual([{ score: 86, status: "saved", idea_id: "assessment-idea", created_at: now - 120_000, summary: "Required and optional consent follow separate signup paths." }]);
+      expect(execute({ queries: [{ sql: "SELECT score,run_id FROM research_findings WHERE item_id='assessed-weak' AND team_id='assessments'" }] })[0].results)
+        .toEqual([{ score: 90, run_id: "assessments-previous" }]);
+      const [stored] = execute({ queries: [{ sql: "SELECT status,diagnostics FROM research_runs WHERE id='assessments-run'" }] })[0].results;
+      expect(stored.status).toBe("drafting");
+      expect(JSON.parse(stored.diagnostics)).toMatchObject({
+        shortlistedCount: 2, evidenceCount: 2,
+        rejectedStories: [{ title: "A generic launch campaign", score: 62, reason: rejectedReason }],
+      });
+      expect(await processResearchDraftJob("assessments-run")).toEqual({ drafted: 1 });
+      expect(draftedTitles).toEqual(["A documented signup design tradeoff"]);
+      expect(fetcher).toHaveBeenCalledTimes(3);
+    } finally {
+      fetcher.mockRestore();
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+    }
+  }, 20_000);
   it("screens older eligible items beyond the first metadata batch and caches model responses", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(
       (source) => source.feedUrl && source.kind === "rss",
@@ -859,6 +951,7 @@ describe("research persistence and team isolation", () => {
           { id: "best", at: now - 86400000, score: 95 },
           { id: "runner", at: now - 1000, score: 90 },
           { id: "third", at: now - 1000, score: 85 },
+          { id: "previous-manual", at: now - 1000, score: 99 },
         ].flatMap((entry) => [
           {
             sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content) VALUES(?,'editorial','practitioner',?,?,?, ?,?,?)",
@@ -901,7 +994,7 @@ describe("research persistence and team isolation", () => {
           params: [now - 1],
         },
         {
-          sql: "UPDATE research_findings SET run_id='editorial-manual-run' WHERE id='ed-finding-third'",
+          sql: "UPDATE research_findings SET run_id='editorial-manual-run' WHERE id='ed-finding-previous-manual'",
         },
       ],
     });
@@ -1249,7 +1342,7 @@ describe("research persistence and team isolation", () => {
     ).toEqual({ ideaId: "research-finding" });
     await actOnResearchFinding("a", { id: "finding", action: "save_idea" });
     expect(
-      execute({ queries: [{ sql: "SELECT COUNT(*) AS count FROM ideas" }] })[0]
+      execute({ queries: [{ sql: "SELECT COUNT(*) AS count FROM ideas WHERE team_id='a'" }] })[0]
         .results,
     ).toEqual([{ count: 1 }]);
     expect((await getResearchSnapshot("b")).findings).toHaveLength(0);

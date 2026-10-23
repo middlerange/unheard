@@ -5,6 +5,7 @@ import {
   discoverResearchLinks,
   fetchResearchText,
   parseResearchFeed,
+  plainResearchText,
   sourceHosts,
 } from "./research-collectors";
 import type { ResearchSourceSeed } from "./research-types";
@@ -35,6 +36,19 @@ describe("public research evidence and publication dates", () => {
     expect(parseResearchFeed(atom, source)[0]).toMatchObject({ content: evidence.trim(), contentProvenance: "public_feed" });
     expect(parseResearchFeed(atom, { ...source, kind: "youtube" })[0]).toMatchObject({ contentType: "video", transcriptStatus: "unavailable" });
     expect(parseResearchFeed(atom, { ...source, kind: "youtube" })[0].content).toBeUndefined();
+  });
+
+  it("decodes escaped Atom HTML and numeric entities before extracting readable public evidence", () => {
+    const atom = `<feed><entry><title>Cloudflare&#x27;s product lesson</title><link href="https://example.com/story"/><published>2026-10-22T10:00:00Z</published><content type="html">&amp;lt;p&amp;gt;Cloudflare&amp;#x27;s public evidence. ${evidence}&amp;lt;/p&amp;gt;</content></entry></feed>`;
+    const item = parseResearchFeed(atom, source)[0];
+    expect(item.title).toBe("Cloudflare's product lesson");
+    expect(item.content).toBe(`Cloudflare's public evidence. ${evidence.trim()}`);
+    expect(item.excerpt).toBe(item.content);
+    expect(item.contentProvenance).toBe("public_feed");
+    expect(plainResearchText("&lt;script&gt;do not use this&lt;/script&gt; Useful &amp; accurate &#x1f680; text")).toBe("Useful & accurate 🚀 text");
+    expect(plainResearchText("&amp;amp;lt;p&amp;amp;gt;Bounded decoding")).toContain("&lt;p&gt;");
+    expect(plainResearchText("Invalid &#x110000; &#xD800; references")).toBe("Invalid &#x110000; &#xD800; references");
+    expect(() => parseResearchFeed('<!DOCTYPE feed [<!ENTITY leak SYSTEM "file:///etc/passwd">]><feed/>', source)).toThrow("Unsupported XML");
   });
 
   it("uses published metadata and ignores modified-only, navigation, and footer dates", () => {
@@ -86,6 +100,29 @@ describe("bounded public source discovery", () => {
   it("reads image alt titles and prefers article routes over generic resources", () => {
     const html = '<main><a href="/library">Browse the full research library</a><a href="/p/new-research"><img alt="Original customer adoption research" src="/card.png"></a><a href="/research/report.pdf">Download the complete research PDF</a></main>';
     expect(discoverResearchLinks(html, { ...source, maxDiscoveryLinks: 1 })).toEqual(["https://example.com/p/new-research"]);
+  });
+
+  it("accepts short and empty overlay links only under explicitly approved article paths", () => {
+    const html = '<main><a href="/news/real-study">Read more</a><a href="/news/another-study" class="card-overlay"></a><a href="/news/">News</a><a href="/news?filterBy=all">Filter</a><a href="/news/archive">Archive</a><a href="/elsewhere/something"></a><a href="https://outside.example/news/real-study">Read more</a></main>';
+    const scoped = { ...source, articlePathPrefixes: ["/news/"] };
+    expect(discoverResearchLinks(html, scoped)).toEqual([
+      "https://example.com/news/real-study", "https://example.com/news/another-study",
+    ]);
+    expect(discoverResearchLinks(html, source)).toEqual([]);
+  });
+
+  it("falls back beyond an empty main only for scoped sources and keeps navigation excluded", () => {
+    const html = '<nav><a href="/news/navigation-study">Latest research navigation story</a></nav><main></main><section><a href="/news/real-study"></a><a href="/news/second-study">Read</a><a href="/news/topics/ai">Research topic</a><a href="/research/team/alignment">Team</a><a href="https://outside.example/news/external-study">External research</a></section><footer><a href="/news/footer-study">Related research footer story</a></footer><script>const template = "<a href=\'/news/script-study\'>Script research story</a>";</script>';
+    expect(discoverResearchLinks(html, { ...source, articlePathPrefixes: ["/news/"], maxDiscoveryLinks: 1 })).toEqual(["https://example.com/news/real-study"]);
+    expect(discoverResearchLinks(html, source)).toEqual([]);
+    expect(discoverResearchLinks(html, { ...source, articlePathPrefixes: ["/news/"] })).toEqual([
+      "https://example.com/news/real-study", "https://example.com/news/second-study",
+    ]);
+  });
+
+  it("keeps a populated main authoritative instead of adding document-wide related links", () => {
+    const html = '<main><a href="/news/main-study">Read more</a></main><section><a href="/news/related-study">Related research finding</a></section>';
+    expect(discoverResearchLinks(html, { ...source, articlePathPrefixes: ["/news/"] })).toEqual(["https://example.com/news/main-study"]);
   });
 
   it("fetches at most four articles together and retains the public article evidence", async () => {

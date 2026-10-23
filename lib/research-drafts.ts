@@ -454,6 +454,7 @@ export async function processResearchDraftJob(runId: string) {
     .where(
       and(
         eq(research_findings.team_id, run.team_id),
+        eq(research_findings.run_id, run.id),
         inArray(
           research_findings.source_id,
           JSON.parse(run.source_ids) as string[],
