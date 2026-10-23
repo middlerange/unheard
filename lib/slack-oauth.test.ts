@@ -395,7 +395,13 @@ describe("Slack channel and reviewer discovery", () => {
     await integration();
     const fetcher = vi.fn(
       async (input: RequestInfo | URL, init?: RequestInit) => {
-        const data = JSON.parse(String(init?.body));
+        expect(new Headers(init?.headers).get("content-type")).toBe("application/x-www-form-urlencoded; charset=utf-8");
+        const data = Object.fromEntries(new URLSearchParams(String(init?.body)));
+        expect(data.limit).toBe("200");
+        if (String(input).endsWith("conversations.list")) {
+          expect(data.types).toBe("public_channel,private_channel");
+          expect(data.exclude_archived).toBe("true");
+        }
         if (String(input).endsWith("conversations.list"))
           return json(
             data.cursor

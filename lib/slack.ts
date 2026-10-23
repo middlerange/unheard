@@ -74,13 +74,20 @@ export async function slackApi<T extends Record<string, unknown>>(
   method: string,
   data: Record<string, unknown> = {},
 ): Promise<T> {
+  const useJson = method === "chat.postMessage";
   const response = await fetch(`https://slack.com/api/${method}`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json; charset=utf-8",
+      "Content-Type": useJson
+        ? "application/json; charset=utf-8"
+        : "application/x-www-form-urlencoded; charset=utf-8",
     },
-    body: JSON.stringify(data),
+    body: useJson
+      ? JSON.stringify(data)
+      : new URLSearchParams(
+          Object.entries(data).map(([key, value]) => [key, String(value)]),
+        ).toString(),
     signal: AbortSignal.timeout(12_000),
   });
   if (!response.ok)
