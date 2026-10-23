@@ -601,9 +601,36 @@ describe("Slack review threads and approval safety", () => {
         expect(block.text!.text.length).toBeLessThanOrEqual(3000);
     }
   });
+  it("blocks mixed identities on legacy previews and before approval even if content is unchanged", async () => {
+    run("INSERT INTO channels(id,team_id,name,platform,account_type,account_id,group_name,credentials,created_at,research_enabled,system_prompt)VALUES('identity-second','a','Another channel','twitter','personal','identity-second-account','personal','encrypted',1,1,'Write for product leaders')");
+    draft("identity-boundary");
+    const content = { targets: [
+      { channelId: "channel", platform: "linkedin", content: "A source-backed observation. https://example.com/article", thread: [] },
+      { channelId: "identity-second", platform: "twitter", content: "A source-backed observation. https://example.com/article", thread: [] },
+    ] };
+    run("UPDATE research_drafts SET content=? WHERE id='identity-boundary'", [JSON.stringify(content)]);
+    vi.stubGlobal("fetch", fetcher);
+    await processSlackJob((await queueResearchDraftForSlack("identity-boundary")).jobId);
+    const pending = await getResearchDraft("a", "identity-boundary");
+    expect(pending?.status).toBe("pending");
+    run("UPDATE channels SET group_name='company' WHERE id='identity-second'");
+    await processSlackJob((await enqueueSlackJob("a", "approve", {
+      draftId: "identity-boundary", revision: pending!.revision, snapshotHash: pending!.snapshot_hash!,
+      userId: "U12345678", channelId: "C12345678", threadTs: "123.456", messageTs: pending!.slack_message_ts!,
+    })).jobId);
+    expect(state.published).not.toHaveBeenCalled();
+    const blocked = await getResearchDraft("a", "identity-boundary");
+    expect(blocked?.error).toContain("cannot be mixed");
+    fetcher.mockClear();
+    await processSlackJob((await retrySlackReview("a", "identity-boundary")).jobId);
+    expect((await getResearchDraft("a", "identity-boundary"))?.error).toContain("cannot be mixed");
+    expect(state.published).not.toHaveBeenCalled();
+    expect(fetcher.mock.calls.every(([, init]) => !JSON.parse(String(init?.body)).blocks)).toBe(true);
+    run("UPDATE channels SET research_enabled=0 WHERE id='identity-second'");
+  });
   it("retries only failed destinations after a fresh approval and preserves successful post IDs", async () => {
     run(
-      "INSERT INTO channels(id,team_id,name,platform,account_type,account_id,group_name,credentials,created_at,research_enabled,system_prompt)VALUES('channel2','a','Company','linkedin','company','account-2','company','encrypted',1,1,'Write for product leaders')",
+      "INSERT INTO channels(id,team_id,name,platform,account_type,account_id,group_name,credentials,created_at,research_enabled,system_prompt)VALUES('channel2','a','Second profile','linkedin','personal','account-2','personal','encrypted',1,1,'Write for product leaders')",
     );
     draft("partial");
     const copy = {
@@ -671,6 +698,7 @@ describe("Slack review threads and approval safety", () => {
     await approve();
     expect(pendingCalls).toEqual([["channel", "channel2"], ["channel2"]]);
     expect((await getResearchDraft("a", "partial"))?.status).toBe("published");
+    run("UPDATE channels SET research_enabled=0 WHERE id='channel2'");
   });
   it("binds ready thread checkpoints into review and blocks ambiguous writes", async () => {
     draft("checkpoint");

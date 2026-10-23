@@ -11,6 +11,8 @@ import {
 import { researchHash } from "./research-model";
 import { getSlackCredentials, getSlackIntegration, slackApi } from "./slack";
 import type { ResearchDraftContent } from "./research-types";
+import { assertResearchIdentityTargets } from "./research-identity";
+import { RESEARCH_TEXT_PLATFORMS } from "./research-profiles";
 
 declare global {
   var __contentHubSlackWorkflow__:
@@ -491,6 +493,38 @@ async function assertEnabledDestinations(
       "A publishing profile is disabled or missing its research prompt. Re-enable it before reviewing this draft.",
     );
 }
+
+function eligibleIdentityProfiles(
+  channels: Array<typeof schema.channels.$inferSelect>,
+  completedChannelIds = new Set<string>(),
+) {
+  const supported = new Set<string>(RESEARCH_TEXT_PLATFORMS);
+  return channels.filter(channel => completedChannelIds.has(channel.id) || (
+    channel.research_enabled
+    && supported.has(channel.platform)
+    && channel.system_prompt.trim().length >= 20
+    && (channel.platform !== "reddit" || /\br\/[a-zA-Z0-9_]{2,21}\b/.test(channel.system_prompt))
+  )).map(channel => ({ id: channel.id, name: channel.name, platform: channel.platform, groupName: channel.group_name }));
+}
+
+async function assertPostIdentity(
+  draft: Draft,
+  post: NonNullable<Awaited<ReturnType<typeof getPostWithDetails>>>,
+  requireCompleteGroup: boolean,
+) {
+  if (draft.is_test) return;
+  const db = await getDb();
+  const channels = await db.select().from(schema.channels)
+    .where(eq(schema.channels.team_id, draft.team_id));
+  const profiles = requireCompleteGroup
+    ? eligibleIdentityProfiles(channels, new Set(post.targets.flatMap(target =>
+      isPublicationComplete(target) && target.channel_id ? [target.channel_id] : [])))
+    : channels.map(channel => ({ id: channel.id, name: channel.name, platform: channel.platform, groupName: channel.group_name }));
+  assertResearchIdentityTargets(post.targets.map(target => ({
+    channelId: target.channel_id || "", platform: target.platform,
+  })), profiles, requireCompleteGroup);
+}
+
 async function ensurePost(draft: Draft) {
   const db = await getDb();
   if (draft.post_id) return draft.post_id;
@@ -509,6 +543,8 @@ async function ensurePost(draft: Draft) {
     )
       throw new Error("Draft destination is no longer connected");
   }
+  if (!draft.is_test)
+    assertResearchIdentityTargets(content.targets, eligibleIdentityProfiles(channels));
   const selectedGroups = new Set(
     content.targets.map(
       (target) =>
@@ -590,6 +626,7 @@ async function deliverReview(draft: Draft) {
   if (!post) throw new Error("Draft post not found");
   assertPublicationReady(post);
   await assertEnabledDestinations(draft, post);
+  await assertPostIdentity(draft, post, true);
   if (
     !post.targets.some((t) => !isPublicationComplete(t)) ||
     ["publishing", "published"].includes(post.state)
@@ -846,6 +883,7 @@ async function decideDraft(
   }
   assertPublicationReady(post);
   await assertEnabledDestinations(draft, post);
+  await assertPostIdentity(draft, post, false);
   const now = Date.now();
   if (draft.is_test) {
     const result = await db
@@ -898,6 +936,7 @@ async function decideDraft(
   const final = await getPostWithDetails(post.id, draft.team_id);
   if (!final || (await hashPostSnapshot(final)) !== draft.snapshot_hash)
     throw new Error("Post changed during approval; nothing was published");
+  await assertPostIdentity(draft, final, false);
   await publishApprovedPost(final, draft.team_id);
   const published = await getPostWithDetails(post.id, draft.team_id);
   const status = published?.state === "published" ? "published" : "failed";

@@ -407,6 +407,7 @@ export async function createResearchRun(
         name: channels.name,
         platform: channels.platform,
         systemPrompt: channels.system_prompt,
+        groupName: channels.group_name,
       })
       .from(channels)
       .where(
@@ -430,7 +431,7 @@ export async function createResearchRun(
       editorial: editorial && data.days === 1 && data.mode === "scan",
       created_at: Date.now(),
       icp: profiles.length
-        ? `${settings!.icp}\n\nPublishing profiles: ${JSON.stringify(profiles)}\nUse each profile systemPrompt to decide relevance. These profile instructions take precedence over the general audience description when they differ.`
+        ? `${settings!.icp}\n\nPublishing profiles: ${JSON.stringify(profiles)}\nUse each profile systemPrompt to decide relevance. Each draft must choose exactly one account identity group and include its enabled supported channels; never mix account groups in one approval. These profile instructions take precedence over the general audience description when they differ.`
         : settings!.icp,
       source_count: ids.length,
       source_ids: JSON.stringify(ids),

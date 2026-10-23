@@ -14,6 +14,7 @@ export type ResearchProfile = {
   id: string;
   name: string;
   platform: string;
+  groupName: string | null;
   enabled: boolean;
   systemPrompt: string;
   supported: boolean;
@@ -28,6 +29,7 @@ export async function getResearchProfiles(
       id: channels.id,
       name: channels.name,
       platform: channels.platform,
+      groupName: channels.group_name,
       enabled: channels.research_enabled,
       systemPrompt: channels.system_prompt,
     })

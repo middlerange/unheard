@@ -6,8 +6,8 @@ const source = {
     "A practitioner found onboarding friction through customer interviews and support conversations.",
 };
 const destinations = [
-  { id: "linkedin", platform: "linkedin" },
-  { id: "x", platform: "twitter" },
+  { id: "linkedin", platform: "linkedin", groupName: "brand-a" },
+  { id: "x", platform: "twitter", groupName: "brand-a" },
 ];
 function generated() {
   return {
@@ -39,21 +39,23 @@ describe("research draft grounding and publication boundaries", () => {
       validateResearchDraftContent(fake, destinations, source),
     ).toThrow();
   });
-  it("chooses a matching subset initially while edits preserve every current destination", () => {
-    const subset = generated();
-    subset.targets = subset.targets.slice(0, 1);
-    expect(
-      validateResearchDraftContent(subset, destinations, source)?.targets,
-    ).toHaveLength(1);
-    expect(() =>
-      validateResearchDraftContent(subset, destinations, source, true),
-    ).toThrow("every selected destination");
+  it("chooses one complete identity initially and preserves exact current destinations for edits", () => {
+    const company = { id: "company", platform: "linkedin", groupName: "brand-b" };
+    const profiles = [...destinations, company];
+    expect(validateResearchDraftContent(generated(), profiles, source)?.targets).toHaveLength(2);
+    const incomplete = generated();
+    incomplete.targets = incomplete.targets.slice(0, 1);
+    expect(() => validateResearchDraftContent(incomplete, profiles, source)).toThrow("every eligible profile");
+    const mixed = generated();
+    mixed.targets.push({ ...mixed.targets[0], channelId: company.id });
+    expect(() => validateResearchDraftContent(mixed, profiles, source)).toThrow("cannot be mixed");
+    expect(() => validateResearchDraftContent(incomplete, destinations, source, true)).toThrow("every selected destination");
   });
   it("supports multiple profiles on one platform and text on Facebook or Discord", () => {
     const profiles = [
-      { id: "fb-a", platform: "facebook" },
-      { id: "fb-b", platform: "facebook" },
-      { id: "discord", platform: "discord" },
+      { id: "fb-a", platform: "facebook", groupName: "brand-a" },
+      { id: "fb-b", platform: "facebook", groupName: "brand-a" },
+      { id: "discord", platform: "discord", groupName: "brand-a" },
     ];
     const sample = generated().targets[0];
     const value = {
@@ -123,14 +125,14 @@ describe("research draft grounding and publication boundaries", () => {
     value.targets[0].content = atLimit;
     value.targets[0].thread = [atLimit];
     expect(atLimit.length).toBeGreaterThan(280);
-    expect(validateResearchDraftContent(value, destinations, longSource)?.targets[0])
+    expect(validateResearchDraftContent(value, destinations.filter(profile => profile.id === "x"), longSource)?.targets[0])
       .toMatchObject({ content: atLimit, thread: [atLimit] });
 
     value.targets[0].content = `${"a".repeat(257)} ${longSource.url}`;
-    expect(() => validateResearchDraftContent(value, destinations, longSource)).toThrow("main post has 281");
+    expect(() => validateResearchDraftContent(value, destinations.filter(profile => profile.id === "x"), longSource)).toThrow("main post has 281");
     value.targets[0].content = atLimit;
     value.targets[0].thread = [`${"a".repeat(257)} ${longSource.url}`];
-    expect(() => validateResearchDraftContent(value, destinations, longSource)).toThrow("thread post 1 has 281");
+    expect(() => validateResearchDraftContent(value, destinations.filter(profile => profile.id === "x"), longSource)).toThrow("thread post 1 has 281");
   });
   it("applies X Unicode weights to emoji sequences and CJK while retaining exact attribution", () => {
     const value = generated();
@@ -138,14 +140,14 @@ describe("research draft grounding and publication boundaries", () => {
     const target = value.targets[0];
     target.content = `${"👩🏽‍💻".repeat(128)} ${source.url}`;
     target.thread = [`${"界".repeat(128)} ${source.url}`];
-    expect(validateResearchDraftContent(value, destinations, source)?.targets[0])
+    expect(validateResearchDraftContent(value, destinations.filter(profile => profile.id === "x"), source)?.targets[0])
       .toMatchObject({ content: target.content, thread: target.thread });
 
     target.content = `${"👩🏽‍💻".repeat(128)}a ${source.url}`;
-    expect(() => validateResearchDraftContent(value, destinations, source)).toThrow("main post has 281");
+    expect(() => validateResearchDraftContent(value, destinations.filter(profile => profile.id === "x"), source)).toThrow("main post has 281");
     target.content = `${"界".repeat(128)} ${source.url}`;
     target.thread = [`${"界".repeat(128)}a ${source.url}`];
-    expect(() => validateResearchDraftContent(value, destinations, source)).toThrow("thread post 1 has 281");
+    expect(() => validateResearchDraftContent(value, destinations.filter(profile => profile.id === "x"), source)).toThrow("thread post 1 has 281");
   });
   it("refuses invented support quotes, omitted credits, unsupported links, and overlong posts", () => {
     const missing = generated();

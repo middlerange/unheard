@@ -405,6 +405,46 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
     }
   }, 30_000);
+  it("chooses one complete configured identity and repairs a mixed model response", async () => {
+    const now = Date.now();
+    const quote = "Required consent is collected on every account-creation path.";
+    const profiles = [
+      { id: "identity-company-li", platform: "linkedin", group: "company" },
+      { id: "identity-company-x", platform: "twitter", group: "company" },
+      { id: "identity-personal-li", platform: "linkedin", group: "personal" },
+      { id: "identity-personal-x", platform: "twitter", group: "personal" },
+    ];
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('identity-generation','Identity generation','identity-generation',0,0)" },
+      ...profiles.map(profile => ({ sql: "INSERT INTO channels(id,team_id,name,platform,group_name,research_enabled,system_prompt,created_at) VALUES(?,'identity-generation',?,?,?,1,'Write concrete product onboarding lessons',0)", params: [profile.id, profile.id, profile.platform, profile.group] })),
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_ids) VALUES('identity-generation-run','identity-generation','scan','drafting',1,1,?,'Product teams',?)", params: [now, JSON.stringify(["identity-source"])] },
+      { sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES('identity-generation-item','identity-generation','identity-source','https://example.com/identity-story','Signup paths',?,?,?,?,'article')", params: [quote, now - 1000, now, quote.repeat(15)] },
+      { sql: "INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key) VALUES('identity-generation-finding','identity-generation','identity-generation-run','identity-generation-item','identity-source','Signup paths','https://example.com/identity-story',?,90,'Signup gates','Preserve consent','Audit every path',?,'No conversion measurements',?,'identity-generation-family')", params: [now - 1000, quote, now] },
+    ] });
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-identity-key";
+    let calls = 0;
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      expect(String(url)).toBe("https://api.openai.com/v1/responses");
+      const input = JSON.parse(JSON.parse(String(init?.body)).input);
+      expect(input.identityGroups.map((group: { channelIds: string[] }) => group.channelIds.slice().sort()).sort()).toEqual([
+        ["identity-company-li", "identity-company-x"], ["identity-personal-li", "identity-personal-x"],
+      ]);
+      calls++;
+      const chosen = calls === 1 ? [profiles[0], profiles[2]] : profiles.slice(0, 2);
+      return Response.json({ status: "completed", usage: { input_tokens: 100, output_tokens: 40 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ ready: true, reason: "Fits this identity", targets: chosen.map(profile => ({ channelId: profile.id, platform: profile.platform, content: `Audit every signup path. Source: ${input.source.url}`, thread: [], supportQuote: quote, redditTitle: null, subreddit: null })) }) }] }] });
+    });
+    try {
+      expect(await processResearchDraftJob("identity-generation-run")).toEqual({ drafted: 1 });
+      expect(calls).toBe(2);
+      const draft = execute({ queries: [{ sql: "SELECT content FROM research_drafts WHERE team_id='identity-generation'" }] })[0].results[0];
+      expect(JSON.parse(draft.content).targets.map((target: { channelId: string }) => target.channelId).sort()).toEqual(["identity-company-li", "identity-company-x"]);
+    } finally {
+      fetcher.mockRestore();
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+    }
+  }, 20_000);
   it("repairs an oversized draft once, accounts for both calls and continues after an invalid story", async () => {
     const now = Date.now();
     const quote = "Every required consent is checked before an account can be created.";
@@ -1221,6 +1261,7 @@ describe("research persistence and team isolation", () => {
             id: "test-preview",
             platform: "linkedin",
             name: "Preview only",
+            groupName: "personal",
             systemPrompt: SLACK_TEST_PROMPT,
           },
         ]);
