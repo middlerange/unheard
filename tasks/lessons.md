@@ -57,3 +57,7 @@
 
 - Content Hub is an open-source product: Slack workspaces, review channels, approvers and publishing destinations are account configuration, not assumptions from the current operator's workspace. Select destinations using each connected profile's own system prompt and audience rules; do not force a personal/company group or hard-code X/LinkedIn.
 - Offer OAuth as the normal Slack connection flow. Deployment operators configure the Slack application once; ordinary users choose a workspace, channel and reviewers without handling bot tokens or signing secrets.
+
+## Deployment configuration stays outside product administration
+
+- Slack application credentials belong in Cloudflare runtime environment variables. Keep app creation, deployment instructions, manifests and manual secret forms out of the Content Hub administration UI; its Slack page should only connect a workspace and configure approvals.

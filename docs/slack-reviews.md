@@ -20,7 +20,7 @@ drafted are skipped. The Research page shows drafts and delivery errors.
 1. Open **Settings → Research profiles**. Enable the connected profiles you want
    to use and add each profile's audience and writing instructions.
 2. Open **Settings → Slack** as the Content Hub team owner and choose
-   **Connect Slack**. Select the workspace on Slack's consent screen and approve
+   **Connect to Slack**. Select the workspace on Slack's consent screen and approve
    the requested permissions. Your workspace may require an administrator to
    approve the installation.
 3. Back in Content Hub, select the review channel and the people allowed to edit
@@ -30,8 +30,8 @@ drafted are skipped. The Research page shows drafts and delivery errors.
    from Research after setup is ready.
 
 Team owners do not create Slack apps, paste tokens, or enter signing secrets.
-The deployment operator configures the shared Slack application once, as
-explained below. Publishing profile selection remains independent of account
+The shared Slack application is configured through deployment environment
+variables, as explained below. Publishing profile selection remains independent of account
 groups.
 
 The bot requests `chat:write`, `channels:read`, `channels:join`, `groups:read`,
@@ -62,54 +62,43 @@ minute cron dispatches queued jobs into `SlackWorkflow`, so responses may take
 up to a minute to appear. Interrupted model/publishing steps are not automatically
 replayed; errors remain visible for review and an explicit retry.
 
-## Deployment: configure the Slack app once
+## Cloudflare environment variables
 
-Each self-hosted Content Hub deployment registers its own Slack app. A single
-hosted deployment uses one app for its teams; each team authorizes its own
-workspace through **Connect Slack**. The Slack client secret and signing secret
-belong to that app, while bot tokens belong to workspace installations.
+Configure these runtime values in **Cloudflare → Workers & Pages → your Worker →
+Settings → Variables and Secrets**:
 
-1. In [Slack Your Apps](https://api.slack.com/apps), create an app **From scratch**.
-   From **Basic Information**, copy **Client ID**, **Client Secret**, and
-   **Signing Secret** into these Cloudflare Worker secrets:
+| Variable | Value | Storage |
+| --- | --- | --- |
+| `SLACK_CLIENT_ID` | Shared Slack OAuth application's client ID | Variable or secret |
+| `SLACK_CLIENT_SECRET` | Shared Slack OAuth application's client secret | Secret |
+| `SLACK_SIGNING_SECRET` | Shared Slack application's signing secret | Secret |
 
-   ```text
-   SLACK_CLIENT_ID
-   SLACK_CLIENT_SECRET
-   SLACK_SIGNING_SECRET
-   ```
+These are deployment configuration. Content Hub has no Slack application
+creation screen, credential form, or manual token setup. Once the three values
+are configured, **Connect to Slack** becomes available automatically. Each team
+then authorizes its own workspace and selects its channel and reviewers.
+Installation bot tokens are obtained by OAuth and encrypted in the database.
 
-   Keep these values out of the repository and browser. Ordinary team owners
-   only use the connection button.
-2. Set `CONTENT_HUB_PUBLIC_URL` to the deployment's canonical HTTPS origin when
-   it has several hostnames. In **Settings → Slack**, download the deployment
-   manifest and apply it to the existing app's **App Manifest** configuration.
-   Configure secrets before enabling events so Slack can verify its request URL.
-3. Verify these addresses use the same origin as the running app:
+Use `CONTENT_HUB_PUBLIC_URL` for the canonical HTTPS origin if the deployment has
+multiple hostnames. Configure the existing OAuth application in Slack's developer
+console, outside Content Hub, with these addresses:
 
-   | Slack configuration | Path on your deployment |
-   | --- | --- |
-   | OAuth redirect URL | `/api/slack/oauth/callback` |
-   | Event Subscriptions request URL | `/api/slack/events` |
-   | Interactivity request URL | `/api/slack/interactions` |
+| Slack configuration | Path on your deployment |
+| --- | --- |
+| OAuth redirect URL | `/api/slack/oauth/callback` |
+| Event Subscriptions request URL | `/api/slack/events` |
+| Interactivity request URL | `/api/slack/interactions` |
 
-   The manifest includes the redirect, bot scopes, message events and
-   interactivity settings. Slack requires HTTPS for OAuth redirects; Content Hub
-   submits the same callback URI during authorization and token exchange.
-   [Slack OAuth installation](https://docs.slack.dev/authentication/installing-with-oauth/)
-   and [manifest reference](https://docs.slack.dev/reference/app-manifest/).
-4. For installation outside the app's development workspace, complete
-   **Manage Distribution** in Slack's app dashboard. Workspace policies can
-   require administrator approval. Unlisted distribution supports testing;
-   follow Slack's Marketplace process for broader commercial distribution.
-   [Slack distribution guide](https://docs.slack.dev/app-management/distribution/).
-5. Keep token rotation disabled for this integration. It does not maintain
-   refresh tokens. Slack makes enabling rotation irreversible and rotating
-   access tokens expire after 12 hours.
-   [Slack token rotation](https://docs.slack.dev/authentication/using-token-rotation/).
-6. As a Content Hub team owner, use **Connect Slack**, choose the review channel
-   and reviewers, then test and enable delivery. An installation is not a
-   publishing approval; every post still requires its latest approval control.
+Enable `message.channels` and `message.groups` bot events, interactivity, and the
+bot scopes listed above. Set the environment variables before verifying the
+Events API URL. Content Hub submits the same canonical callback URI during
+authorization and token exchange. See [Slack OAuth installation](https://docs.slack.dev/authentication/installing-with-oauth/).
+
+For workspaces beyond the application's development workspace, configure
+**Manage Distribution** in Slack's developer console. Keep token rotation
+disabled: this integration does not maintain refresh tokens. These settings
+remain outside the product UI. See [Slack distribution](https://docs.slack.dev/app-management/distribution/)
+and [token rotation](https://docs.slack.dev/authentication/using-token-rotation/).
 
 Apply `0026_daily_research_slack.sql` before deploying the updated Worker. It adds
 research drafts, Slack review jobs, profile settings, and OAuth state records.
