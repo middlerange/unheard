@@ -8,4 +8,11 @@ describe('publishing retries', () => {
 
     expect(targetsPendingPublication([twitter, linkedin])).toEqual([linkedin]);
   });
+  it('keeps incomplete X threads pending even though the root already has an ID', () => {
+    const progress = { version: 1, contentHash: 'a'.repeat(64), phase: 'ready', rootId: 'root-id', lastId: 'root-id', publishedCount: 1, totalCount: 3 };
+    const partial = { platform_post_id: 'root-id', publication_progress: JSON.stringify(progress) };
+    const complete = { platform_post_id: 'complete-id', publication_progress: null };
+    expect(targetsPendingPublication([partial, complete])).toEqual([partial]);
+  });
+
 });

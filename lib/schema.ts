@@ -119,6 +119,7 @@ export const post_targets = sqliteTable('post_targets', {
   platform: text('platform').notNull(),
   content: text('content').notNull().default(''),
   platform_post_id: text('platform_post_id'),
+  publication_progress: text('publication_progress'),
   error: text('error'),
   reply_settings: text('reply_settings').default('everyone'),
   as_carousel: integer('as_carousel', { mode: 'boolean' }).default(false),
@@ -187,6 +188,8 @@ export const idea_comments = sqliteTable('idea_comments', {
 export type IdeaComment = typeof idea_comments.$inferSelect;
 
 export const channels = sqliteTable('channels', {
+  system_prompt: text('system_prompt').notNull().default(''),
+  research_enabled: integer('research_enabled', { mode: 'boolean' }).notNull().default(false),
   id: text('id').primaryKey(),
   team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }),
   name: text('name').notNull(),
@@ -402,6 +405,7 @@ export const research_sources = sqliteTable('research_sources', {
 export const research_runs = sqliteTable('research_runs', {
   id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }),
   mode: text('mode').notNull(), status: text('status').notNull(), days: integer('days').notNull(),
+  editorial: integer('editorial', { mode: 'boolean' }).notNull().default(false),
   created_at: integer('created_at').notNull(), completed_at: integer('completed_at'),
   source_count: integer('source_count').notNull().default(0), collected_count: integer('collected_count').notNull().default(0), findings_count: integer('findings_count').notNull().default(0),
   input_tokens: integer('input_tokens').notNull().default(0), output_tokens: integer('output_tokens').notNull().default(0), cache_hits: integer('cache_hits').notNull().default(0),
@@ -424,4 +428,42 @@ export const research_findings = sqliteTable('research_findings', {
   source_id: text('source_id').notNull(), title: text('title').notNull(), url: text('url').notNull(), published_at: integer('published_at').notNull(), score: integer('score').notNull(),
   summary: text('summary').notNull(), why_it_matters: text('why_it_matters').notNull(), content_angle: text('content_angle').notNull(), evidence: text('evidence').notNull(), limitations: text('limitations').notNull(),
   status: text('status').notNull().default('new'), idea_id: text('idea_id'), created_at: integer('created_at').notNull(), family_key: text('family_key').notNull(), content_type: text('content_type').notNull().default('article'), transcript_status: text('transcript_status').notNull().default('not_applicable'),
+});
+
+export const slack_integrations = sqliteTable('slack_integrations', {
+  team_id: text('team_id').primaryKey().references(() => teams.id, { onDelete: 'cascade' }),
+  workspace_id: text('workspace_id').notNull(), channel_id: text('channel_id').notNull(),
+  approver_user_ids: text('approver_user_ids').notNull().default('[]'),
+  credentials: text('credentials').notNull(),
+  enabled: integer('enabled', { mode: 'boolean' }).notNull().default(false),
+  created_at: integer('created_at').notNull(), updated_at: integer('updated_at').notNull(),
+});
+export const slack_oauth_states = sqliteTable('slack_oauth_states', {
+  id: text('id').primaryKey(),
+  team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }),
+  user_id: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  expires_at: integer('expires_at').notNull(), consumed_at: integer('consumed_at'),
+  created_at: integer('created_at').notNull(),
+});
+export const research_drafts = sqliteTable('research_drafts', {
+  id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }),
+  run_id: text('run_id').notNull().references(() => research_runs.id, { onDelete: 'cascade' }),
+  finding_id: text('finding_id').notNull().references(() => research_findings.id, { onDelete: 'cascade' }),
+  post_id: text('post_id').references(() => posts.id, { onDelete: 'set null' }),
+  content: text('content').notNull(), revision: integer('revision').notNull().default(1),
+  status: text('status').notNull().default('draft'), slack_channel_id: text('slack_channel_id'),
+  slack_thread_ts: text('slack_thread_ts'), slack_message_ts: text('slack_message_ts'), snapshot_hash: text('snapshot_hash'),
+  error: text('error'), created_at: integer('created_at').notNull(), updated_at: integer('updated_at').notNull(),
+  input_tokens: integer('input_tokens').notNull().default(0), output_tokens: integer('output_tokens').notNull().default(0),
+});
+export const research_draft_revisions = sqliteTable('research_draft_revisions', {
+  id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }),
+  draft_id: text('draft_id').notNull().references(() => research_drafts.id, { onDelete: 'cascade' }),
+  revision: integer('revision').notNull(), content: text('content').notNull(), instruction: text('instruction'),
+  slack_user_id: text('slack_user_id'), created_at: integer('created_at').notNull(),
+});
+export const slack_jobs = sqliteTable('slack_jobs', {
+  id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }),
+  kind: text('kind').notNull(), payload: text('payload').notNull(), status: text('status').notNull().default('queued'),
+  created_at: integer('created_at').notNull(), updated_at: integer('updated_at').notNull(), error: text('error'),
 });

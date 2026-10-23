@@ -1,17 +1,18 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { toast } from 'sonner';
-import { AlertCircle, ArrowUpRight, Check, Clock, ExternalLink, Globe, Lightbulb, Loader2, RefreshCw, Rss, Search, Settings, Sparkles, X, Youtube } from '@/components/icons';
+import { AlertCircle, ArrowUpRight, Check, Clock, ExternalLink, Globe, Lightbulb, Loader2, RefreshCw, Rss, Search, Settings, MessageSquare, Send, Sparkles, X, Youtube } from '@/components/icons';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 import { useWorkspace } from '@/lib/workspace-context';
-import type { ResearchFinding, ResearchRun, ResearchSnapshot, ResearchSource } from '@/lib/research-types';
+import type { SlackSettings } from '@/lib/slack-types';
+import type { ResearchDraft, ResearchFinding, ResearchRun, ResearchSnapshot, ResearchSource } from '@/lib/research-types';
 
 export const Route = createFileRoute('/research')({ component: ResearchPage });
 
-type Tab = 'findings' | 'sources' | 'runs' | 'audience';
+type Tab = 'drafts' | 'findings' | 'sources' | 'runs' | 'audience';
 type FindingFilter = 'new' | 'saved' | 'dismissed' | 'all';
 const panel = 'rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)] shadow-panel';
 const muted = 'text-[var(--color-text-muted)]';
@@ -19,7 +20,7 @@ const selectClass = 'h-10 max-w-full rounded-lg border border-[var(--color-borde
 const press = 'min-h-10 active:scale-[0.96] transition-[background-color,color,transform]';
 
 function isActive(run: ResearchRun) {
-  return run.status === 'queued' || run.status === 'collecting' || run.status === 'ranking';
+  return run.status === 'queued' || run.status === 'collecting' || run.status === 'ranking' || run.status === 'drafting';
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -48,8 +49,9 @@ function date(value: number, time = false) {
 function ResearchPage() {
   const { refreshIdeas } = useWorkspace();
   const [data, setData] = useState<ResearchSnapshot | null>(null);
+  const [slack, setSlack] = useState<SlackSettings | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>('findings');
+  const [tab, setTab] = useState<Tab>('drafts');
   const [pending, setPending] = useState<string | null>(null);
   const [filter, setFilter] = useState<FindingFilter>('new');
   const [sourceFilter, setSourceFilter] = useState('all');
@@ -78,12 +80,14 @@ function ResearchPage() {
   useEffect(() => {
     alive.current = true;
     void refresh();
+    void request<SlackSettings>('/api/slack').then(value => { if (alive.current) setSlack(value); }).catch(cause => { if (alive.current) toast.error(`Could not check Slack setup: ${message(cause)}`); });
     return () => { alive.current = false; controller.current?.abort(); };
   }, [refresh]);
 
   const hasActiveRun = data?.runs.some(isActive) ?? false;
+  const hasDraftWork = data?.drafts?.some(draft => ['delivering', 'editing', 'publishing'].includes(draft.status)) ?? false;
   useEffect(() => {
-    if (!hasActiveRun || pending) return;
+    if ((!hasActiveRun && !hasDraftWork) || pending) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
@@ -92,7 +96,7 @@ function ResearchPage() {
     }
     timer = setTimeout(poll, 4000);
     return () => { stopped = true; clearTimeout(timer); controller.current?.abort(); };
-  }, [hasActiveRun, pending, refresh]);
+  }, [hasActiveRun, hasDraftWork, pending, refresh]);
 
   async function mutate(key: string, work: () => Promise<void>) {
     if (pending) return;
@@ -108,18 +112,18 @@ function ResearchPage() {
     }
   }
 
-  function startRun(mode: 'scan' | 'collect') {
-    void mutate(mode, async () => {
-      const { run } = await request<{ run: ResearchRun }>('/api/research/runs', jsonRequest('POST', { days: 30, mode }));
+  function startRun(days: 1 | 30) {
+    void mutate(`scan-${days}`,  async () => {
+      const { run } = await request<{ run: ResearchRun }>('/api/research/runs', jsonRequest('POST', { days, mode: 'scan' }));
       if (alive.current) setData(current => current ? { ...current, runs: [run, ...current.runs.filter(item => item.id !== run.id)] } : current);
-      toast.success(mode === 'scan' ? 'Your 30-day scan is queued.' : 'Source collection is queued.');
+      toast.success(days === 1 ? 'Your 24-hour scan and post drafts are queued.' : 'Your 30-day discovery scan is queued.');
     });
   }
 
   function updateDaily(enabled: boolean) {
     void mutate('daily', async () => {
       await request('/api/research', jsonRequest('PATCH', { dailyEnabled: enabled }));
-      toast.success(enabled ? 'Daily collection enabled.' : 'Daily collection paused.');
+      toast.success(enabled ? 'Daily research enabled.' : 'Daily research paused.');
     });
   }
 
@@ -164,7 +168,9 @@ function ResearchPage() {
   const ready = data.configured && data.workflowConfigured;
   const canRun = ready && enabledCount > 0 && !hasActiveRun && !pending;
   const newCount = data.findings.filter(finding => finding.status === 'new').length;
+  const draftCount = (data.drafts ?? []).filter(draft => ['draft', 'pending', 'failed'].includes(draft.status)).length;
   const tabs: { id: Tab; label: string; count?: number }[] = [
+    { id: 'drafts', label: 'Post drafts', count: draftCount },
     { id: 'findings', label: 'Findings', count: newCount },
     { id: 'sources', label: 'Sources', count: enabledCount },
     { id: 'runs', label: 'Run history' },
@@ -188,11 +194,11 @@ function ResearchPage() {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="max-w-2xl space-y-2">
           <p className="text-base font-medium text-[var(--color-text-secondary)] [text-wrap:balance]">Find the ideas worth paying attention to.</p>
-          <p className={cn('text-sm leading-6 [text-wrap:pretty]', muted)}>Practitioner insights, original research, and product conversations, ranked for your audience. Turn the strongest findings into your next idea.</p>
+          <p className={cn('text-sm leading-6 [text-wrap:pretty]', muted)}>Practitioner insights, original research, and product conversations, ranked for your audience. Each day, review the last 24 hours and turn the best matches into posts for your approval.</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" onClick={() => startRun('collect')} disabled={!canRun} className={press}><RefreshCw className={pending === 'collect' ? 'animate-spin' : ''} />Collect new items</Button>
-          <Button onClick={() => startRun('scan')} disabled={!canRun} className={press}>{pending === 'scan' ? <Loader2 className="animate-spin" /> : <Sparkles />}Run 30-day scan</Button>
+          <Button variant="outline" onClick={() => startRun(30)} disabled={!canRun} className={press}>{pending === 'scan-30' ? <Loader2 className="animate-spin" /> : <Search />}30-day discovery</Button>
+          <Button onClick={() => startRun(1)} disabled={!canRun} className={press}>{pending === 'scan-1' ? <Loader2 className="animate-spin" /> : <Sparkles />}Scan last 24 hours</Button>
         </div>
       </div>
 
@@ -201,9 +207,11 @@ function ResearchPage() {
       {!ready && <div className={cn(panel, 'flex items-start gap-3 border-amber-400/20 p-5')}><AlertCircle className="mt-0.5 size-5 shrink-0 text-amber-400" /><div className="space-y-2"><h2 className="text-sm font-medium">Finish research setup</h2><p className={cn('max-w-3xl text-sm leading-6', muted)}>{!data.configured ? 'Add OPENAI_API_KEY to the Cloudflare Worker secrets to enable research ranking. The key stays on the server.' : ''}{!data.configured && !data.workflowConfigured ? ' ' : ''}{!data.workflowConfigured ? 'The research background workflow also needs to be deployed and connected before collection can run.' : ''}</p><Link to="/settings/setup" className="inline-flex min-h-10 items-center gap-1 text-sm text-[var(--color-brand)] hover:underline">Open setup guide<ArrowUpRight className="size-4" /></Link></div></div>}
 
       <div className={cn(panel, 'flex flex-wrap items-center justify-between gap-5 px-5 py-4')}>
-        <div className="flex items-center gap-3"><div className="grid size-10 place-items-center rounded-xl bg-[var(--color-accent)]/10 text-[var(--color-brand)]"><Rss className="size-5" /></div><div><div className="flex items-center gap-2 text-sm font-medium">Daily collection<span className={cn('size-1.5 rounded-full', data.settings.dailyEnabled && ready ? 'bg-emerald-400' : 'bg-[var(--color-text-tertiary)]')} /></div><p className={cn('mt-1 text-xs', muted)}>{data.settings.dailyEnabled ? ready ? 'Checks enabled sources for new items each day.' : 'Enabled · waiting for setup.' : 'Paused. You can still collect items manually.'}</p></div></div>
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-2"><span className={cn('text-xs tabular-nums', muted)}>{enabledCount} sources enabled · {data.model}</span><Toggle label="Enable daily collection" checked={data.settings.dailyEnabled} disabled={Boolean(pending)} onChange={() => updateDaily(!data.settings.dailyEnabled)} /></div>
+        <div className="flex items-center gap-3"><div className="grid size-10 place-items-center rounded-xl bg-[var(--color-accent)]/10 text-[var(--color-brand)]"><Rss className="size-5" /></div><div><div className="flex items-center gap-2 text-sm font-medium">Daily research<span className={cn('size-1.5 rounded-full', data.settings.dailyEnabled && ready ? 'bg-emerald-400' : 'bg-[var(--color-text-tertiary)]')} /></div><p className={cn('mt-1 text-xs', muted)}>{data.settings.dailyEnabled ? ready ? 'Scans the last 24 hours and drafts up to two strong matches for review.' : 'Enabled · waiting for setup.' : 'Paused. You can still run a scan manually.'}</p></div></div>
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2"><span className={cn('text-xs tabular-nums', muted)}>{enabledCount} sources enabled · {data.model}</span><Toggle label="Enable daily research" checked={data.settings.dailyEnabled} disabled={Boolean(pending)} onChange={() => updateDaily(!data.settings.dailyEnabled)} /></div>
       </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-4 py-3"><div className="flex items-start gap-2.5"><MessageSquare className="mt-0.5 size-4 shrink-0 text-[var(--color-brand)]" /><p className={cn('text-xs leading-5', muted)}>{slack?.enabled && slack.configured ? 'Drafts go to Slack for approval. Reply in the thread to request edits, then approve the latest version to publish.' : 'Connect Slack to receive daily drafts, request edits in a thread, and approve publishing. Drafts stay here until connected.'}</p></div><div className="flex flex-wrap gap-x-4"><Link to="/settings/research-profiles" className="inline-flex min-h-10 shrink-0 items-center gap-1 text-xs text-[var(--color-brand)] hover:underline">Research profiles<ArrowUpRight className="size-3.5" /></Link><Link to="/settings/slack" className="inline-flex min-h-10 shrink-0 items-center gap-1 text-xs text-[var(--color-brand)] hover:underline">{slack?.configured ? 'Slack settings' : 'Connect Slack'}<ArrowUpRight className="size-3.5" /></Link></div></div>
 
       {activeRun && <div aria-live="polite"><RunCard run={activeRun} active /></div>}
       <div className="flex gap-1 overflow-x-auto border-b border-[var(--color-border)]" role="tablist" aria-label="Research workspace">
@@ -211,13 +219,18 @@ function ResearchPage() {
       </div>
 
       <section id={`research-panel-${tab}`} role="tabpanel" aria-labelledby={`research-tab-${tab}`} className="space-y-4">
+        {tab === 'drafts' && <>
+          <div><h2 className="text-sm font-medium">A short list worth posting</h2><p className={cn('mt-2 max-w-3xl text-sm leading-6', muted)}>Up to two findings scoring at least 80/100 become drafts for your enabled research profiles. Each profile’s instructions guide fit and writing. Every post needs your approval. If nothing clears the bar, there is no post to review.</p></div>
+          {(data.drafts ?? []).length ? <div className="space-y-4">{data.drafts.map(draft => <DraftCard key={draft.id} draft={draft} disabled={Boolean(pending) || !slack?.configured || !slack.enabled} retrying={pending === draft.id} onRetry={() => void mutate(draft.id, async () => { await request('/api/slack', jsonRequest('POST', { action: 'retry', draftId: draft.id })); toast.success('Draft queued for Slack review.'); })} />)}</div> : <EmptyState icon={MessageSquare} title="Your next post starts with a useful finding" description="Enable a research profile, then scan the last 24 hours for timely insights. Strong matches become post drafts here and in your Slack approval channel."><Button disabled={!canRun} onClick={() => startRun(1)} className={cn(press, 'mt-5')}><Sparkles />Scan last 24 hours</Button></EmptyState>}
+        </>}
+
         {tab === 'findings' && <>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-1" aria-label="Finding status">{(['new', 'saved', 'dismissed', 'all'] as const).map(value => <Button key={value} variant={filter === value ? 'secondary' : 'ghost'} aria-pressed={filter === value} onClick={() => setFilter(value)} className={cn(press, 'capitalize')}>{value === 'new' ? 'To review' : value}</Button>)}</div>
             <div className="flex w-full flex-wrap gap-2 sm:w-auto"><SearchField value={query} onChange={setQuery} placeholder="Search findings" /><select aria-label="Filter findings by source" value={sourceFilter} onChange={event => setSourceFilter(event.target.value)} className={selectClass}><option value="all">All sources</option>{data.sources.map(source => <option key={source.id} value={source.id}>{source.name}</option>)}</select></div>
           </div>
-          <div className="flex flex-wrap justify-between gap-2 text-xs text-[var(--color-text-muted)]"><span className="tabular-nums">{findings.length} {findings.length === 1 ? 'finding' : 'findings'} · highest relevance first</span><span>{latestRun?.completedAt ? `Last finished ${date(latestRun.completedAt, true)}` : '30-day lookback · evidence linked to each source'}</span></div>
-          {findings.length ? <div className="space-y-4">{findings.map(finding => <FindingCard key={finding.id} finding={finding} disabled={Boolean(pending)} saving={pending === finding.id} onSave={() => actOnFinding(finding, 'save_idea')} onDismiss={() => actOnFinding(finding, 'dismiss')} />)}</div> : <EmptyState icon={Search} title={data.findings.length ? 'No findings match this view' : 'Your next good idea starts here'} description={data.findings.length ? 'Try a different source, search, or review status.' : 'Run a 30-day scan to collect recent items, review the evidence, and rank what matters to your audience.'}>{!data.findings.length && <Button disabled={!canRun} onClick={() => startRun('scan')} className={cn(press, 'mt-5')}><Sparkles />Run 30-day scan</Button>}</EmptyState>}
+          <div className="flex flex-wrap justify-between gap-2 text-xs text-[var(--color-text-muted)]"><span className="tabular-nums">{findings.length} {findings.length === 1 ? 'finding' : 'findings'} · highest relevance first</span><span>{latestRun?.completedAt ? `Last finished ${date(latestRun.completedAt, true)}` : 'Evidence linked to each source'}</span></div>
+          {findings.length ? <div className="space-y-4">{findings.map(finding => <FindingCard key={finding.id} finding={finding} disabled={Boolean(pending)} saving={pending === finding.id} onSave={() => actOnFinding(finding, 'save_idea')} onDismiss={() => actOnFinding(finding, 'dismiss')} />)}</div> : <EmptyState icon={Search} title={data.findings.length ? 'No findings match this view' : 'Your next good idea starts here'} description={data.findings.length ? 'Try a different source, search, or review status.' : 'Run a scan to collect recent items, review the evidence, and rank what matters to your audience.'}>{!data.findings.length && <Button disabled={!canRun} onClick={() => startRun(1)} className={cn(press, 'mt-5')}><Sparkles />Scan last 24 hours</Button>}</EmptyState>}
         </>}
 
         {tab === 'sources' && <>
@@ -227,12 +240,13 @@ function ResearchPage() {
         </>}
 
         {tab === 'runs' && <>
-          <div><h2 className="text-sm font-medium">Collection and scan history</h2><p className={cn('mt-2 text-sm leading-6', muted)}>Track each run, source coverage, and model usage. Collection gathers new items; a scan ranks findings for your audience.</p></div>
-          {data.runs.length ? <div className="space-y-3">{data.runs.map(run => <RunCard key={run.id} run={run} />)}</div> : <EmptyState icon={Clock} title="No research runs yet" description="Your first collection or 30-day scan will appear here, with its progress and token usage." />}
+          <div><h2 className="text-sm font-medium">Research and draft history</h2><p className={cn('mt-2 text-sm leading-6', muted)}>Track each run, source coverage, and model usage. Daily scans cover the last 24 hours and prepare post drafts. Discovery scans look back 30 days and rank findings.</p></div>
+          {data.runs.length ? <div className="space-y-3">{data.runs.map(run => <RunCard key={run.id} run={run} />)}</div> : <EmptyState icon={Clock} title="No research runs yet" description="Your first scan will appear here, with its progress and token usage." />}
         </>}
 
         {tab === 'audience' && <form className={cn(panel, 'max-w-3xl p-5 sm:p-6')} onSubmit={event => { event.preventDefault(); void mutate('icp', async () => { await request('/api/research', jsonRequest('PATCH', { icp: (icpDraft ?? data.settings.icp).trim() })); setIcpDraft(null); toast.success('Audience updated. Your next scan will use this context.'); }); }}>
-          <div className="flex items-start gap-3"><Settings className="mt-0.5 size-5 text-[var(--color-brand)]" /><div><h2 className="text-base font-medium">What is worth your audience’s time?</h2><p className={cn('mt-2 text-sm leading-6', muted)}>Describe your ideal customer, their responsibilities, and the problems they care about. This guides relevance scoring and suggested content angles.</p></div></div>
+          <div className="flex items-start gap-3"><Settings className="mt-0.5 size-5 text-[var(--color-brand)]" /><div><h2 className="text-base font-medium">What is worth your audience’s time?</h2><p className={cn('mt-2 text-sm leading-6', muted)}>Describe your ideal customer, their responsibilities, and the problems they care about. This guides source relevance and suggested content angles. Give each posting profile its own audience and writing instructions in Research profiles.</p></div></div>
+          <Link to="/settings/research-profiles" className="mt-3 inline-flex min-h-10 items-center gap-1 text-sm text-[var(--color-brand)] hover:underline">Manage research profiles<ArrowUpRight className="size-4" /></Link>
           <label htmlFor="research-icp" className="mb-2 mt-6 block text-sm font-medium">Ideal customer profile</label><Textarea id="research-icp" value={icpDraft ?? data.settings.icp} onChange={event => setIcpDraft(event.target.value)} minLength={20} maxLength={4000} required rows={8} className="min-h-48 leading-6" /><p className={cn('mt-2 text-xs tabular-nums', muted)}>{(icpDraft ?? data.settings.icp).length.toLocaleString()} / 4,000 characters · at least 20</p>
           <div className="mt-5 flex flex-wrap items-center justify-between gap-4"><span className={cn('text-xs', muted)}>Existing findings keep their original assessment.</span><Button type="submit" disabled={Boolean(pending) || icpDraft === null || icpDraft.trim().length < 20} className={press}>{pending === 'icp' ? <Loader2 className="animate-spin" /> : <Check />}Save audience</Button></div>
         </form>}
@@ -279,6 +293,36 @@ function SourceRow({ source, disabled, onToggle }: { source: ResearchSource; dis
 
 function RunCard({ run, active = false }: { run: ResearchRun; active?: boolean }) {
   const running = isActive(run);
-  const stage = { queued: 'Queued', collecting: 'Collecting sources', ranking: 'Ranking findings', completed: 'Completed', failed: 'Failed' }[run.status];
-  return <div className={cn(panel, 'p-4 sm:p-5', active && 'border-[var(--color-accent)]/40')}><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><div className={cn('grid size-9 place-items-center rounded-xl', running ? 'bg-[var(--color-accent)]/10 text-[var(--color-brand)]' : run.status === 'failed' ? 'bg-amber-400/10 text-amber-300' : 'bg-[var(--color-bg-muted)] text-[var(--color-text-muted)]')}>{running ? <Loader2 className="size-4 animate-spin" /> : run.status === 'failed' ? <AlertCircle className="size-4" /> : <Check className="size-4" />}</div><div><p className="text-sm font-medium">{run.mode === 'scan' ? `${run.days}-day scan` : 'Source collection'}<span className="mx-2 text-[var(--color-text-tertiary)]">·</span><span className={cn('font-normal', running ? 'text-[var(--color-brand)]' : muted)}>{stage}</span></p><p className={cn('mt-1 text-xs tabular-nums', muted)}>{date(run.createdAt, true)}{run.completedAt ? ` · Finished ${date(run.completedAt, true)}` : ''}</p></div></div><div className="flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-[var(--color-text-muted)]"><span>{run.sourceCount} sources</span><span>{run.collectedCount} items</span><span>{run.findingsCount} findings</span></div></div>{running && <p className={cn('mt-3 text-xs leading-5', muted)}>{run.status === 'queued' ? 'The background workflow will start shortly. You can leave this page.' : run.status === 'collecting' ? 'Checking enabled sources and collecting new items. Each source is processed independently.' : 'Reviewing recent items against your audience and extracting source-backed findings.'}</p>}{run.error && <p role="alert" className="mt-3 rounded-lg bg-amber-400/5 p-3 text-xs leading-5 text-amber-300">{run.error}</p>}<div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 border-t border-[var(--color-border)] pt-3 text-[11px] tabular-nums text-[var(--color-text-tertiary)]"><span>{run.inputTokens.toLocaleString()} input tokens</span><span>{run.outputTokens.toLocaleString()} output tokens</span><span>{run.cacheHits.toLocaleString()} cached items</span><span>API usage billed separately</span></div></div>;
+  const stage = { queued: 'Queued', collecting: 'Collecting sources', ranking: 'Ranking findings', drafting: 'Preparing post drafts', completed: 'Completed', failed: 'Failed' }[run.status];
+  return <div className={cn(panel, 'p-4 sm:p-5', active && 'border-[var(--color-accent)]/40')}><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><div className={cn('grid size-9 place-items-center rounded-xl', running ? 'bg-[var(--color-accent)]/10 text-[var(--color-brand)]' : run.status === 'failed' ? 'bg-amber-400/10 text-amber-300' : 'bg-[var(--color-bg-muted)] text-[var(--color-text-muted)]')}>{running ? <Loader2 className="size-4 animate-spin" /> : run.status === 'failed' ? <AlertCircle className="size-4" /> : <Check className="size-4" />}</div><div><p className="text-sm font-medium">{run.mode === 'scan' ? run.days === 1 ? '24-hour scan' : `${run.days}-day discovery` : 'Source collection'}<span className="mx-2 text-[var(--color-text-tertiary)]">·</span><span className={cn('font-normal', running ? 'text-[var(--color-brand)]' : muted)}>{stage}</span></p><p className={cn('mt-1 text-xs tabular-nums', muted)}>{date(run.createdAt, true)}{run.completedAt ? ` · Finished ${date(run.completedAt, true)}` : ''}</p></div></div><div className="flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-[var(--color-text-muted)]"><span>{run.sourceCount} sources</span><span>{run.collectedCount} items</span><span>{run.findingsCount} findings</span></div></div>{running && <p className={cn('mt-3 text-xs leading-5', muted)}>{run.status === 'queued' ? 'The background workflow will start shortly. You can leave this page.' : run.status === 'collecting' ? 'Checking enabled sources and collecting new items. Each source is processed independently.' : run.status === 'drafting' ? 'Writing post drafts from the strongest matches and sending them for review.' : 'Reviewing recent items against your audience and extracting source-backed findings.'}</p>}{run.error && <p role="alert" className="mt-3 rounded-lg bg-amber-400/5 p-3 text-xs leading-5 text-amber-300">{run.error}</p>}<div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 border-t border-[var(--color-border)] pt-3 text-[11px] tabular-nums text-[var(--color-text-tertiary)]"><span>{run.inputTokens.toLocaleString()} input tokens</span><span>{run.outputTokens.toLocaleString()} output tokens</span><span>{run.cacheHits.toLocaleString()} cached items</span><span>API usage billed separately</span></div></div>;
+}
+
+function DraftCard({ draft, disabled, retrying, onRetry }: { draft: ResearchDraft; disabled: boolean; retrying: boolean; onRetry: () => void }) {
+  const statusLabel: Record<ResearchDraft['status'], string> = {
+    draft: 'Ready for review', delivering: 'Sending to Slack', pending: 'Awaiting approval', editing: 'Applying thread edits',
+    approved: 'Approved', rejected: 'Rejected', publishing: 'Publishing', published: 'Published', failed: 'Needs attention',
+  };
+  const busy = ['delivering', 'editing', 'publishing'].includes(draft.status);
+  const guidance: Record<ResearchDraft['status'], string> = {
+    draft: 'Send this draft to Slack for review when your connection is ready.',
+    delivering: 'Sending the latest revision to your approval channel.',
+    pending: 'Reply in the Slack thread to request changes. Approve the latest version when it is ready.',
+    editing: 'A new revision is being prepared. Review the updated version before approving.',
+    approved: 'The latest version has been approved in Slack.',
+    rejected: 'This draft was rejected in Slack.',
+    publishing: 'Publishing the approved version to its connected profiles.',
+    published: 'Published after approval in Slack.',
+    failed: 'Check the error and review history before retrying.',
+  };
+  return <article className={cn(panel, 'overflow-hidden')}>
+    <div className="space-y-4 p-5 sm:p-6">
+      <div className="flex flex-wrap items-center justify-between gap-2"><span className={cn('rounded-md px-2 py-1 text-xs font-medium', draft.status === 'published' || draft.status === 'approved' ? 'bg-emerald-400/10 text-emerald-300' : draft.status === 'failed' ? 'bg-amber-400/10 text-amber-300' : 'bg-[var(--color-accent)]/10 text-[var(--color-brand)]')}>{busy && <Loader2 className="mr-1.5 inline size-3 animate-spin" />}{statusLabel[draft.status]}</span><span className={cn('text-xs tabular-nums', muted)}>Version {draft.revision} · Updated {date(draft.updatedAt, true)}</span></div>
+      <h2 className="text-lg font-medium leading-7 tracking-tight [overflow-wrap:anywhere] [text-wrap:balance]">{draft.title}</h2>
+      <p className={cn('text-sm leading-6', muted)}>{draft.whyItMatters}</p>
+      <div className="grid gap-3 lg:grid-cols-2">{draft.content.targets.map((target, index) => <div key={`${target.channelId}-${index}`} className="min-w-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-input)] p-4"><div className="mb-3"><h3 className="text-sm font-medium text-[var(--color-text)]">{target.channelName || (target.platform === 'twitter' ? 'X' : target.platform)}</h3><p className={cn('mt-1 text-xs capitalize', muted)}>{target.platform === 'twitter' ? 'X' : target.platform}{target.subreddit ? ` · r/${target.subreddit}` : ''}</p></div>{target.redditTitle && <h4 className="mb-3 text-sm font-medium leading-6 [overflow-wrap:anywhere]">{target.redditTitle}</h4>}<p className="whitespace-pre-wrap text-sm leading-6 text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">{target.content}</p>{target.thread?.length > 0 && <div className="mt-4 space-y-3 border-t border-[var(--color-border)] pt-4">{target.thread.map((part, partIndex) => <div key={partIndex}><span className={cn('mb-1 block text-[11px] tabular-nums', muted)}>Thread {partIndex + 2}</span><p className="whitespace-pre-wrap text-sm leading-6 text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">{part}</p></div>)}</div>}</div>)}</div>
+      {draft.error && <p role="alert" className="flex items-start gap-2 rounded-lg bg-amber-400/5 p-3 text-xs leading-5 text-amber-300"><AlertCircle className="mt-0.5 size-4 shrink-0" />{draft.error}</p>}
+      <a href={draft.sourceUrl} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-10 items-center gap-1 text-xs text-[var(--color-brand)] hover:underline">Read source<ExternalLink className="size-3.5" /></a>
+    </div>
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-5 py-3 sm:px-6"><p className={cn('max-w-lg text-xs leading-5', muted)}>{guidance[draft.status]}</p><div className="flex flex-wrap gap-2">{draft.postId && <Button asChild variant="outline" className={press}><Link to="/posts/$id" params={{ id: draft.postId }}>View post<ArrowUpRight /></Link></Button>}{draft.slackThreadUrl && <Button asChild variant="outline" className={press}><a href={draft.slackThreadUrl} target="_blank" rel="noopener noreferrer"><MessageSquare />Open Slack thread<ArrowUpRight /></a></Button>}{['draft', 'failed'].includes(draft.status) && <Button variant="outline" className={press} disabled={disabled} onClick={onRetry}>{retrying ? <Loader2 className="animate-spin" /> : <Send />}{draft.status === 'failed' ? 'Retry Slack review' : 'Send for review'}</Button>}</div></div>
+  </article>;
 }

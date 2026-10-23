@@ -21,8 +21,10 @@ export type ResearchSource = ResearchSourceSeed & {
 export type ResearchRun = {
   id: string;
   mode: "scan" | "collect";
-  status: "queued" | "collecting" | "ranking" | "completed" | "failed";
+  status:
+    "queued" | "collecting" | "ranking" | "drafting" | "completed" | "failed";
   days: number;
+  editorial: boolean;
   createdAt: number;
   completedAt: number | null;
   sourceCount: number;
@@ -62,10 +64,51 @@ export type ResearchSnapshot = {
   sources: ResearchSource[];
   runs: ResearchRun[];
   findings: ResearchFinding[];
+  drafts: ResearchDraft[];
 };
 export type ResearchJob = {
-  operation: "plan" | "collect" | "rank" | "fail" | "daily";
+  operation: "plan" | "collect" | "rank" | "drafts" | "fail" | "daily";
   runId?: string;
   sourceId?: string;
   error?: string;
+};
+
+export type ResearchDraftContent = {
+  targets: Array<{
+    channelId: string;
+    channelName?: string;
+    platform: string;
+    content: string;
+    thread: string[];
+    redditTitle?: string;
+    subreddit?: string;
+    redditPostType?: "self";
+  }>;
+};
+export type ResearchDraft = {
+  id: string;
+  runId: string;
+  findingId: string;
+  title: string;
+  sourceUrl: string;
+  whyItMatters: string;
+  content: ResearchDraftContent;
+  revision: number;
+  status:
+    | "draft"
+    | "delivering"
+    | "pending"
+    | "editing"
+    | "approved"
+    | "rejected"
+    | "publishing"
+    | "published"
+    | "failed";
+  postId: string | null;
+  slackChannelId: string | null;
+  slackThreadTs: string | null;
+  slackThreadUrl: string | null;
+  createdAt: number;
+  updatedAt: number;
+  error: string | null;
 };

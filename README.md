@@ -106,10 +106,18 @@ See [agent installation and HTTP fallback](docs/agent-skill.md).
 Open `/research` to collect practitioner articles, original research, and selected
 YouTube channels, scan the last 30 days, and save useful findings as ideas. The
 catalog preserves the original 43 sources and adds 22 curated entries; 25 are
-enabled by default, with competitor blogs and changelogs disabled. Daily collection
-does not call a model. Manual scans use `OPENAI_API_KEY` with `gpt-6-luna`, cached
-screening, and evidence checks. Public video captions are attempted; videos without
-readable transcripts are excluded from ranking. See [research setup and coverage](docs/research.md).
+enabled by default, with competitor blogs and changelogs disabled. Daily scans
+review the preceding 24 hours and draft up to two strong matches using each
+opted-in publishing profile's own audience and writing instructions. Configure
+publishing profiles in Settings → Research profiles, then click **Connect Slack**
+in Settings → Slack and choose a review channel and reviewers. The deployment
+operator registers one Slack app and sets its credentials once; team owners do
+not paste tokens. Thread replies request revisions, and only the latest
+**Approve & publish** action can publish.
+Collection alone does not call a model. Ranking and drafts use `OPENAI_API_KEY`
+with `gpt-6-luna`, cached analysis and evidence checks. Videos without readable
+transcripts are excluded. See [research coverage](docs/research.md) and
+[Slack review setup](docs/slack-reviews.md).
 
 ## Development and manual deployment
 

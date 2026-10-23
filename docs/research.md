@@ -24,10 +24,12 @@ blocked, paywalled, or inaccessible pages can fail; source errors appear in the 
 
 ## Collection and scans
 
-Daily collection starts after a team first opens Research. The existing minute
-cron checks due teams hourly and starts collection once every 24 hours. It makes
-no model calls. The daily switch is team-specific. **Collect new items** runs the
-same collection on demand.
+Daily research starts after a team first opens Research. The existing minute
+cron checks due teams hourly and scans the preceding 24 hours once every day. It
+ranks fresh evidence and proposes up to two strong post drafts for Slack review.
+Daily ranking and drafting consume OpenAI API tokens. The daily switch is
+team-specific. **Collect new items** only collects and makes no model calls. See
+[Slack reviews](slack-reviews.md) for setup, thread edits and approval controls.
 
 **Run 30-day scan** collects enabled sources, then screens eligible items using
 `gpt-6-luna` with reasoning disabled. It screens up to 1,000 items in batches of
@@ -46,7 +48,7 @@ return the same idea. Saving does not create or publish a social post.
 
 ## Deployment
 
-Apply D1 migration `0025_research.sql` before deploying. Keep the existing
+Apply D1 migrations `0025_research.sql` and `0026_daily_research_slack.sql` before deploying. Keep the existing
 `OPENAI_API_KEY` and a `SESSION_SECRET` of at least 32 characters in Worker secrets.
 `wrangler.toml` declares the `RESEARCH_WORKFLOW` binding and `ResearchWorkflow`
 entrypoint. The normal build generates the Worker wrapper and shared runtime.

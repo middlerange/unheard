@@ -48,3 +48,12 @@
 - For our product/growth ICP, prioritize individual practitioners, original research, operator experiments and substantive product interviews. Competitor SEO blogs and changelogs are low-priority competitive intelligence and must remain off by default rather than dominating editorial discovery.
 - Preserve transcript availability as evidence: video metadata alone does not establish what a speaker said. Mark missing transcripts and never present a title-based summary as a watched/read video.
 - Validate durable workflow configuration on Cloudflare as well as in mocks. A zero-retry step still requires a retry delay; local mock execution does not validate that platform contract.
+
+## Daily editorial research
+
+- Daily research should rank the preceding 24 hours and propose useful posts, not stop at collecting links. Keep the manual 30-day discovery scan separate. Human review belongs on the exact latest draft, and Slack thread edits must invalidate older approval actions.
+
+## Portable editorial approvals
+
+- Content Hub is an open-source product: Slack workspaces, review channels, approvers and publishing destinations are account configuration, not assumptions from the current operator's workspace. Select destinations using each connected profile's own system prompt and audience rules; do not force a personal/company group or hard-code X/LinkedIn.
+- Offer OAuth as the normal Slack connection flow. Deployment operators configure the Slack application once; ordinary users choose a workspace, channel and reviewers without handling bot tokens or signing secrets.

@@ -7,7 +7,14 @@ export const Route = createFileRoute("/api/research/runs")({
       POST: ({ request }) =>
         researchHttp(
           request,
-          async (teamId) => createResearchRun(teamId, await request.json()),
+          async (teamId) => {
+            const input = await request.json();
+            return createResearchRun(
+              teamId,
+              input,
+              input.days === 1 && input.mode !== "collect",
+            );
+          },
           202,
         ),
     },

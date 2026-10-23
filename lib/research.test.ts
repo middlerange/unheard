@@ -1,3 +1,7 @@
+import {
+  getResearchProfiles,
+  updateResearchProfile,
+} from "./research-profiles";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
@@ -21,6 +25,10 @@ import {
   verifyResearchRequest,
 } from "./research-internal";
 import { validateResearchEvidence } from "./research-model";
+import {
+  processResearchDraftJob,
+  rewriteResearchDraftContent,
+} from "./research-drafts";
 import type { ResearchSourceSeed } from "./research-types";
 import { RESEARCH_SOURCE_SEEDS } from "./research-sources";
 const state = vi.hoisted(() => ({ db: undefined as unknown }));
@@ -498,23 +506,362 @@ describe("research persistence and team isolation", () => {
       else process.env.OPENAI_API_KEY = previousKey;
     }
   }, 20_000);
-  it("dispatches daily collection once per day without making model requests", async () => {
-    execute({ queries: [
-      { sql: "UPDATE research_settings SET daily_enabled=0" },
-      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('daily','Daily','daily',0,0)" },
-    ] });
+  it("dispatches one editorial scan of exactly24hours daily, with model work in durable steps", async () => {
+    execute({
+      queries: [
+        { sql: "UPDATE research_settings SET daily_enabled=0" },
+        {
+          sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('daily','Daily','daily',0,0)",
+        },
+      ],
+    });
     await initializeResearch("daily");
     const dispatch = vi.fn(async () => ({}));
     globalThis.__contentHubResearchWorkflow__ = { create: dispatch };
     const fetcher = vi.spyOn(globalThis, "fetch");
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-daily-key";
     try {
-      expect(await processResearchJob({ operation: "daily" })).toEqual({ dispatched: 1 });
-      expect(await processResearchJob({ operation: "daily" })).toEqual({ dispatched: 0 });
+      expect(await processResearchJob({ operation: "daily" })).toEqual({
+        dispatched: 1,
+      });
+      expect(await processResearchJob({ operation: "daily" })).toEqual({
+        dispatched: 0,
+      });
       expect(dispatch).toHaveBeenCalledTimes(1);
-      expect((await getResearchSnapshot("daily")).runs[0].mode).toBe("collect");
+      expect((await getResearchSnapshot("daily")).runs[0]).toMatchObject({
+        mode: "scan",
+        days: 1,
+        editorial: true,
+      });
       expect(fetcher).not.toHaveBeenCalled();
     } finally {
       fetcher.mockRestore();
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+    }
+  }, 20_000);
+  it("keeps a daily scan due when a manual discovery run occupies the workflow", async () => {
+    execute({ queries: [
+      { sql: "UPDATE research_settings SET daily_enabled=0" },
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('manual-busy','Busy','manual-busy',0,0)" },
+    ] });
+    await initializeResearch("manual-busy");
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-daily-key";
+    globalThis.__contentHubResearchWorkflow__ = { create: vi.fn(async () => ({})) };
+    try {
+      const manual = await createResearchRun("manual-busy", { days: 30, mode: "scan" });
+      expect(await processResearchJob({ operation: "daily" })).toEqual({ dispatched: 0 });
+      expect(execute({ queries: [{ sql: "SELECT last_daily_at FROM research_settings WHERE team_id='manual-busy'" }] })[0].results).toEqual([{ last_daily_at: null }]);
+      execute({ queries: [{ sql: "UPDATE research_runs SET status='completed' WHERE id=?", params: [manual.run.id] }] });
+      expect(await processResearchJob({ operation: "daily" })).toEqual({ dispatched: 1 });
+      const snapshot = await getResearchSnapshot("manual-busy");
+      expect(snapshot.runs.find(run => run.editorial)).toMatchObject({ days: 1, mode: "scan" });
+    } finally {
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+    }
+  }, 20_000);
+  it("keeps per-profile prompts team-scoped and rejects missing prompts and asset-only formats", async () => {
+    execute({
+      queries: [
+        {
+          sql: "INSERT INTO channels(id,team_id,name,platform,group_name,created_at) VALUES('profile-a','a','My custom brand','facebook','custom',0)",
+        },
+        {
+          sql: "INSERT INTO channels(id,team_id,name,platform,group_name,created_at) VALUES('profile-video','a','Video channel','youtube','custom',0)",
+        },
+      ],
+    });
+    await expect(
+      updateResearchProfile("b", {
+        id: "profile-a",
+        enabled: true,
+        systemPrompt: "Write practical lessons for independent designers",
+      }),
+    ).rejects.toThrow("not found");
+    await expect(
+      updateResearchProfile("a", {
+        id: "profile-a",
+        enabled: true,
+        systemPrompt: "Too short",
+      }),
+    ).rejects.toThrow("20 characters");
+    await expect(
+      updateResearchProfile("a", {
+        id: "profile-video",
+        enabled: true,
+        systemPrompt: "Write practical lessons for independent designers",
+      }),
+    ).rejects.toThrow("publishing format");
+    await updateResearchProfile("a", {
+      id: "profile-a",
+      enabled: true,
+      systemPrompt: "Write practical lessons for independent designers",
+    });
+    expect(
+      (await getResearchProfiles("a")).profiles.find(
+        (profile) => profile.id === "profile-a",
+      ),
+    ).toMatchObject({
+      enabled: true,
+      platform: "facebook",
+      systemPrompt: "Write practical lessons for independent designers",
+    });
+    expect((await getResearchProfiles("b")).profiles).toHaveLength(0);
+  });
+  it("ranks a24hour run without spending tokens on stale, future, or undated items", async () => {
+    const now = Date.now();
+    const seed = RESEARCH_SOURCE_SEEDS.find(
+      (entry) => entry.enabled && entry.feedUrl,
+    )!;
+    execute({
+      queries: [
+        {
+          sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('empty-daily','Empty daily','empty-daily',0,0)",
+        },
+        {
+          sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES('empty-daily-run','empty-daily','scan','collecting',1,1,?,'ICP',1,?)",
+          params: [now, JSON.stringify([seed.id])],
+        },
+        {
+          sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES('empty-daily-step','empty-daily-run',?,'completed')",
+          params: [seed.id],
+        },
+        ...[now - 86400001, now + 1, null].map((at, index) => ({
+          sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at) VALUES(?,'empty-daily',?,?,'Out of window','Not eligible',?,?)",
+          params: [
+            `excluded-${index}`,
+            seed.id,
+            `https://example.com/excluded-${index}`,
+            at,
+            now,
+          ],
+        })),
+      ],
+    });
+    const fetcher = vi.spyOn(globalThis, "fetch");
+    try {
+      await processResearchJob({ operation: "rank", runId: "empty-daily-run" });
+      expect(fetcher).not.toHaveBeenCalled();
+      const snapshot = await getResearchSnapshot("empty-daily");
+      expect(snapshot.runs[0]).toMatchObject({
+        status: "drafting",
+        days: 1,
+        inputTokens: 0,
+        outputTokens: 0,
+        findingsCount: 0,
+      });
+      expect(snapshot.findings).toHaveLength(0);
+    } finally {
+      fetcher.mockRestore();
+    }
+  }, 20_000);
+  it("chooses two strong24hour profile fits even after the top finding is declined, with cached edits and no auto-publishing", async () => {
+    const now = Date.now();
+    const quote = "Talk to customers before changing the onboarding flow.";
+    execute({
+      queries: [
+        {
+          sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('editorial','Editorial','editorial',0,0)",
+        },
+        {
+          sql: "INSERT INTO channels(id,team_id,name,platform,group_name,research_enabled,system_prompt,created_at) VALUES('editorial-linkedin','editorial','My LinkedIn','linkedin','custom',1,'Write practical onboarding observations for product managers',0)",
+        },
+        {
+          sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp) VALUES('editorial-run','editorial','scan','drafting',1,1,?,'B2B SaaS founders')",
+          params: [now],
+        },
+        ...[
+          { id: "old", at: now - 86400001, score: 99 },
+          { id: "future", at: now + 1, score: 99 },
+          { id: "weak", at: now - 1000, score: 79 },
+          { id: "best", at: now - 86400000, score: 95 },
+          { id: "runner", at: now - 1000, score: 90 },
+          { id: "third", at: now - 1000, score: 85 },
+        ].flatMap((entry) => [
+          {
+            sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content) VALUES(?,'editorial','practitioner',?,?,?, ?,?,?)",
+            params: [
+              `ed-item-${entry.id}`,
+              `https://example.com/${entry.id}`,
+              entry.id,
+              quote,
+              entry.at,
+              now,
+              quote.repeat(20),
+            ],
+          },
+          {
+            sql: "INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key) VALUES(?,'editorial','editorial-run',?,'practitioner',?,?,?,?,?,'Practical','Angle',?,'Anecdotal',?,?)",
+            params: [
+              `ed-finding-${entry.id}`,
+              `ed-item-${entry.id}`,
+              entry.id,
+              `https://example.com/${entry.id}`,
+              entry.at,
+              entry.score,
+              quote,
+              quote,
+              now,
+              `family-${entry.id}`,
+            ],
+          },
+        ]),
+      ],
+    });
+    execute({
+      queries: [
+        {
+          sql: "UPDATE research_runs SET source_ids='[\"practitioner\"]' WHERE id='editorial-run'",
+        },
+        {
+          sql: "INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp) VALUES('editorial-manual-run','editorial','scan','completed',30,?,'ICP')",
+          params: [now - 1],
+        },
+        {
+          sql: "UPDATE research_findings SET run_id='editorial-manual-run' WHERE id='ed-finding-third'",
+        },
+      ],
+    });
+    const priorKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-editorial-key";
+    const fetcher = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (url, init) => {
+        expect(String(url)).toBe("https://api.openai.com/v1/responses");
+        const data = JSON.parse(String(init?.body));
+        const input = JSON.parse(data.input);
+        expect(["best", "runner", "third"]).toContain(input.source.title);
+        return Response.json({
+          status: "completed",
+          output: [
+            {
+              content: [
+                {
+                  type: "output_text",
+                  text: JSON.stringify(
+                    input.source.title === "best"
+                      ? {
+                          ready: false,
+                          reason:
+                            "Strong evidence but not relevant to this profile",
+                          targets: [],
+                        }
+                      : {
+                          ready: true,
+                          reason: "Useful first hand evidence",
+                          targets: [
+                            {
+                              channelId: "editorial-linkedin",
+                              platform: "linkedin",
+                              content: `Customer conversations expose onboarding gaps. A practitioner suggests starting with interviews. Source: ${input.source.url}`,
+                              thread: [],
+                              supportQuote: quote,
+                              redditTitle: null,
+                              subreddit: null,
+                            },
+                          ],
+                        },
+                  ),
+                },
+              ],
+            },
+          ],
+          usage: { input_tokens: 30, output_tokens: 40 },
+        });
+      });
+    try {
+      expect(await processResearchDraftJob("editorial-run")).toEqual({
+        drafted: 2,
+      });
+      expect(await processResearchDraftJob("editorial-run")).toEqual({
+        drafted: 2,
+      });
+      expect(fetcher).toHaveBeenCalledTimes(3);
+      const snapshot = await getResearchSnapshot("editorial");
+      expect(snapshot.drafts).toHaveLength(2);
+      expect(snapshot.drafts[0].content.targets[0].channelName).toBe(
+        "My LinkedIn",
+      );
+      execute({
+        queries: [
+          {
+            sql: "INSERT INTO slack_integrations(team_id,workspace_id,channel_id,credentials,created_at,updated_at) VALUES('editorial','TEDITORIAL','CEDITORIAL','{}',0,0)",
+          },
+          {
+            sql: "UPDATE research_drafts SET slack_channel_id='CEDITORIAL',slack_thread_ts='1234567890.123456' WHERE id=?",
+            params: [snapshot.drafts[0].id],
+          },
+        ],
+      });
+      expect(
+        (await getResearchSnapshot("editorial")).drafts.find(
+          (draft) => draft.id === snapshot.drafts[0].id,
+        )?.slackThreadUrl,
+      ).toBe(
+        "https://app.slack.com/client/TEDITORIAL/CEDITORIAL/thread/CEDITORIAL-1234567890.123456",
+      );
+      expect((await getResearchSnapshot("b")).drafts).toHaveLength(0);
+      expect(snapshot.drafts.map((draft) => draft.title).sort()).toEqual([
+        "runner",
+        "third",
+      ]);
+      expect(snapshot.runs[0]).toMatchObject({
+        status: "completed",
+        inputTokens: 90,
+        outputTokens: 120,
+      });
+      expect(
+        execute({
+          queries: [
+            {
+              sql: "SELECT COUNT(*) count FROM research_draft_revisions WHERE team_id='editorial'",
+            },
+            {
+              sql: "SELECT COUNT(*) count FROM posts WHERE team_id='editorial' AND state IN ('scheduled','published','publishing')",
+            },
+          ],
+        }).map((entry: { results: unknown }) => entry.results),
+      ).toEqual([[{ count: 2 }], [{ count: 0 }]]);
+      await expect(
+        rewriteResearchDraftContent(snapshot.drafts[0].id, "b", "Shorten it"),
+      ).rejects.toThrow("not found");
+      expect(
+        (
+          await rewriteResearchDraftContent(
+            snapshot.drafts[0].id,
+            "editorial",
+            "Shorten it",
+          )
+        ).inputTokens,
+      ).toBe(30);
+      expect(
+        (
+          await rewriteResearchDraftContent(
+            snapshot.drafts[0].id,
+            "editorial",
+            "Shorten it",
+          )
+        ).inputTokens,
+      ).toBe(0);
+      expect(fetcher).toHaveBeenCalledTimes(4);
+      // Replaying rank after a manual30-day scan must never generate approval drafts.
+      execute({
+        queries: [
+          { sql: "UPDATE research_runs SET days=30 WHERE id='editorial-run'" },
+        ],
+      });
+      expect(await processResearchDraftJob("editorial-run")).toEqual({
+        drafted: 0,
+        skipped: true,
+      });
+      expect(fetcher).toHaveBeenCalledTimes(4);
+    } finally {
+      fetcher.mockRestore();
+      if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = priorKey;
     }
   }, 20_000);
   it("saves exactly one idea on repeated requests and rejects cross-team finding access", async () => {

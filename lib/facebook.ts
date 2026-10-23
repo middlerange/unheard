@@ -1,4 +1,4 @@
-// ABOUTME: Facebook Page publishing client for video posts.
+// ABOUTME: Facebook Page publishing client for text and video posts.
 // ABOUTME: Uses the Resumable Upload API to obtain a file handle, then publishes the video to the Page.
 
 import type { Media } from './db/types';
@@ -32,6 +32,21 @@ async function fetchJson<T>(input: RequestInfo | URL, init?: RequestInit): Promi
     throw new Error(message);
   }
   return payload as T;
+}
+
+export async function facebookPublishText(message: string, creds: FacebookCreds): Promise<string> {
+  if (!message.trim()) throw new Error('Facebook text posts need a message');
+  if ([...message].length > 63206) throw new Error('Facebook text posts exceed the 63206 character limit');
+  const form = new FormData();
+  form.set('access_token', creds.pageAccessToken);
+  form.set('message', message);
+  form.set('published', 'true');
+  const published = await fetchJson<{ id?: string }>(
+    `${FACEBOOK_GRAPH_BASE}/${encodeURIComponent(creds.pageId)}/feed`,
+    { method: 'POST', body: form },
+  );
+  if (!published.id) throw new Error('Facebook did not return a published post id');
+  return published.id;
 }
 
 export async function facebookPublishVideo(

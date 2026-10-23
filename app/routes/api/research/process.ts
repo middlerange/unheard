@@ -4,7 +4,7 @@ import { processResearchJob } from "@/lib/research";
 import { verifyResearchRequest } from "@/lib/research-internal";
 export const researchJobSchema = z
   .object({
-    operation: z.enum(["plan", "collect", "rank", "fail", "daily"]),
+    operation: z.enum(["plan", "collect", "rank", "drafts", "fail", "daily"]),
     runId: z.string().max(100).optional(),
     sourceId: z.string().max(200).optional(),
     error: z.string().max(1000).optional(),

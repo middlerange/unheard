@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { invokeResearchProcess, isResearchCollectionTick, runResearchWorkflow } from './research-runtime.mjs';
+import { invokeResearchProcess, isResearchCollectionTick, runResearchWorkflow, runSlackWorkflow } from './research-runtime.mjs';
 
 describe('durable research execution', () => {
   it('collects each source before ranking and gives paid ranking no automatic retries', async () => {
@@ -16,8 +16,9 @@ describe('durable research execution', () => {
       return payload.operation === 'plan' ? { sourceIds: ['teresa-torres', 'lenny'] } : { status: 'completed' };
     };
     await runResearchWorkflow('run-1', step, invoke);
-    expect(operations).toEqual(['plan', 'teresa-torres', 'lenny', 'rank']);
+    expect(operations).toEqual(['plan', 'teresa-torres', 'lenny', 'rank', 'drafts']);
     expect(options['Rank findings'].retries).toEqual({ limit: 0, delay: '1 second', backoff: 'constant' });
+    expect(options['Draft daily posts'].retries).toEqual({ limit: 0, delay: '1 second', backoff: 'constant' });
   });
 
   it('records failure without continuing into paid analysis', async () => {
@@ -51,5 +52,17 @@ describe('durable research execution', () => {
   it('dispatches hourly collection checks without changing the minute publisher cadence', () => {
     expect(isResearchCollectionTick(Date.parse('2026-10-23T03:00:00Z'))).toBe(true);
     expect(isResearchCollectionTick(Date.parse('2026-10-23T03:01:00Z'))).toBe(false);
+  });
+
+  it('routes durable Slack work to the signed endpoint without retrying paid edits or publishing', async () => {
+    const invoke = vi.fn(async () => ({ ok: true }));
+    const doStep = vi.fn(async (_name: string, _options: unknown, work: () => Promise<unknown>) => work());
+    await runSlackWorkflow('slack-job', { do: doStep }, invoke);
+    expect(invoke).toHaveBeenCalledWith({ operation: 'process', jobId: 'slack-job' });
+    expect(doStep.mock.calls[0][1]).toMatchObject({ retries: { limit: 0, delay: '1 second' } });
+    let path = '';
+    const handler = { fetch: async (request: Request) => { path = new URL(request.url).pathname; return Response.json({ ok: true }); } };
+    await invokeResearchProcess(handler, { SESSION_SECRET: 'test-only-worker-secret' }, { operation: 'process', jobId: 'slack-job' }, '/api/slack/process');
+    expect(path).toBe('/api/slack/process');
   });
 });

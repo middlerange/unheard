@@ -1,3 +1,4 @@
+import { assertNotSlackManagedPost } from '@/lib/slack-post-lock';
 // ABOUTME: Converts an idea into a generated post using template + default brand voice.
 // ABOUTME: Saves/updates a draft post keyed by idea id and optionally returns a cover suggestion prompt.
 
@@ -374,6 +375,7 @@ export const Route = createFileRoute('/api/ideas/convert-to-post')({
           const group = channel_group ?? 'personal';
           const existingPost = await getPostWithDetails(postId, teamId);
           if (existingPost) {
+            await assertNotSlackManagedPost(postId, teamId);
             await dbUpdatePost(postId, teamId, 'draft', null, now, channel_group ?? existingPost.channel_group, matchedTemplate?.id ?? null, brand?.writing_prompt ?? null, idea!.id, brand?.id ?? null);
             await deletePostTargets(postId);
             await deletePostMedia(postId);

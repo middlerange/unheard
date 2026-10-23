@@ -27,7 +27,7 @@ export async function researchHttp(
       error instanceof Error ? error.message : "Research request failed";
     if (/not found/i.test(message))
       return Response.json({ error: message }, { status: 404 });
-    if (/Enable at least|Set OPENAI_API_KEY/i.test(message))
+    if (/Enable at least|Set OPENAI_API_KEY|Add at least|profile needs/i.test(message))
       return Response.json({ error: message }, { status: 400 });
     if (/Workflow is unavailable/i.test(message))
       return Response.json({ error: message }, { status: 503 });

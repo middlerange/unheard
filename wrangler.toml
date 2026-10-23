@@ -19,6 +19,11 @@ binding = "RESEARCH_WORKFLOW"
 name = "content-hub-research"
 class_name = "ResearchWorkflow"
 
+[[workflows]]
+binding = "SLACK_WORKFLOW"
+name = "content-hub-slack"
+class_name = "SlackWorkflow"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "content-hub"

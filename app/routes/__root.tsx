@@ -303,6 +303,8 @@ function getPageTitle(pathname: string): string {
   if (pathname.startsWith('/settings/rss')) return 'RSS feeds';
   if (pathname.startsWith('/settings/webhooks')) return 'Webhooks';
   if (pathname.startsWith('/settings/telegram')) return 'Telegram';
+  if (pathname.startsWith('/settings/slack')) return 'Slack approvals';
+  if (pathname.startsWith('/settings/research-profiles')) return 'Research profiles';
   if (pathname.startsWith('/settings/templates-library')) return 'Templates library';
   if (pathname.startsWith('/settings/templates')) return 'Templates';
   if (pathname.startsWith('/settings/best-time')) return 'Best time to post';

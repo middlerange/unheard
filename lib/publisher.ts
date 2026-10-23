@@ -1,6 +1,10 @@
 // ABOUTME: Orchestrates publishing a post to all its target platforms.
 // ABOUTME: Updated for multi-account support - uses channel_id from each target.
 
+import { and, eq, isNull } from 'drizzle-orm';
+import { getDb } from './db/client';
+import { post_targets } from './schema';
+import { hashPublicationInput, isPublicationComplete, publishTwitterWithProgress, type PublicationTarget } from './publication-progress';
 import { getPostWithDetails, updateTargetSuccess, updateTargetError, updatePostState, getChannel } from './db/queries';
 import type { PostWithDetails } from './db/types';
 import { tweetPost, replyToTweet, maxCharacters, type TwitterCreds } from './twitter';
@@ -8,7 +12,7 @@ import { linkedinPost, commentOnPost, withLinkedInAccountId, type LinkedInCreds 
 import { redditPost, type RedditCreds, type RedditPostInput } from './reddit';
 import { discordPost, type DiscordCreds } from './discord';
 import { instagramPublish, type InstagramCreds } from './instagram';
-import { facebookPublishVideo, type FacebookCreds } from './facebook';
+import { facebookPublishText, facebookPublishVideo, type FacebookCreds } from './facebook';
 import { youtubeUploadVideo, type YouTubeCreds } from './youtube';
 import { htmlToText } from './text';
 import { resolvePostMedia } from './post-media';
@@ -33,8 +37,8 @@ async function resolveLinkedInCreds(channelId: string, teamId: string): Promise<
   );
 }
 
-export function targetsPendingPublication<T extends { platform_post_id: string | null }>(targets: T[]): T[] {
-  return targets.filter(target => !target.platform_post_id);
+export function targetsPendingPublication<T extends PublicationTarget>(targets: T[]): T[] {
+  return targets.filter(target => !isPublicationComplete(target));
 }
 
 async function resolveRedditCreds(channelId: string, teamId: string): Promise<RedditCreds | undefined> {
@@ -89,12 +93,37 @@ async function publishTarget(target: PostWithDetails['targets'][number], allMedi
     const creds = await resolveTwitterCreds(target.channel_id, teamId);
     if (!creds) throw new Error('Twitter credentials not found');
     const limit = maxCharacters(creds);
-    if (text.length > limit) throw new Error(`Content exceeds X's ${limit}-character limit`);
-    let lastId = await tweetPost(text, media, target.reply_settings ?? undefined, creds);
-    for (const item of target.thread ?? []) {
-      lastId = await replyToTweet(htmlToText(item), lastId, [], target.reply_settings ?? undefined, creds);
-    }
-    await updateTargetSuccess(target.id, lastId);
+    const parts = [text, ...(target.thread ?? []).map(htmlToText)];
+    if (parts.some(part => part.length > limit)) throw new Error(`Content exceeds X's ${limit}-character limit`);
+    const contentHash = await hashPublicationInput({
+      channelId: target.channel_id,
+      accountId: target.channel_account_id ?? null,
+      accountType: target.channel_account_type ?? null,
+      parts,
+      replySettings: target.reply_settings,
+      media: media.map(item => ({ id: item.id, path: item.path, url: item.url, type: item.type })),
+    });
+    const db = await getDb();
+    await publishTwitterWithProgress({
+      contentHash, parts,
+      platformPostId: target.platform_post_id,
+      progress: target.publication_progress,
+    }, {
+      persist: async (progress, expectedRaw) => {
+        const result = await db.update(post_targets).set({
+          publication_progress: JSON.stringify(progress),
+          platform_post_id: progress.rootId,
+          error: null,
+        }).where(and(
+          eq(post_targets.id, target.id),
+          eq(post_targets.post_id, target.post_id),
+          expectedRaw === null ? isNull(post_targets.publication_progress) : eq(post_targets.publication_progress, expectedRaw),
+        )).run();
+        if (!Number(result.meta?.changes)) throw new Error('X publication state changed. Reload the post before retrying.');
+      },
+      publishRoot: content => tweetPost(content, media, target.reply_settings ?? undefined, creds),
+      publishReply: (content, parentId) => replyToTweet(content, parentId, [], target.reply_settings ?? undefined, creds),
+    });
   } else if (target.platform === 'linkedin') {
     const creds = await resolveLinkedInCreds(target.channel_id, teamId);
     if (!creds) throw new Error('LinkedIn credentials not found');
@@ -139,8 +168,10 @@ async function publishTarget(target: PostWithDetails['targets'][number], allMedi
     const creds = await resolveFacebookCreds(target.channel_id, teamId);
     if (!creds) throw new Error('Facebook credentials not found');
 
-    const videoId = await facebookPublishVideo(text, media, creds);
-    await updateTargetSuccess(target.id, videoId);
+    const postId = media.length
+      ? await facebookPublishVideo(text, media, creds)
+      : await facebookPublishText(text, creds);
+    await updateTargetSuccess(target.id, postId);
   } else if (target.platform === 'youtube') {
     const creds = await resolveYouTubeCreds(target.channel_id, teamId);
     if (!creds) throw new Error('YouTube credentials not found');

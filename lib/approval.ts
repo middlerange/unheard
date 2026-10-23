@@ -13,6 +13,7 @@ import {
   sendNotification,
 } from './telegram';
 import { publishApprovedPost } from './publisher';
+import { assertNotSlackManagedPost } from './slack-post-lock';
 
 export type ApprovalSnapshot = {
   version: 1;
@@ -141,6 +142,7 @@ async function getApprovalById(id: string): Promise<PostApproval | null> {
 }
 
 async function ensureApprovalRequest(post: PostWithDetails): Promise<PostApproval> {
+  await assertNotSlackManagedPost(post.id, post.team_id);
   if (post.targets.length === 0) throw new Error(`Post ${post.id} has no publishing targets`);
   const missingProfile = post.targets.find(target => !target.channel_id);
   if (missingProfile) {
@@ -275,6 +277,7 @@ export async function processDuePostApprovals(): Promise<{
   let failed = 0;
   for (const post of duePosts) {
     try {
+      await assertNotSlackManagedPost(post.id, post.team_id);
       const user = await getUserById(await getSystemRequester(post.team_id));
       if (user?.auto_publish) {
         const claim = await db.update(schema.posts)
@@ -328,6 +331,7 @@ export async function requestPublishApprovalById(id: string, teamId: string): Pr
 }
 
 export async function invalidatePendingApprovals(postId: string, teamId: string, reason: string): Promise<void> {
+  await assertNotSlackManagedPost(postId, teamId);
   const post = await getPostWithDetails(postId, teamId);
   if (!post) return;
 

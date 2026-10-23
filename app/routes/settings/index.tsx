@@ -2,7 +2,7 @@
 // ABOUTME: Entry point for /settings, links out to each sub-section.
 
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { ChevronRight, Mic2, FileText, Bell, Radio, Rss, Webhook, Users, Send, Clock, KeyRound, ListChecks } from "@/components/icons";
+import { ChevronRight, Mic2, FileText, Bell, Radio, Rss, Webhook, Users, Send, Clock, KeyRound, ListChecks, MessageSquare } from "@/components/icons";
 
 export const Route = createFileRoute('/settings/')({
   component: SettingsPage,
@@ -32,6 +32,18 @@ const sections = [
     icon: Webhook,
     label: 'Webhooks',
     description: 'Outgoing webhooks for Zapier, Make, n8n integrations',
+  },
+  {
+    to: '/settings/research-profiles',
+    icon: Mic2,
+    label: 'Research profiles',
+    description: 'Choose which profiles get daily drafts and set their individual writing instructions',
+  },
+  {
+    to: '/settings/slack',
+    icon: MessageSquare,
+    label: 'Slack approvals',
+    description: 'Review daily research drafts, request edits in a thread, and approve publishing',
   },
   {
     to: '/settings/telegram',

@@ -33,6 +33,7 @@ import { Route as ApiPostsRouteImport } from './routes/api/posts'
 import { Route as ApiResearchRouteImport } from './routes/api/research'
 import { Route as ApiRssFeedsRouteImport } from './routes/api/rss-feeds'
 import { Route as ApiSettingsRouteImport } from './routes/api/settings'
+import { Route as ApiSlackRouteImport } from './routes/api/slack'
 import { Route as ApiUploadRouteImport } from './routes/api/upload'
 import { Route as IdeasIdRouteImport } from './routes/ideas_.$id'
 import { Route as LinkedinCallbackRouteImport } from './routes/linkedin/callback'
@@ -51,9 +52,11 @@ import { Route as SettingsBestTimeRouteImport } from './routes/settings/best-tim
 import { Route as SettingsBrandsRouteImport } from './routes/settings/brands'
 import { Route as SettingsChannelsRouteImport } from './routes/settings/channels'
 import { Route as SettingsNotificationsRouteImport } from './routes/settings/notifications'
+import { Route as SettingsResearchProfilesRouteImport } from './routes/settings/research-profiles'
 import { Route as SettingsRssRouteImport } from './routes/settings/rss'
 import { Route as SettingsRssFeedsRouteImport } from './routes/settings/rss-feeds'
 import { Route as SettingsSetupRouteImport } from './routes/settings/setup'
+import { Route as SettingsSlackRouteImport } from './routes/settings/slack'
 import { Route as SettingsTeamRouteImport } from './routes/settings/team'
 import { Route as SettingsTelegramRouteImport } from './routes/settings/telegram'
 import { Route as SettingsTemplatesRouteImport } from './routes/settings/templates'
@@ -67,9 +70,17 @@ import { Route as ApiMetaDataDeletionRouteImport } from './routes/api/meta/data-
 import { Route as ApiPostsScheduleRouteImport } from './routes/api/posts/schedule'
 import { Route as ApiResearchFindingsRouteImport } from './routes/api/research/findings'
 import { Route as ApiResearchProcessRouteImport } from './routes/api/research/process'
+import { Route as ApiResearchProfilesRouteImport } from './routes/api/research/profiles'
 import { Route as ApiResearchRunsRouteImport } from './routes/api/research/runs'
 import { Route as ApiResearchSourcesRouteImport } from './routes/api/research/sources'
+import { Route as ApiSlackConnectRouteImport } from './routes/api/slack/connect'
+import { Route as ApiSlackEventsRouteImport } from './routes/api/slack/events'
+import { Route as ApiSlackInteractionsRouteImport } from './routes/api/slack/interactions'
+import { Route as ApiSlackManifestRouteImport } from './routes/api/slack/manifest'
+import { Route as ApiSlackOptionsRouteImport } from './routes/api/slack/options'
+import { Route as ApiSlackProcessRouteImport } from './routes/api/slack/process'
 import { Route as ApiTelegramWebhookRouteImport } from './routes/api/telegram/webhook'
+import { Route as ApiSlackOauthCallbackRouteImport } from './routes/api/slack/oauth/callback'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -193,6 +204,11 @@ const ApiSettingsRoute = ApiSettingsRouteImport.update({
   path: '/api/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiSlackRoute = ApiSlackRouteImport.update({
+  id: '/api/slack',
+  path: '/api/slack',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiUploadRoute = ApiUploadRouteImport.update({
   id: '/api/upload',
   path: '/api/upload',
@@ -283,6 +299,12 @@ const SettingsNotificationsRoute = SettingsNotificationsRouteImport.update({
   path: '/settings/notifications',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SettingsResearchProfilesRoute =
+  SettingsResearchProfilesRouteImport.update({
+    id: '/settings/research-profiles',
+    path: '/settings/research-profiles',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const SettingsRssRoute = SettingsRssRouteImport.update({
   id: '/settings/rss',
   path: '/settings/rss',
@@ -296,6 +318,11 @@ const SettingsRssFeedsRoute = SettingsRssFeedsRouteImport.update({
 const SettingsSetupRoute = SettingsSetupRouteImport.update({
   id: '/settings/setup',
   path: '/settings/setup',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SettingsSlackRoute = SettingsSlackRouteImport.update({
+  id: '/settings/slack',
+  path: '/settings/slack',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SettingsTeamRoute = SettingsTeamRouteImport.update({
@@ -365,6 +392,11 @@ const ApiResearchProcessRoute = ApiResearchProcessRouteImport.update({
   path: '/process',
   getParentRoute: () => ApiResearchRoute,
 } as any)
+const ApiResearchProfilesRoute = ApiResearchProfilesRouteImport.update({
+  id: '/profiles',
+  path: '/profiles',
+  getParentRoute: () => ApiResearchRoute,
+} as any)
 const ApiResearchRunsRoute = ApiResearchRunsRouteImport.update({
   id: '/runs',
   path: '/runs',
@@ -375,10 +407,45 @@ const ApiResearchSourcesRoute = ApiResearchSourcesRouteImport.update({
   path: '/sources',
   getParentRoute: () => ApiResearchRoute,
 } as any)
+const ApiSlackConnectRoute = ApiSlackConnectRouteImport.update({
+  id: '/connect',
+  path: '/connect',
+  getParentRoute: () => ApiSlackRoute,
+} as any)
+const ApiSlackEventsRoute = ApiSlackEventsRouteImport.update({
+  id: '/events',
+  path: '/events',
+  getParentRoute: () => ApiSlackRoute,
+} as any)
+const ApiSlackInteractionsRoute = ApiSlackInteractionsRouteImport.update({
+  id: '/interactions',
+  path: '/interactions',
+  getParentRoute: () => ApiSlackRoute,
+} as any)
+const ApiSlackManifestRoute = ApiSlackManifestRouteImport.update({
+  id: '/manifest',
+  path: '/manifest',
+  getParentRoute: () => ApiSlackRoute,
+} as any)
+const ApiSlackOptionsRoute = ApiSlackOptionsRouteImport.update({
+  id: '/options',
+  path: '/options',
+  getParentRoute: () => ApiSlackRoute,
+} as any)
+const ApiSlackProcessRoute = ApiSlackProcessRouteImport.update({
+  id: '/process',
+  path: '/process',
+  getParentRoute: () => ApiSlackRoute,
+} as any)
 const ApiTelegramWebhookRoute = ApiTelegramWebhookRouteImport.update({
   id: '/api/telegram/webhook',
   path: '/api/telegram/webhook',
   getParentRoute: () => rootRouteImport,
+} as any)
+const ApiSlackOauthCallbackRoute = ApiSlackOauthCallbackRouteImport.update({
+  id: '/oauth/callback',
+  path: '/oauth/callback',
+  getParentRoute: () => ApiSlackRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
@@ -406,6 +473,7 @@ export interface FileRoutesByFullPath {
   '/api/research': typeof ApiResearchRouteWithChildren
   '/api/rss-feeds': typeof ApiRssFeedsRoute
   '/api/settings': typeof ApiSettingsRoute
+  '/api/slack': typeof ApiSlackRouteWithChildren
   '/api/upload': typeof ApiUploadRoute
   '/ideas/$id': typeof IdeasIdRoute
   '/linkedin/callback': typeof LinkedinCallbackRoute
@@ -423,9 +491,11 @@ export interface FileRoutesByFullPath {
   '/settings/brands': typeof SettingsBrandsRoute
   '/settings/channels': typeof SettingsChannelsRoute
   '/settings/notifications': typeof SettingsNotificationsRoute
+  '/settings/research-profiles': typeof SettingsResearchProfilesRoute
   '/settings/rss': typeof SettingsRssRoute
   '/settings/rss-feeds': typeof SettingsRssFeedsRoute
   '/settings/setup': typeof SettingsSetupRoute
+  '/settings/slack': typeof SettingsSlackRoute
   '/settings/team': typeof SettingsTeamRoute
   '/settings/telegram': typeof SettingsTelegramRoute
   '/settings/templates': typeof SettingsTemplatesRoute
@@ -440,9 +510,17 @@ export interface FileRoutesByFullPath {
   '/api/posts/schedule': typeof ApiPostsScheduleRoute
   '/api/research/findings': typeof ApiResearchFindingsRoute
   '/api/research/process': typeof ApiResearchProcessRoute
+  '/api/research/profiles': typeof ApiResearchProfilesRoute
   '/api/research/runs': typeof ApiResearchRunsRoute
   '/api/research/sources': typeof ApiResearchSourcesRoute
+  '/api/slack/connect': typeof ApiSlackConnectRoute
+  '/api/slack/events': typeof ApiSlackEventsRoute
+  '/api/slack/interactions': typeof ApiSlackInteractionsRoute
+  '/api/slack/manifest': typeof ApiSlackManifestRoute
+  '/api/slack/options': typeof ApiSlackOptionsRoute
+  '/api/slack/process': typeof ApiSlackProcessRoute
   '/api/telegram/webhook': typeof ApiTelegramWebhookRoute
+  '/api/slack/oauth/callback': typeof ApiSlackOauthCallbackRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -469,6 +547,7 @@ export interface FileRoutesByTo {
   '/api/research': typeof ApiResearchRouteWithChildren
   '/api/rss-feeds': typeof ApiRssFeedsRoute
   '/api/settings': typeof ApiSettingsRoute
+  '/api/slack': typeof ApiSlackRouteWithChildren
   '/api/upload': typeof ApiUploadRoute
   '/ideas/$id': typeof IdeasIdRoute
   '/linkedin/callback': typeof LinkedinCallbackRoute
@@ -486,9 +565,11 @@ export interface FileRoutesByTo {
   '/settings/brands': typeof SettingsBrandsRoute
   '/settings/channels': typeof SettingsChannelsRoute
   '/settings/notifications': typeof SettingsNotificationsRoute
+  '/settings/research-profiles': typeof SettingsResearchProfilesRoute
   '/settings/rss': typeof SettingsRssRoute
   '/settings/rss-feeds': typeof SettingsRssFeedsRoute
   '/settings/setup': typeof SettingsSetupRoute
+  '/settings/slack': typeof SettingsSlackRoute
   '/settings/team': typeof SettingsTeamRoute
   '/settings/telegram': typeof SettingsTelegramRoute
   '/settings/templates': typeof SettingsTemplatesRoute
@@ -503,9 +584,17 @@ export interface FileRoutesByTo {
   '/api/posts/schedule': typeof ApiPostsScheduleRoute
   '/api/research/findings': typeof ApiResearchFindingsRoute
   '/api/research/process': typeof ApiResearchProcessRoute
+  '/api/research/profiles': typeof ApiResearchProfilesRoute
   '/api/research/runs': typeof ApiResearchRunsRoute
   '/api/research/sources': typeof ApiResearchSourcesRoute
+  '/api/slack/connect': typeof ApiSlackConnectRoute
+  '/api/slack/events': typeof ApiSlackEventsRoute
+  '/api/slack/interactions': typeof ApiSlackInteractionsRoute
+  '/api/slack/manifest': typeof ApiSlackManifestRoute
+  '/api/slack/options': typeof ApiSlackOptionsRoute
+  '/api/slack/process': typeof ApiSlackProcessRoute
   '/api/telegram/webhook': typeof ApiTelegramWebhookRoute
+  '/api/slack/oauth/callback': typeof ApiSlackOauthCallbackRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -533,6 +622,7 @@ export interface FileRoutesById {
   '/api/research': typeof ApiResearchRouteWithChildren
   '/api/rss-feeds': typeof ApiRssFeedsRoute
   '/api/settings': typeof ApiSettingsRoute
+  '/api/slack': typeof ApiSlackRouteWithChildren
   '/api/upload': typeof ApiUploadRoute
   '/ideas_/$id': typeof IdeasIdRoute
   '/linkedin/callback': typeof LinkedinCallbackRoute
@@ -550,9 +640,11 @@ export interface FileRoutesById {
   '/settings/brands': typeof SettingsBrandsRoute
   '/settings/channels': typeof SettingsChannelsRoute
   '/settings/notifications': typeof SettingsNotificationsRoute
+  '/settings/research-profiles': typeof SettingsResearchProfilesRoute
   '/settings/rss': typeof SettingsRssRoute
   '/settings/rss-feeds': typeof SettingsRssFeedsRoute
   '/settings/setup': typeof SettingsSetupRoute
+  '/settings/slack': typeof SettingsSlackRoute
   '/settings/team': typeof SettingsTeamRoute
   '/settings/telegram': typeof SettingsTelegramRoute
   '/settings/templates': typeof SettingsTemplatesRoute
@@ -567,9 +659,17 @@ export interface FileRoutesById {
   '/api/posts/schedule': typeof ApiPostsScheduleRoute
   '/api/research/findings': typeof ApiResearchFindingsRoute
   '/api/research/process': typeof ApiResearchProcessRoute
+  '/api/research/profiles': typeof ApiResearchProfilesRoute
   '/api/research/runs': typeof ApiResearchRunsRoute
   '/api/research/sources': typeof ApiResearchSourcesRoute
+  '/api/slack/connect': typeof ApiSlackConnectRoute
+  '/api/slack/events': typeof ApiSlackEventsRoute
+  '/api/slack/interactions': typeof ApiSlackInteractionsRoute
+  '/api/slack/manifest': typeof ApiSlackManifestRoute
+  '/api/slack/options': typeof ApiSlackOptionsRoute
+  '/api/slack/process': typeof ApiSlackProcessRoute
   '/api/telegram/webhook': typeof ApiTelegramWebhookRoute
+  '/api/slack/oauth/callback': typeof ApiSlackOauthCallbackRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -598,6 +698,7 @@ export interface FileRouteTypes {
     | '/api/research'
     | '/api/rss-feeds'
     | '/api/settings'
+    | '/api/slack'
     | '/api/upload'
     | '/ideas/$id'
     | '/linkedin/callback'
@@ -615,9 +716,11 @@ export interface FileRouteTypes {
     | '/settings/brands'
     | '/settings/channels'
     | '/settings/notifications'
+    | '/settings/research-profiles'
     | '/settings/rss'
     | '/settings/rss-feeds'
     | '/settings/setup'
+    | '/settings/slack'
     | '/settings/team'
     | '/settings/telegram'
     | '/settings/templates'
@@ -632,9 +735,17 @@ export interface FileRouteTypes {
     | '/api/posts/schedule'
     | '/api/research/findings'
     | '/api/research/process'
+    | '/api/research/profiles'
     | '/api/research/runs'
     | '/api/research/sources'
+    | '/api/slack/connect'
+    | '/api/slack/events'
+    | '/api/slack/interactions'
+    | '/api/slack/manifest'
+    | '/api/slack/options'
+    | '/api/slack/process'
     | '/api/telegram/webhook'
+    | '/api/slack/oauth/callback'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -661,6 +772,7 @@ export interface FileRouteTypes {
     | '/api/research'
     | '/api/rss-feeds'
     | '/api/settings'
+    | '/api/slack'
     | '/api/upload'
     | '/ideas/$id'
     | '/linkedin/callback'
@@ -678,9 +790,11 @@ export interface FileRouteTypes {
     | '/settings/brands'
     | '/settings/channels'
     | '/settings/notifications'
+    | '/settings/research-profiles'
     | '/settings/rss'
     | '/settings/rss-feeds'
     | '/settings/setup'
+    | '/settings/slack'
     | '/settings/team'
     | '/settings/telegram'
     | '/settings/templates'
@@ -695,9 +809,17 @@ export interface FileRouteTypes {
     | '/api/posts/schedule'
     | '/api/research/findings'
     | '/api/research/process'
+    | '/api/research/profiles'
     | '/api/research/runs'
     | '/api/research/sources'
+    | '/api/slack/connect'
+    | '/api/slack/events'
+    | '/api/slack/interactions'
+    | '/api/slack/manifest'
+    | '/api/slack/options'
+    | '/api/slack/process'
     | '/api/telegram/webhook'
+    | '/api/slack/oauth/callback'
   id:
     | '__root__'
     | '/'
@@ -724,6 +846,7 @@ export interface FileRouteTypes {
     | '/api/research'
     | '/api/rss-feeds'
     | '/api/settings'
+    | '/api/slack'
     | '/api/upload'
     | '/ideas_/$id'
     | '/linkedin/callback'
@@ -741,9 +864,11 @@ export interface FileRouteTypes {
     | '/settings/brands'
     | '/settings/channels'
     | '/settings/notifications'
+    | '/settings/research-profiles'
     | '/settings/rss'
     | '/settings/rss-feeds'
     | '/settings/setup'
+    | '/settings/slack'
     | '/settings/team'
     | '/settings/telegram'
     | '/settings/templates'
@@ -758,9 +883,17 @@ export interface FileRouteTypes {
     | '/api/posts/schedule'
     | '/api/research/findings'
     | '/api/research/process'
+    | '/api/research/profiles'
     | '/api/research/runs'
     | '/api/research/sources'
+    | '/api/slack/connect'
+    | '/api/slack/events'
+    | '/api/slack/interactions'
+    | '/api/slack/manifest'
+    | '/api/slack/options'
+    | '/api/slack/process'
     | '/api/telegram/webhook'
+    | '/api/slack/oauth/callback'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -788,6 +921,7 @@ export interface RootRouteChildren {
   ApiResearchRoute: typeof ApiResearchRouteWithChildren
   ApiRssFeedsRoute: typeof ApiRssFeedsRoute
   ApiSettingsRoute: typeof ApiSettingsRoute
+  ApiSlackRoute: typeof ApiSlackRouteWithChildren
   ApiUploadRoute: typeof ApiUploadRoute
   IdeasIdRoute: typeof IdeasIdRoute
   LinkedinCallbackRoute: typeof LinkedinCallbackRoute
@@ -805,9 +939,11 @@ export interface RootRouteChildren {
   SettingsBrandsRoute: typeof SettingsBrandsRoute
   SettingsChannelsRoute: typeof SettingsChannelsRoute
   SettingsNotificationsRoute: typeof SettingsNotificationsRoute
+  SettingsResearchProfilesRoute: typeof SettingsResearchProfilesRoute
   SettingsRssRoute: typeof SettingsRssRoute
   SettingsRssFeedsRoute: typeof SettingsRssFeedsRoute
   SettingsSetupRoute: typeof SettingsSetupRoute
+  SettingsSlackRoute: typeof SettingsSlackRoute
   SettingsTeamRoute: typeof SettingsTeamRoute
   SettingsTelegramRoute: typeof SettingsTelegramRoute
   SettingsTemplatesRoute: typeof SettingsTemplatesRoute
@@ -990,6 +1126,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiSettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/slack': {
+      id: '/api/slack'
+      path: '/api/slack'
+      fullPath: '/api/slack'
+      preLoaderRoute: typeof ApiSlackRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/upload': {
       id: '/api/upload'
       path: '/api/upload'
@@ -1116,6 +1259,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsNotificationsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/settings/research-profiles': {
+      id: '/settings/research-profiles'
+      path: '/settings/research-profiles'
+      fullPath: '/settings/research-profiles'
+      preLoaderRoute: typeof SettingsResearchProfilesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/settings/rss': {
       id: '/settings/rss'
       path: '/settings/rss'
@@ -1135,6 +1285,13 @@ declare module '@tanstack/react-router' {
       path: '/settings/setup'
       fullPath: '/settings/setup'
       preLoaderRoute: typeof SettingsSetupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/settings/slack': {
+      id: '/settings/slack'
+      path: '/settings/slack'
+      fullPath: '/settings/slack'
+      preLoaderRoute: typeof SettingsSlackRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/settings/team': {
@@ -1228,6 +1385,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiResearchProcessRouteImport
       parentRoute: typeof ApiResearchRoute
     }
+    '/api/research/profiles': {
+      id: '/api/research/profiles'
+      path: '/profiles'
+      fullPath: '/api/research/profiles'
+      preLoaderRoute: typeof ApiResearchProfilesRouteImport
+      parentRoute: typeof ApiResearchRoute
+    }
     '/api/research/runs': {
       id: '/api/research/runs'
       path: '/runs'
@@ -1242,12 +1406,61 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiResearchSourcesRouteImport
       parentRoute: typeof ApiResearchRoute
     }
+    '/api/slack/connect': {
+      id: '/api/slack/connect'
+      path: '/connect'
+      fullPath: '/api/slack/connect'
+      preLoaderRoute: typeof ApiSlackConnectRouteImport
+      parentRoute: typeof ApiSlackRoute
+    }
+    '/api/slack/events': {
+      id: '/api/slack/events'
+      path: '/events'
+      fullPath: '/api/slack/events'
+      preLoaderRoute: typeof ApiSlackEventsRouteImport
+      parentRoute: typeof ApiSlackRoute
+    }
+    '/api/slack/interactions': {
+      id: '/api/slack/interactions'
+      path: '/interactions'
+      fullPath: '/api/slack/interactions'
+      preLoaderRoute: typeof ApiSlackInteractionsRouteImport
+      parentRoute: typeof ApiSlackRoute
+    }
+    '/api/slack/manifest': {
+      id: '/api/slack/manifest'
+      path: '/manifest'
+      fullPath: '/api/slack/manifest'
+      preLoaderRoute: typeof ApiSlackManifestRouteImport
+      parentRoute: typeof ApiSlackRoute
+    }
+    '/api/slack/options': {
+      id: '/api/slack/options'
+      path: '/options'
+      fullPath: '/api/slack/options'
+      preLoaderRoute: typeof ApiSlackOptionsRouteImport
+      parentRoute: typeof ApiSlackRoute
+    }
+    '/api/slack/process': {
+      id: '/api/slack/process'
+      path: '/process'
+      fullPath: '/api/slack/process'
+      preLoaderRoute: typeof ApiSlackProcessRouteImport
+      parentRoute: typeof ApiSlackRoute
+    }
     '/api/telegram/webhook': {
       id: '/api/telegram/webhook'
       path: '/api/telegram/webhook'
       fullPath: '/api/telegram/webhook'
       preLoaderRoute: typeof ApiTelegramWebhookRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/api/slack/oauth/callback': {
+      id: '/api/slack/oauth/callback'
+      path: '/oauth/callback'
+      fullPath: '/api/slack/oauth/callback'
+      preLoaderRoute: typeof ApiSlackOauthCallbackRouteImport
+      parentRoute: typeof ApiSlackRoute
     }
   }
 }
@@ -1294,6 +1507,7 @@ const ApiPostsRouteWithChildren = ApiPostsRoute._addFileChildren(
 interface ApiResearchRouteChildren {
   ApiResearchFindingsRoute: typeof ApiResearchFindingsRoute
   ApiResearchProcessRoute: typeof ApiResearchProcessRoute
+  ApiResearchProfilesRoute: typeof ApiResearchProfilesRoute
   ApiResearchRunsRoute: typeof ApiResearchRunsRoute
   ApiResearchSourcesRoute: typeof ApiResearchSourcesRoute
 }
@@ -1301,12 +1515,37 @@ interface ApiResearchRouteChildren {
 const ApiResearchRouteChildren: ApiResearchRouteChildren = {
   ApiResearchFindingsRoute: ApiResearchFindingsRoute,
   ApiResearchProcessRoute: ApiResearchProcessRoute,
+  ApiResearchProfilesRoute: ApiResearchProfilesRoute,
   ApiResearchRunsRoute: ApiResearchRunsRoute,
   ApiResearchSourcesRoute: ApiResearchSourcesRoute,
 }
 
 const ApiResearchRouteWithChildren = ApiResearchRoute._addFileChildren(
   ApiResearchRouteChildren,
+)
+
+interface ApiSlackRouteChildren {
+  ApiSlackConnectRoute: typeof ApiSlackConnectRoute
+  ApiSlackEventsRoute: typeof ApiSlackEventsRoute
+  ApiSlackInteractionsRoute: typeof ApiSlackInteractionsRoute
+  ApiSlackManifestRoute: typeof ApiSlackManifestRoute
+  ApiSlackOptionsRoute: typeof ApiSlackOptionsRoute
+  ApiSlackProcessRoute: typeof ApiSlackProcessRoute
+  ApiSlackOauthCallbackRoute: typeof ApiSlackOauthCallbackRoute
+}
+
+const ApiSlackRouteChildren: ApiSlackRouteChildren = {
+  ApiSlackConnectRoute: ApiSlackConnectRoute,
+  ApiSlackEventsRoute: ApiSlackEventsRoute,
+  ApiSlackInteractionsRoute: ApiSlackInteractionsRoute,
+  ApiSlackManifestRoute: ApiSlackManifestRoute,
+  ApiSlackOptionsRoute: ApiSlackOptionsRoute,
+  ApiSlackProcessRoute: ApiSlackProcessRoute,
+  ApiSlackOauthCallbackRoute: ApiSlackOauthCallbackRoute,
+}
+
+const ApiSlackRouteWithChildren = ApiSlackRoute._addFileChildren(
+  ApiSlackRouteChildren,
 )
 
 const rootRouteChildren: RootRouteChildren = {
@@ -1336,6 +1575,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiResearchRoute: ApiResearchRouteWithChildren,
   ApiRssFeedsRoute: ApiRssFeedsRoute,
   ApiSettingsRoute: ApiSettingsRoute,
+  ApiSlackRoute: ApiSlackRouteWithChildren,
   ApiUploadRoute: ApiUploadRoute,
   IdeasIdRoute: IdeasIdRoute,
   LinkedinCallbackRoute: LinkedinCallbackRoute,
@@ -1353,9 +1593,11 @@ const rootRouteChildren: RootRouteChildren = {
   SettingsBrandsRoute: SettingsBrandsRoute,
   SettingsChannelsRoute: SettingsChannelsRoute,
   SettingsNotificationsRoute: SettingsNotificationsRoute,
+  SettingsResearchProfilesRoute: SettingsResearchProfilesRoute,
   SettingsRssRoute: SettingsRssRoute,
   SettingsRssFeedsRoute: SettingsRssFeedsRoute,
   SettingsSetupRoute: SettingsSetupRoute,
+  SettingsSlackRoute: SettingsSlackRoute,
   SettingsTeamRoute: SettingsTeamRoute,
   SettingsTelegramRoute: SettingsTelegramRoute,
   SettingsTemplatesRoute: SettingsTemplatesRoute,

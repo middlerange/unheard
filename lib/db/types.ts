@@ -104,6 +104,7 @@ export interface PostTarget {
   platform: Platform;
   content: string;
   platform_post_id: string | null;
+  publication_progress?: string | null;
   error: string | null;
   reply_settings: string;
   as_carousel: boolean;
