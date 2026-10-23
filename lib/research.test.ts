@@ -43,6 +43,7 @@ import {
   getResearchSnapshot,
   initializeResearch,
   processResearchJob,
+  researchSourceErrorMessage,
   updateResearchSettings,
   updateResearchSource,
 } from "./research";
@@ -58,6 +59,11 @@ const source: ResearchSourceSeed = {
   priority: 1,
 };
 describe("research collectors and grounded evidence", () => {
+  it("reports underlying source storage errors without exposing SQL bindings", () => {
+    expect(researchSourceErrorMessage(new Error("Failed query: insert values params: private", { cause: new Error("D1_ERROR: Too many requests") }))).toBe("D1_ERROR: Too many requests");
+    expect(researchSourceErrorMessage(new Error("Failed query: insert values params: private"))).not.toContain("private");
+    expect(researchSourceErrorMessage(new Error("Source returned HTTP 429"))).toBe("Source returned HTTP 429");
+  });
   it("parses RSS and Atom dates without treating missing or updated dates as fresh", () => {
     const rss = parseResearchFeed(
       "<rss><channel><item><title><![CDATA[Practical <b>growth</b>]]></title><link>https://example.com/story?utm_source=x</link><pubDate>Thu, 22 Oct 2026 10:00:00 GMT</pubDate><description><![CDATA[Original insight &amp; details]]></description></item><item><title>Old undated post</title><link>https://example.com/old</link></item></channel></rss>",
@@ -399,6 +405,49 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
     }
   }, 30_000);
+  it("repairs an oversized draft once, accounts for both calls and continues after an invalid story", async () => {
+    const now = Date.now();
+    const quote = "Every required consent is checked before an account can be created.";
+    const stories = ["never-valid", "repairable", "already-valid"];
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('repairs','Repairs','repairs',0,0)" },
+      { sql: "INSERT INTO channels(id,team_id,name,platform,group_name,research_enabled,system_prompt,created_at) VALUES('repairs-x','repairs','Product decisions','twitter','custom',1,'Explain concrete product onboarding decisions and credit sources',0)" },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_ids,diagnostics) VALUES('repairs-run','repairs','scan','drafting',1,1,?,'Product managers',?,?)", params: [now, JSON.stringify(["repair-source"]), JSON.stringify({ rejectedStories: [] })] },
+      ...stories.flatMap((title, index) => [
+        { sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,'repairs','repair-source',?,?,?,?,?,?,'article')", params: [`repair-item-${title}`, `https://example.com/${title}`, title, quote, now - 1000, now, `${quote} ${"Specific implementation details. ".repeat(30)}`] },
+        { sql: "INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key) VALUES(?,'repairs','repairs-run',?,'repair-source',?,?,?,?, 'Signup decisions','Account creation paths','Audit all paths',?,'No conversion results',?,?)", params: [`repair-finding-${title}`, `repair-item-${title}`, title, `https://example.com/${title}`, now - 1000, 95 - index, quote, now, `repair-family-${title}`] },
+      ]),
+    ] });
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-repair-key";
+    const calls: string[] = [];
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      expect(String(url)).toBe("https://api.openai.com/v1/responses");
+      const request = JSON.parse(String(init?.body));
+      const input = JSON.parse(request.input);
+      const title = input.source.title;
+      calls.push(title);
+      const invalid = title === "never-valid" || (title === "repairable" && calls.filter(value => value === title).length === 1);
+      return Response.json({ status: "completed", usage: { input_tokens: 100, output_tokens: 20 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ ready: true, reason: "A practical product case", targets: [{ channelId: "repairs-x", platform: "twitter", content: invalid ? `${"x".repeat(281)} ${input.source.url}` : `Audit every signup path. Source: ${input.source.url}`, thread: [], supportQuote: quote, redditTitle: null, subreddit: null }] }) }] }] });
+    });
+    try {
+      expect(await processResearchDraftJob("repairs-run")).toEqual({ drafted: 2 });
+      expect(calls).toEqual(["never-valid", "never-valid", "repairable", "repairable", "already-valid"]);
+      const snapshot = await getResearchSnapshot("repairs");
+      expect(snapshot.runs[0]).toMatchObject({ status: "completed", inputTokens: 500, outputTokens: 100 });
+      expect(snapshot.runs[0].diagnostics?.rejectedStories).toEqual(expect.arrayContaining([expect.objectContaining({ title: "never-valid" })]));
+      expect(snapshot.drafts.map(draft => draft.title).sort()).toEqual(["already-valid", "repairable"]);
+      const usage = execute({ queries: [{ sql: "SELECT stage,operation FROM research_usage WHERE team_id='repairs' ORDER BY created_at" }] })[0].results;
+      expect(usage).toHaveLength(5);
+      expect(usage.every((row: { stage: string }) => row.stage === "draft_generation")).toBe(true);
+      expect(usage.filter((row: { operation: string }) => row.operation === "draft_repair")).toHaveLength(2);
+      expect(execute({ queries: [{ sql: "SELECT input_tokens,output_tokens FROM research_drafts WHERE team_id='repairs' ORDER BY input_tokens DESC" }] })[0].results).toEqual([{ input_tokens: 200, output_tokens: 40 }, { input_tokens: 100, output_tokens: 20 }]);
+    } finally {
+      fetcher.mockRestore();
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+    }
+  }, 20_000);
   it("updates accepted assessments without losing saved ideas and never drafts an older finding rejected by the current scan", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.feedUrl && source.kind === "rss")!;
     const now = Date.now();

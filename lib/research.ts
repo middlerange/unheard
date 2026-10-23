@@ -477,6 +477,17 @@ export async function createResearchRun(
   }
   return { run: runView(row) };
 }
+export function researchSourceErrorMessage(error: unknown): string {
+  let current = error;
+  let message = "Source collection failed";
+  for (let depth = 0; depth < 5 && current instanceof Error; depth++) {
+    message = current.message;
+    current = current.cause;
+  }
+  return /^Failed query:/i.test(message)
+    ? "Source storage failed; no underlying database error was available."
+    : message.slice(0, 400);
+}
 async function collectForRun(
   run: typeof research_runs.$inferSelect,
   sourceId: string,
@@ -588,10 +599,7 @@ async function collectForRun(
       }
     }
   } catch (caught) {
-    error =
-      caught instanceof Error
-        ? caught.message.slice(0, 400)
-        : "Source collection failed";
+    error = researchSourceErrorMessage(caught);
   }
   await db
     .update(research_run_sources)
