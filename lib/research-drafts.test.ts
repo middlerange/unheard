@@ -115,6 +115,38 @@ describe("research draft grounding and publication boundaries", () => {
       ),
     ).toBeNull();
   });
+  it("accepts a full source URL at the X weighted limit in both the main post and thread", () => {
+    const longSource = { ...source, url: `https://example.com/${"original-source-path-".repeat(16)}` };
+    const atLimit = `${"a".repeat(256)} ${longSource.url}`;
+    const value = generated();
+    value.targets = [value.targets[1]];
+    value.targets[0].content = atLimit;
+    value.targets[0].thread = [atLimit];
+    expect(atLimit.length).toBeGreaterThan(280);
+    expect(validateResearchDraftContent(value, destinations, longSource)?.targets[0])
+      .toMatchObject({ content: atLimit, thread: [atLimit] });
+
+    value.targets[0].content = `${"a".repeat(257)} ${longSource.url}`;
+    expect(() => validateResearchDraftContent(value, destinations, longSource)).toThrow("main post has 281");
+    value.targets[0].content = atLimit;
+    value.targets[0].thread = [`${"a".repeat(257)} ${longSource.url}`];
+    expect(() => validateResearchDraftContent(value, destinations, longSource)).toThrow("thread post 1 has 281");
+  });
+  it("applies X Unicode weights to emoji sequences and CJK while retaining exact attribution", () => {
+    const value = generated();
+    value.targets = [value.targets[1]];
+    const target = value.targets[0];
+    target.content = `${"👩🏽‍💻".repeat(128)} ${source.url}`;
+    target.thread = [`${"界".repeat(128)} ${source.url}`];
+    expect(validateResearchDraftContent(value, destinations, source)?.targets[0])
+      .toMatchObject({ content: target.content, thread: target.thread });
+
+    target.content = `${"👩🏽‍💻".repeat(128)}a ${source.url}`;
+    expect(() => validateResearchDraftContent(value, destinations, source)).toThrow("main post has 281");
+    target.content = `${"界".repeat(128)} ${source.url}`;
+    target.thread = [`${"界".repeat(128)}a ${source.url}`];
+    expect(() => validateResearchDraftContent(value, destinations, source)).toThrow("thread post 1 has 281");
+  });
   it("refuses invented support quotes, omitted credits, unsupported links, and overlong posts", () => {
     const missing = generated();
     missing.targets[0].supportQuote =

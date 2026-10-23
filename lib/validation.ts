@@ -1,6 +1,7 @@
 // ABOUTME: Platform validation utilities for content limits and media constraints.
 // ABOUTME: Centralizes validation logic for all supported social media platforms.
 
+import { countTwitterCharacters } from "./twitter-text";
 import type { Media } from './db/types';
 
 export interface ValidationError {
@@ -112,7 +113,7 @@ export function validateContentLength(
   isPremium = false
 ): ValidationError | null {
   const limits = getPlatformLimits(platform, isPremium);
-  const length = content.length;
+  const length = platform === "twitter" ? countTwitterCharacters(content) : content.length;
 
   if (length > limits.maxCharacters) {
     return {
@@ -143,7 +144,7 @@ export function validateThreadLengths(
 
   // Check each thread item
   thread.forEach((item, index) => {
-    const length = item.length;
+    const length = platform === "twitter" ? countTwitterCharacters(item) : item.length;
     if (length > limits.maxCharacters) {
       errors.push({
         field: `thread[${index}]`,

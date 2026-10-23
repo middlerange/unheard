@@ -1,6 +1,7 @@
 // ABOUTME: Orchestrates publishing a post to all its target platforms.
 // ABOUTME: Updated for multi-account support - uses channel_id from each target.
 
+import { countTwitterCharacters } from "./twitter-text";
 import { and, eq, isNull } from 'drizzle-orm';
 import { getDb } from './db/client';
 import { post_targets } from './schema';
@@ -95,7 +96,7 @@ async function publishTarget(target: PostWithDetails['targets'][number], allMedi
     if (!creds) throw new Error('Twitter credentials not found');
     const limit = maxCharacters(creds);
     const parts = [text, ...(target.thread ?? []).map(htmlToText)];
-    if (parts.some(part => part.length > limit)) throw new Error(`Content exceeds X's ${limit}-character limit`);
+    if (parts.some(part => countTwitterCharacters(part) > limit)) throw new Error(`Content exceeds X's ${limit}-character limit`);
     const contentHash = await hashPublicationInput({
       channelId: target.channel_id,
       accountId: target.channel_account_id ?? null,
