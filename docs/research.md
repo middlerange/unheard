@@ -54,7 +54,7 @@ domains, social platforms and job listings before fetching.
 
 Collection uses RSS/Atom feeds and bounded article discovery from approved public
 sites. It records verified publication dates; undated items are excluded from
-24-hour and 30-day ranking. Feeds return at most their first 60 entries; web
+24-hour, seven-day and 30-day ranking. Feeds return at most their first 60 entries; web
 discovery reads one index and a bounded set of at most 40 article links, without
 archive pagination. Feed history varies, and a first scan cannot guarantee
 complete coverage of the preceding month. Date-only values do not establish an
@@ -83,11 +83,15 @@ Daily ranking and drafting consume OpenAI API tokens. The daily switch is
 team-specific. **Collect new items** only collects and makes no model calls. See
 [Slack reviews](slack-reviews.md) for setup, thread edits and approval controls.
 
-**Run 30-day scan** collects enabled sources, then screens eligible items using
+**7-day discovery** and **30-day discovery** collect enabled sources, then screen
+eligible items using
 `gpt-6-luna` with reasoning disabled. It screens up to 1,000 items in batches of
 80, shortlists at most 12 for full evidence review, and reports when the coverage
 cap is reached. Model results are cached by team, ICP, model, prompt version, and
-input. Run history reports actual token usage and cache hits. Changing the ICP or
+input. These discovery scans rank findings without drafting posts or sending
+Slack reviews. The seven-day window is a rolling 168 hours anchored at the saved
+run start, using the original source publication time. Run history reports actual
+token usage and cache hits. Changing the ICP or
 source set affects subsequent scans. The OpenAI API is billed separately from a
 Codex subscription; no subscription credentials are used.
 

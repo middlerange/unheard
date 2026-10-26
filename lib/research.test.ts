@@ -311,6 +311,59 @@ describe("research persistence and team isolation", () => {
       error: "test finished",
     });
   }, 20_000);
+  it("accepts a seven-day discovery run, ranks only its exact publication window, and never drafts", async () => {
+    const now = Date.now();
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.feedUrl && source.kind === "rss")!;
+    execute({ queries: [{ sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('weekly-window','Weekly window','weekly-window',?,?)", params: [now, now] }] });
+    await initializeResearch("weekly-window");
+    execute({ queries: [
+      { sql: "UPDATE research_sources SET enabled=0 WHERE team_id='weekly-window'" },
+      { sql: "UPDATE research_sources SET enabled=1 WHERE team_id='weekly-window' AND seed_id=?", params: [seed.id] },
+    ] });
+    globalThis.__contentHubResearchWorkflow__ = { create: vi.fn(async () => ({})) };
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "weekly-test-key";
+    const evidence = "The team separated optional marketing consent from required account creation checks across every authentication path.";
+    let fetcher: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      const { run } = await createResearchRun("weekly-window", { days: 7, mode: "scan" }, true);
+      expect(run).toMatchObject({ days: 7, editorial: false });
+      execute({ queries: [{ sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: ["weekly-step", run.id, seed.id] }] });
+      const rows = [
+        { id: "weekly-inside", date: run.createdAt - 6 * 86_400_000 },
+        { id: "weekly-boundary", date: run.createdAt - 7 * 86_400_000 },
+        { id: "weekly-too-old", date: run.createdAt - 7 * 86_400_000 - 1 },
+        { id: "weekly-future", date: run.createdAt + 1 },
+        { id: "weekly-undated", date: null },
+      ];
+      execute({ queries: rows.map(row => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,'weekly-window',?,?,?,?,?,?,?,'article')",
+        params: [row.id, seed.id, new URL(row.id, seed.url).href, row.id, evidence, row.date, now, evidence.repeat(10)],
+      })) });
+      const selected = ["weekly-inside", "weekly-boundary"];
+      fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+        expect(String(url)).toMatch(/^https:\/\/api\.openai\.com\//);
+        const request = JSON.parse(String(init?.body));
+        const input = JSON.parse(request.input);
+        expect(input.items.map((item: { id: string }) => item.id).sort()).toEqual([...selected].sort());
+        const value = request.text.format.schema.properties.itemIds
+          ? { itemIds: selected }
+          : { findings: selected.map((id, index) => ({ itemId: id, score: index ? 75 : 85, summary: "A documented account creation decision", whyItMatters: "Optional consent should not block signup", contentAngle: "Audit authentication paths", evidence, limitations: "A first-party descriptive account, not a conversion experiment", familyKey: id })) };
+        return Response.json({ status: "completed", usage: { input_tokens: 100, output_tokens: 50 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }] });
+      });
+      await processResearchJob({ operation: "rank", runId: run.id });
+      await processResearchJob({ operation: "drafts", runId: run.id });
+      const snapshot = await getResearchSnapshot("weekly-window");
+      expect(snapshot.runs.find(row => row.id === run.id)).toMatchObject({ status: "completed", days: 7, editorial: false, diagnostics: { eligibleCount: 2, screenedCount: 2, undatedCount: 1 } });
+      expect(snapshot.findings.map(row => row.itemId).sort()).toEqual([...selected].sort());
+      expect(snapshot.drafts).toEqual([]);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    } finally {
+      fetcher?.mockRestore();
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+    }
+  }, 20_000);
   it("collects RSS once per step, recovers missing dates/public evidence, and preserves an established publication date", async () => {
     globalThis.__contentHubResearchWorkflow__ = { create: vi.fn(async () => ({})) };
     const seed = RESEARCH_SOURCE_SEEDS.find(

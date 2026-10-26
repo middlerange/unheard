@@ -353,7 +353,7 @@ export async function createResearchRun(
 ) {
   const data = z
     .object({
-      days: z.union([z.literal(1), z.literal(30)]).default(30),
+      days: z.union([z.literal(1), z.literal(7), z.literal(30)]).default(30),
       mode: z.enum(["scan", "collect"]).default("scan"),
     })
     .strict()

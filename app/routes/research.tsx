@@ -113,12 +113,12 @@ function ResearchPage() {
     }
   }
 
-  function startRun(days: 1 | 30) {
+  function startRun(days: 1 | 7 | 30) {
     if (hasActiveRun || pending) return;
     void mutate(`scan-${days}`,  async () => {
       const { run } = await request<{ run: ResearchRun }>('/api/research/runs', jsonRequest('POST', { days, mode: 'scan' }));
       if (alive.current) setData(current => current ? { ...current, runs: [run, ...current.runs.filter(item => item.id !== run.id)] } : current);
-      toast.success(days === 1 ? 'Your 24-hour scan and post drafts are queued.' : 'Your 30-day discovery scan is queued.');
+      toast.success(days === 1 ? 'Your 24-hour scan and post drafts are queued.' : `Your ${days}-day discovery scan is queued.`);
     });
   }
 
@@ -203,6 +203,7 @@ function ResearchPage() {
         </div>
         <div className="space-y-2">
           <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={() => startRun(7)} disabled={!canRun} className={press}>{pending === 'scan-7' ? <Loader2 className="animate-spin" /> : <Search />}7-day discovery</Button>
             <Button variant="outline" onClick={() => startRun(30)} disabled={!canRun} className={press}>{pending === 'scan-30' ? <Loader2 className="animate-spin" /> : <Search />}30-day discovery</Button>
             <Button onClick={() => startRun(1)} disabled={!canRun} className={press} aria-describedby="research-run-now-help">{pending === 'scan-1' ? <Loader2 className="animate-spin" /> : <Sparkles />}Run now</Button>
           </div>
