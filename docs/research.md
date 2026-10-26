@@ -8,23 +8,23 @@ and customer communication.
 ## Sources and coverage
 
 The catalog in `lib/research-sources.ts` preserves all 43 original entries and adds
-51 sources: 94 entries with 54 enabled defaults. These combine individual
+64 sources: 107 entries with 67 enabled defaults. These combine individual
 practitioners, original research, primary industry announcements, product
 interviews, and three optional discovery lanes. All 23 competitor sources remain
 disabled by default. Each team's existing source preferences are preserved.
 
-Source tracing on 26 October 2026 added three verified public inputs: Claire Vo’s
-How I AI written workflow notes, The Product Experience’s narrow episode index,
-and Parlance Labs’ original evaluation experiments. Episode notes and partial
-transcripts support only their readable text, and repeated social clips do not
-constitute independent evidence. Parlance’s index links to outside author sites;
-only same-host articles are collected. Its sparse cadence does not imply daily
-new research. Wynter’s original research remains a manual reference: the current
-collector cannot verify its visible byline dates, so it is not enabled for fresh
-ranking. Vendor survey samples and first-hand demonstrations require explicit
-attribution and limitations.
+Source tracing and recall calibration on 26 October 2026 added verified public
+product/research inputs, including How I AI, Product Experience, Parlance, Lovable,
+Cursor, Shopify, Paywall Index, SaaStr, Wynter, MeasuringU, Linear, Fyxer, Every,
+PostHog and Lyssna. Each registry entry records its scope, access and cadence.
+Original publisher bylines are supported for Wynter, MeasuringU and PostHog;
+Lyssna archive/category links are excluded before applying its discovery cap.
+RSS is used where it preserves publication metadata better than a web index.
+A known publisher or enabled feed does not establish that every historical source
+URL is collected. Public precursors and topic-monitor proxies are different from
+verified origins. Static Product School transcript/index access remains a gap.
 
-The three search sources contain eight targeted queries:
+Three credentialed search sources contain eight targeted queries:
 
 - AI workflows: new product capabilities, pricing changes, and production-agent
   experiments.
@@ -33,7 +33,12 @@ The three search sources contain eight targeted queries:
 - Practitioner experiments: first-hand AI/product-discovery tests and shipped
   onboarding, activation, or customer-feedback case studies.
 
-Search collection uses `collectDiscoveredResearchSource` with a free-only
+An additional public Hacker News discovery source uses the unauthenticated
+Algolia HN Search API with three bounded queries. It fetches linked original
+articles; HN submission time and popularity are never publication dates or proof
+of editorial quality. A recently submitted old article remains historical.
+
+Credentialed search collection uses `collectDiscoveredResearchSource` with a free-only
 provider and no paid fallback. Three queries use the news vertical and five use
 web discovery. The eight searches inspect at most 40 original pages per run,
 including arXiv submission-date lookups. Its optional `TREG_TOKEN` and `TREG_ORG`
@@ -86,8 +91,12 @@ team-specific. **Collect new items** only collects and makes no model calls. See
 **7-day discovery** and **30-day discovery** collect enabled sources, then screen
 eligible items using
 `gpt-6-luna` with reasoning disabled. It screens up to 1,000 items in batches of
-80, shortlists at most 12 for full evidence review, and reports when the coverage
-cap is reached. Model results are cached by team, ICP, model, prompt version, and
+80, sends every potentially useful item to evidence review in batches of six,
+and reports when the 1,000-item coverage cap is reached. No top-12 quota applies.
+Ranking checkpoints its frozen selection and progress; durable steps review at
+most 18 selected items each and continue until all selected evidence is assessed.
+Paid steps have no automatic retries. Model-result caching and persisted offsets
+prevent completed assessments from being billed or stored twice. Model results are cached by team, ICP, model, prompt version, and
 input. These discovery scans rank findings without drafting posts or sending
 Slack reviews. The seven-day window is a rolling 168 hours anchored at the saved
 run start, using the original source publication time. Run history reports actual
@@ -95,12 +104,31 @@ token usage and cache hits. Changing the ICP or
 source set affects subsequent scans. The OpenAI API is billed separately from a
 Codex subscription; no subscription credentials are used.
 
-Findings require a score of at least 70 and an evidence quote matched against
+Findings and draft candidates require a score of at least 70 and an evidence quote matched against
 collected article text or captions. Each finding includes the source, date, ICP
-relevance, content angle, and limitations. Weak evidence can yield zero findings.
+relevance, content angle, and limitations. Weak evidence can yield zero findings. Scores of 80+ remain a higher-priority band,
+not a second eligibility gate. The 70-point drafting floor was chosen on a
+development replay, then evaluated on creator-isolated held-out examples: 12/15
+positive cases recovered, 0/8 negative controls accepted, versus 5/15 under the old
+prompt/quota/80-point policy. These small-sample results measure selection given
+readable text, not automatic source coverage or future engagement.
 Canonical URLs and story families prevent duplicate findings. **Save as idea**
 copies the finding and evidence into the existing ideas queue; repeated saves
 return the same idea. Saving does not create or publish a social post.
+
+## Recall replay
+
+Use `bun scripts/evaluate-research-recall.ts --benchmark /private/benchmark.json
+--context /private/context.json --variant current --split development
+--out /private/results` to replay the exported production prompts. Input labels,
+engagement and prior success classifications are excluded from model messages.
+Split by creator/origin family, fix the prompt and threshold on development data,
+then evaluate held-out examples once. Keep source retrieval, date eligibility,
+screening, evidence grounding and final qualification as separate measurements.
+The script checkpoints raw responses and token usage before parsing, resumes
+completed calls, and requires an explicit flag for one retry of known malformed
+output. Evaluation usage is saved with its artifacts, outside the app run ledger.
+Keep research evidence and benchmark files out of this public repository.
 
 ## Deployment
 

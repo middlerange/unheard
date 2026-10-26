@@ -66,7 +66,7 @@ describe('research source selection', () => {
   });
 
   it('adds bounded topic discovery without enabling competitor sources', () => {
-    const discovery = RESEARCH_SOURCE_SEEDS.filter(source => source.kind === 'search');
+    const discovery = RESEARCH_SOURCE_SEEDS.filter(source => source.kind === 'search' && source.discoveryProvider !== 'hackernews');
     expect(discovery.map(source => source.id).sort()).toEqual([
       'discovery-ai-workflows', 'discovery-practitioner-experiments', 'discovery-product-research',
     ]);
@@ -97,4 +97,11 @@ describe('research source selection', () => {
     expect(source.notes).toContain('secondary curation');
     expect(source.notes).toContain('preserve original dates');
   });
+  it('adds public HN discovery without requiring a logged-in social account', () => {
+    const source = RESEARCH_SOURCE_SEEDS.find(source => source.id === 'discovery-hackernews-public-signals')!;
+    expect(source).toMatchObject({ enabled: true, kind: 'search', discoveryProvider: 'hackernews', url: 'https://hn.algolia.com' });
+    expect(source.discoveryQueries).toHaveLength(3);
+    expect(source.notes).toContain('verify its own publication date');
+  });
+
 });

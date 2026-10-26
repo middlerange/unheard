@@ -62,6 +62,48 @@ describe("public research evidence and publication dates", () => {
     expect(articleResearchDate(html, "https://huggingface.co/blog/microsoft/thinkingbox-training", NOW)).toBe(Date.parse("2026-10-22T22:24:34.816Z"));
   });
 
+  it("reads Wynter's own report byline without using quarter labels or site deployment dates", () => {
+    const url = "https://wynter.com/post/wynter-index-q3-2026-b2b-marketing";
+    const html = `<!-- Last Published: Fri Oct 23 2026 --><title>[Wynter Index] Q3 2026 | B2B Marketing</title><div class="content-container"><h1>Wynter Index Q3 2026</h1><div class="blog-article__sub-heading">A quarterly survey.</div><div class="wfu-post-byline"><div class="wfu-post-byline-author"></div><div class="wfu-post-byline-date">August 12, 2026</div></div></div><section><h2>Related report</h2><div class="wfu-post-byline-date">October 22, 2026</div></section><footer>Published October 23, 2026</footer>`;
+    expect(articleResearchDate(html, url, NOW)).toBe(Date.parse("2026-08-12T00:00:00Z"));
+    expect(articleResearchDate(html, "https://www.wynter.com/post/report", NOW)).toBe(Date.parse("2026-08-12T00:00:00Z"));
+    expect(articleResearchDate(html.replace("[Wynter Index] Q3 2026 | B2B Marketing", "Wynter Index Q3 2026"), url, NOW)).toBe(Date.parse("2026-08-12T00:00:00Z"));
+    expect(articleResearchDate(html, "https://example.com/post/report", NOW)).toBeNull();
+    expect(articleResearchDate(html, "https://wynter.com/blog-category/research", NOW)).toBeNull();
+    expect(articleResearchDate(html, undefined, NOW)).toBeNull();
+    expect(articleResearchDate(html.replace('<div class="wfu-post-byline-date">August 12, 2026</div>', ""), url, NOW)).toBeNull();
+    expect(articleResearchDate(html.replace("August 12, 2026", "Updated October 22, 2026"), url, NOW)).toBeNull();
+    expect(articleResearchDate(html.replace("August 12, 2026", "October 30, 2026"), url, NOW)).toBeNull();
+  });
+
+  it("reads MeasuringU's title-section publication widget and ignores navigation and related research dates", () => {
+    const url = "https://measuringu.com/digital-twins-systematically-overestimated-business-software-sus-scores";
+    const widget = '<div class="elementor-element post-date elementor-widget-text-editor"><div class="elementor-widget-container">October 20, 2026</div></div>';
+    const html = `<nav><div class="post-date">October 23, 2026</div></nav><main><section class="elementor-section elementor-top-section"><div><h1>Digital Twins Systematically Overestimated Business Software SUS Scores</h1></div><div>Lucas Plabst • Jeff Sauro • Jim Lewis</div>${widget}</section><section class="blog-content"><p>${evidence}</p></section><section class="elementor-top-section"><h2>Related research</h2><div class="post-date">October 22, 2026</div></section></main><footer>Published October 23, 2026</footer>`;
+    expect(articleResearchDate(html, url, NOW)).toBe(Date.parse("2026-10-20T00:00:00Z"));
+    expect(articleResearchDate(html, "https://measuringu.com/blogs/", NOW)).toBeNull();
+    expect(articleResearchDate(html, "https://measuringu.example.com/story", NOW)).toBeNull();
+    expect(articleResearchDate(html.replace(widget, ""), url, NOW)).toBeNull();
+    expect(articleResearchDate(html.replace(widget, widget + widget), url, NOW)).toBeNull();
+    expect(articleResearchDate(html.replace("October 20, 2026", "Last updated October 22, 2026"), url, NOW)).toBeNull();
+  });
+
+  it("reads only PostHog's immediate title byline date beside an author profile", () => {
+    const byline = '<div class="flex items-center space-x-2 mb-4 flex-wrap transition-all mx-auto max-w-2xl"><div class="not-prose"><ul><li><a href="/community/profiles/28625">Charles Cook</a></li></ul></div><p class="text-sm text-secondary m-0">Oct 16, 2026</p><ul><li>Culture</li></ul></div>';
+    const html = `<title>Original practitioner case - PostHog</title><nav><p>Oct 23, 2026</p></nav><main><h1>Original practitioner case</h1>${byline}<p>${evidence}</p><section><h2>Related report</h2>${byline.replace("Oct 16", "Oct 22")}</section></main><footer>${byline.replace("Oct 16", "Oct 23")}</footer>`;
+    const url = "https://posthog.com/blog/original-practitioner-case";
+    expect(articleResearchDate(html, url, NOW)).toBe(Date.parse("2026-10-16T00:00:00Z"));
+    expect(articleResearchDate(html.replace("Oct 16, 2026", "Aug 05, 2026"), url, NOW)).toBe(Date.parse("2026-08-05T00:00:00Z"));
+    expect(articleResearchDate(html, "https://example.com/blog/original-practitioner-case", NOW)).toBeNull();
+    expect(articleResearchDate(html, "https://posthog.com/blog/", NOW)).toBeNull();
+    expect(articleResearchDate(html.replace(byline, ""), url, NOW)).toBeNull();
+    expect(articleResearchDate(html.replace(byline, byline.replace('/community/profiles/28625', '/unrelated-author')), url, NOW)).toBeNull();
+    expect(articleResearchDate(html.replace(byline, byline.replace('class="text-sm text-secondary m-0"', 'class="text-sm text-secondary m-0 updated"')), url, NOW)).toBeNull();
+    expect(articleResearchDate(html.replace(byline, byline.replace('class="text-sm text-secondary m-0"', 'itemprop="dateModified" class="text-sm text-secondary m-0"')), url, NOW)).toBeNull();
+    expect(articleResearchDate(html.replace("Oct 16, 2026", "Updated Oct 22, 2026"), url, NOW)).toBeNull();
+    expect(articleResearchDate(html.replace("Oct 16, 2026", "Oct 30, 2026"), url, NOW)).toBeNull();
+  });
+
   it("retains substantial public RSS content and labels it without fetching premium continuations", () => {
     const body = `${evidence} Subscribe to read the rest of this premium post.`;
     const rss = `<rss><channel><item><title>A useful public introduction</title><link>https://example.com/p/story</link><pubDate>Thu, 22 Oct 2026 10:00:00 GMT</pubDate><description>Public teaser</description><content:encoded><![CDATA[<p>${body}</p>]]></content:encoded></item></channel></rss>`;
@@ -173,6 +215,17 @@ describe("bounded public source discovery", () => {
   it("keeps a populated main authoritative instead of adding document-wide related links", () => {
     const html = '<main><a href="/news/main-study">Read more</a></main><section><a href="/news/related-study">Related research finding</a></section>';
     expect(discoverResearchLinks(html, { ...source, articlePathPrefixes: ["/news/"] })).toEqual(["https://example.com/news/main-study"]);
+  });
+
+  it("keeps Lyssna author and topic archives from consuming the bounded article slots", () => {
+    const html = `<main>${["diane-leyman", "ai-in-user-research", "concept-testing", "product-management"].map(slug => `<a href="/blog/${slug}-articles">Research articles</a>`).join("")}<a href="/blog/2">More research articles</a><a href="/blog/ai-skills-for-research">AI skills for research</a><a href="/blog/mcp-launch">A new research connection</a></main>`;
+    const lyssna = { ...source, url: "https://www.lyssna.com/blog/", articlePathPrefixes: ["/blog/"], maxDiscoveryLinks: 2 };
+    expect(discoverResearchLinks(html, lyssna)).toEqual([
+      "https://www.lyssna.com/blog/ai-skills-for-research", "https://www.lyssna.com/blog/mcp-launch",
+    ]);
+    expect(discoverResearchLinks(html, { ...lyssna, url: "https://example.com/blog/" })).toEqual([
+      "https://example.com/blog/diane-leyman-articles", "https://example.com/blog/ai-in-user-research-articles",
+    ]);
   });
 
   it("fetches at most four articles together and retains the public article evidence", async () => {

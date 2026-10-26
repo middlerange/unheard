@@ -104,4 +104,33 @@ describe("topic-driven public discovery", () => {
     expect(result.warning).toContain("1/1 candidate pages");
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
+  it("discovers linked HN signals without credentials while preserving original article dates", async () => {
+    vi.stubEnv("TREG_TOKEN", "");
+    const fetcher = vi.fn(async (input: string | URL, options?: RequestInit) => {
+      const url = new URL(String(input));
+      expect(options?.headers).not.toHaveProperty("X-Treg-Token");
+      if (url.hostname === "hn.algolia.com") {
+        expect(url.pathname).toBe("/api/v1/search_by_date");
+        expect(url.searchParams.get("tags")).toBe("story");
+        expect(url.searchParams.get("numericFilters")).toContain(String(Math.floor(start / 1000)));
+        return Response.json({ hits: [
+          { title: "New launch", url: "https://research.example/new", created_at_i: end / 1000 },
+          { title: "Old essay newly submitted", url: "https://research.example/old", created_at_i: end / 1000 },
+          { title: "Undated", url: "https://research.example/undated" },
+          { title: "Private", url: "https://127.0.0.1/private" },
+          { title: "Social", url: "https://www.linkedin.com/posts/example" },
+          { title: "Ask HN without an external source", url: null },
+        ] });
+      }
+      return new Response(article(url.pathname === "/new" ? "2026-10-23T10:00:00Z" : url.pathname === "/old" ? "2026-09-01T10:00:00Z" : undefined));
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const result = await collectDiscoveredResearchSource({ ...source, discoveryProvider: "hackernews" }, start, end, new Set());
+    expect(result.items).toHaveLength(3);
+    expect(result.items.find(item => item.url.endsWith("/new"))?.publishedAt).toBeGreaterThanOrEqual(start);
+    expect(result.items.find(item => item.url.endsWith("/old"))?.publishedAt).toBeLessThan(start);
+    expect(result.items.find(item => item.url.endsWith("/undated"))?.publishedAt).toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+
 });

@@ -24,7 +24,10 @@ import {
   signResearchRequest,
   verifyResearchRequest,
 } from "./research-internal";
-import { researchHash, validateResearchEvidence } from "./research-model";
+import {
+  researchHash, validateResearchEvidence,
+  RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS,
+} from "./research-model";
 import { callResearchModel } from "./research-model";
 import { beginResearchUsage, finishResearchUsage, getResearchUsage } from "./research-usage";
 import {
@@ -633,6 +636,80 @@ describe("research persistence and team isolation", () => {
       else process.env.OPENAI_API_KEY = previousKey;
     }
   }, 20_000);
+  it("reviews every potentially useful story beyond twelve and preserves evidence-stage rejection", async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
+    const now = Date.now();
+    const useful = Array.from({ length: 17 }, (_, index) => ({
+      id: `recall-useful-${index}`,
+      title: `Practitioner workflow decision ${index}`,
+      quote: `For workflow ${index}, the team kept the first useful action visible before asking for optional setup.`,
+    }));
+    const thinAd = { id: "recall-thin-ad", title: "A vague campaign", quote: "Our revolutionary solution will transform how every team works forever." };
+    const career = { id: "recall-career", title: "Interview outfit inspiration", quote: "Choose a matching jacket for your next interview outfit." };
+    const all = [...useful, thinAd, career];
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('recall','Recall','recall',?,?)", params: [now, now] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp,source_count,source_ids) VALUES('recall-run','recall','scan','collecting',7,?,'Product managers and growth practitioners',1,?)", params: [now, JSON.stringify([seed.id])] },
+      { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES('recall-step','recall-run',?,'completed')", params: [seed.id] },
+      ...all.map((item, index) => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,'recall',?,?,?,?,?,?,?,'public_feed')",
+        params: [item.id, seed.id, `${new URL(seed.url).origin}/${item.id}`, item.title, item.quote, now - (index + 1) * 60_000, now, `${item.quote} ${"This is a first-party account of one product workflow. ".repeat(20)}`],
+      })),
+    ] });
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-recall-key";
+    const reviewedIds: string[] = [];
+    const evidenceBatchSizes: number[] = [];
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      expect(String(url)).toBe("https://api.openai.com/v1/responses");
+      const request = JSON.parse(String(init?.body));
+      const input = JSON.parse(request.input);
+      let value: unknown;
+      if (request.text.format.schema.properties.itemIds) {
+        expect(request.instructions).toBe(RESEARCH_SCREEN_INSTRUCTIONS);
+        expect(input.items).toHaveLength(all.length);
+        expect(request.text.format.schema.properties.itemIds.maxItems).toBeGreaterThanOrEqual(all.length);
+        value = { itemIds: [...useful.map(item => item.id), thinAd.id, "unknown-screen-id"] };
+      } else {
+        expect(request.instructions).toBe(RESEARCH_EVIDENCE_INSTRUCTIONS);
+        expect(input.items.length).toBeLessThanOrEqual(6);
+        evidenceBatchSizes.push(input.items.length);
+        value = { findings: input.items.map((item: { id: string }) => {
+          reviewedIds.push(item.id);
+          const original = all.find(candidate => candidate.id === item.id)!;
+          return {
+            itemId: item.id, score: item.id === thinAd.id ? 42 : 84,
+            summary: original.title, whyItMatters: "A concrete onboarding decision for practitioners.",
+            contentAngle: "Examine optional setup before the first useful action.",
+            evidence: original.quote,
+            limitations: item.id === thinAd.id ? "Thin promotional claims without a specific supported workflow." : "First-party public-feed account; no measured business uplift.",
+            familyKey: item.id,
+          };
+        }) };
+      }
+      return Response.json({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }] });
+    });
+    try {
+      await processResearchJob({ operation: "rank", runId: "recall-run" });
+      expect(reviewedIds.sort()).toEqual([...useful.map(item => item.id), thinAd.id].sort());
+      expect(evidenceBatchSizes).toEqual([6, 6, 6]);
+      expect(fetcher).toHaveBeenCalledTimes(4);
+      const snapshot = await getResearchSnapshot("recall");
+      expect(snapshot.findings.map(finding => finding.itemId).sort()).toEqual(useful.map(item => item.id).sort());
+      expect(snapshot.runs[0]).toMatchObject({
+        findingsCount: 17,
+        diagnostics: {
+          eligibleCount: 19, screenedCount: 19, shortlistedCount: 18, evidenceCount: 18,
+          rejectedStories: [{ title: thinAd.title, score: 42, reason: "Thin promotional claims without a specific supported workflow." }],
+        },
+      });
+      expect(snapshot.drafts).toHaveLength(0);
+    } finally {
+      fetcher.mockRestore();
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+    }
+  }, 20_000);
   it("screens older eligible items beyond the first metadata batch and caches model responses", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(
       (source) => source.feedUrl && source.kind === "rss",
@@ -770,6 +847,9 @@ describe("research persistence and team isolation", () => {
           {
             sql: "UPDATE research_runs SET status='ranking' WHERE id='ranking-run'",
           },
+          {
+            sql: "DELETE FROM research_cache WHERE id='rank-progress:ranking-run'",
+          },
         ],
       });
       await processResearchJob({ operation: "rank", runId: "ranking-run" });
@@ -783,6 +863,86 @@ describe("research persistence and team isolation", () => {
           ],
         })[0].results,
       ).toEqual([{ cache_hits: 3 }]);
+    } finally {
+      fetcher.mockRestore();
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+    }
+  }, 20_000);
+  it("resumes more than eighteen shortlisted stories without re-screening hydrated evidence or new arrivals", async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
+    const now = Date.now();
+    const items = Array.from({ length: 25 }, (_, index) => ({
+      id: `resume-item-${index}`, title: `Product workflow ${index}`,
+      quote: `Workflow ${index} shows the first useful action before optional setup.`,
+    }));
+    const content = (index: number) => `${items[index].quote} ${"A detailed first-party product implementation account. ".repeat(20)}`;
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('resume','Resume','resume',?,?)", params: [now, now] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES('resume-run','resume','scan','collecting',1,1,?,'Product managers and growth practitioners',1,?)", params: [now, JSON.stringify([seed.id])] },
+      { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES('resume-step','resume-run',?,'completed')", params: [seed.id] },
+      ...items.map((item, index) => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,'resume',?,?,?,?,?,?,?,'public_feed')",
+        params: [item.id, seed.id, `${new URL(seed.url).origin}/${item.id}`, item.title, item.quote, now - (index + 1) * 60_000, now, index === 0 ? null : content(index)],
+      })),
+    ] });
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-resume-key";
+    let screened = 0;
+    const reviewedIds: string[] = [];
+    const batchSizes: number[] = [];
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (!String(url).startsWith("https://api.openai.com/")) {
+        expect(String(url)).toBe(`${new URL(seed.url).origin}/resume-item-0`);
+        return new Response(`<html><main><h1>Product workflow 0</h1><p>${content(0)}</p></main></html>`);
+      }
+      const request = JSON.parse(String(init?.body));
+      const input = JSON.parse(request.input);
+      let value: unknown;
+      if (request.text.format.schema.properties.itemIds) {
+        screened++;
+        expect(input.items).toHaveLength(25);
+        value = { itemIds: items.map(item => item.id) };
+      } else {
+        batchSizes.push(input.items.length);
+        value = { findings: input.items.map((item: { id: string }) => {
+          reviewedIds.push(item.id);
+          const original = items.find(candidate => candidate.id === item.id)!;
+          return {
+            itemId: item.id, score: item.id === "resume-item-5" ? 42 : 84,
+            summary: original.title, whyItMatters: "A specific first-value decision for product teams.",
+            contentAngle: "Examine whether setup delays the first useful action.", evidence: original.quote,
+            limitations: item.id === "resume-item-5" ? "Unsupported broad claims in this example." : "First-party experience; no measured uplift.",
+            familyKey: item.id,
+          };
+        }) };
+      }
+      return Response.json({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }] });
+    });
+    try {
+      expect(await processResearchJob({ operation: "rank", runId: "resume-run" })).toEqual({ ok: true, pending: true });
+      expect(batchSizes).toEqual([6, 6, 6]);
+      const [partial] = execute({ queries: [{ sql: "SELECT status,completed_at,findings_count,diagnostics FROM research_runs WHERE id='resume-run'" }] })[0].results;
+      expect(partial).toMatchObject({ status: "ranking", completed_at: null, findings_count: 17 });
+      expect(JSON.parse(partial.diagnostics)).toMatchObject({ screenedCount: 25, shortlistedCount: 25, evidenceCount: 18, rejectedStories: [{ title: items[5].title, score: 42 }] });
+      const [checkpoint] = execute({ queries: [{ sql: "SELECT value FROM research_cache WHERE id='rank-progress:resume-run'" }] })[0].results;
+      expect(JSON.parse(checkpoint.value)).toMatchObject({ selectedIds: items.map(item => item.id), nextOffset: 18 });
+      execute({ queries: [{
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES('resume-new-arrival','resume',?,?,'New arrival','New material',?,?,?,'public_feed')",
+        params: [seed.id, `${new URL(seed.url).origin}/new-arrival`, now - 1000, now, content(0)],
+      }] });
+      expect(await processResearchJob({ operation: "rank", runId: "resume-run" })).toEqual({ ok: true, pending: false });
+      expect(screened).toBe(1);
+      expect(batchSizes).toEqual([6, 6, 6, 6, 1]);
+      expect(reviewedIds).toEqual(items.map(item => item.id));
+      const [finished] = execute({ queries: [{ sql: "SELECT status,completed_at,findings_count,diagnostics FROM research_runs WHERE id='resume-run'" }] })[0].results;
+      expect(finished).toMatchObject({ status: "drafting", findings_count: 24 });
+      expect(finished.completed_at).toBeGreaterThanOrEqual(now);
+      expect(JSON.parse(finished.diagnostics)).toMatchObject({ eligibleCount: 25, screenedCount: 25, shortlistedCount: 25, evidenceCount: 25, rejectedStories: [{ title: items[5].title, score: 42 }] });
+      const calls = fetcher.mock.calls.length;
+      expect(await processResearchJob({ operation: "rank", runId: "resume-run" })).toEqual({ ok: true, pending: false });
+      expect(fetcher).toHaveBeenCalledTimes(calls);
+      expect(execute({ queries: [{ sql: "SELECT COUNT(*) AS count FROM research_findings WHERE run_id='resume-run'" }] })[0].results).toEqual([{ count: 24 }]);
     } finally {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
@@ -1099,10 +1259,10 @@ describe("research persistence and team isolation", () => {
         ...[
           { id: "old", at: now - 86400001, score: 99 },
           { id: "future", at: now + 1, score: 99 },
-          { id: "weak", at: now - 1000, score: 79 },
+          { id: "weak", at: now - 1000, score: 69 },
           { id: "best", at: now - 86400000, score: 95 },
-          { id: "runner", at: now - 1000, score: 90 },
-          { id: "third", at: now - 1000, score: 85 },
+          { id: "runner", at: now - 1000, score: 75 },
+          { id: "third", at: now - 1000, score: 70 },
           { id: "previous-manual", at: now - 1000, score: 99 },
         ].flatMap((entry) => [
           {

@@ -1070,5 +1070,168 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     ],
     "maxDiscoveryLinks": 12,
     "notes": "Original experiments by evaluation practitioners, verified 26 October 2026. The public automated-evals comparison reports 100 production traces, 39 human-labelled failures and explicit single-dataset limits; do not generalize vendor rankings or causal product gains. Sparse publication cadence; the verified July article is historical, not a new daily finding. This collector follows only same-host articles; author posts linked on hamel.dev, sh-reya.com or other hosts require separate primary-source verification and are not silently collected. Exclude course promotion and preserve original dates."
+  },
+  {
+    "id": "lovable-primary-product",
+    "name": "Lovable — product workflows and release decisions",
+    "url": "https://lovable.dev/blog",
+    "feedUrl": "https://lovable.dev/blog/rss.xml",
+    "kind": "rss",
+    "category": "industry",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Verified 26 October 2026 from successful practitioner source chains. Public dated RSS includes the exact chat-for-free pricing origin; feed metadata needs article hydration, verified with current-week full public text. Prefer concrete product decisions, customer workflows, pricing incentives and substantive capability changes. Attribute vendor claims; do not infer independent outcome proof, repeat promotional release copy or treat a creator’s social commentary as included in this feed."
+  },
+  {
+    "id": "cursor-product-practice",
+    "name": "Cursor — original product and AI workflow decisions",
+    "url": "https://cursor.com/blog",
+    "kind": "web",
+    "category": "industry",
+    "enabled": true,
+    "priority": 2,
+    "articlePathPrefixes": [
+      "/blog/"
+    ],
+    "maxDiscoveryLinks": 12,
+    "notes": "Public bounded blog discovery verified 26 October 2026: twelve readable dated articles including the exact router-design origin cited in the benchmark. RSS endpoint serves HTML and is not used. Prefer inspectable product, UX, reliability, pricing or team-workflow decisions; exclude infrastructure details with no practical audience implication. Publisher performance claims remain attributed, not independent benchmarks. Index depth is bounded; monitoring does not backfill the whole archive."
+  },
+  {
+    "id": "shopify-ai-product-cases",
+    "name": "Shopify Engineering — first-hand AI product cases",
+    "url": "https://shopify.engineering/topics/ai-machine-learning",
+    "kind": "web",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "maxDiscoveryLinks": 12,
+    "notes": "Narrow AI/machine-learning topic index verified 26 October 2026: twelve readable articles, eleven dated, including the exact Shopify Flow fine-tuning case cited by practitioners. Focus on product evaluation, user tasks, feedback and deployment tradeoffs; skip low-level infrastructure without a useful product/growth implication. Original author accounts require sample, benchmark and self-report limitations. Undated items stay outside freshness windows."
+  },
+  {
+    "id": "paywall-index-research",
+    "name": "The Paywall Index — subscription experiments and benchmarks",
+    "url": "https://thepaywallindex.substack.com/archive",
+    "feedUrl": "https://thepaywallindex.substack.com/feed",
+    "kind": "rss",
+    "category": "research",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Public RSS verified 26 October 2026: three dated full-text analyses including the exact 10000-app trial-duration study cited by a selected practitioner. This is mobile subscription/platform data, not B2B SaaS causal evidence. Preserve cohort, platform, geography, period and confounding; use only when a defensible trial/pricing mechanism transfers to the publishing audience. Never promise conversion gains from copying a trial length."
+  },
+  {
+    "id": "saastr-practitioner-cases",
+    "name": "SaaStr — practitioner operating cases",
+    "url": "https://www.saastr.com/",
+    "feedUrl": "https://www.saastr.com/feed/",
+    "kind": "rss",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Public dated RSS verified 26 October 2026: ten readable current articles. Source appears behind selected founder/operator content; the recent feed does not contain every historical benchmark URL. Prefer specific attributed practitioner cases about SaaS growth, customer value, pricing, team operations and useful AI workflows. Reject event advertising, generic hype and second-hand claims without supporting detail. Distinguish an opinion or illustrative mechanism from measured performance and preserve original publication dates."
+  },
+  {
+    "id": "wynter-original-research",
+    "name": "Wynter — original B2B buyer research",
+    "url": "https://wynter.com/blog-category/research",
+    "kind": "web",
+    "category": "research",
+    "enabled": true,
+    "priority": 1,
+    "articlePathPrefixes": [
+      "/post/"
+    ],
+    "maxDiscoveryLinks": 12,
+    "notes": "Narrow original research index verified 26 October 2026. Publisher-specific original byline dates now supported: eight readable reports, seven dated; latest available report is historical August12, not fresh because its title says Q3. Use disclosed sample, population, survey timing and self-report limitations. Vendor-selected panels and correlations are not representative causal proof. General SEO blog excluded; missing original dates stay ineligible."
+  },
+  {
+    "id": "measuringu-original-research",
+    "name": "MeasuringU — empirical UX and AI research",
+    "url": "https://measuringu.com/blogs/",
+    "kind": "web",
+    "category": "research",
+    "enabled": true,
+    "priority": 1,
+    "maxDiscoveryLinks": 12,
+    "notes": "Public original research index verified 26 October 2026: twelve readable dated articles with original publisher bylines. Prefer usability measurement, AI-assisted research, synthesis and product evaluation experiments with inspectable methods. Preserve study population, task definitions, sample and uncertainty; avoid treating synthetic-user results as equivalent to real users. Use article discovery rather than the Feedburner XML endpoint, which fails existing XML validation. Full pages may exceed stored evidence bounds; do not claim unseen sections were read."
+  },
+  {
+    "id": "discovery-hackernews-public-signals",
+    "name": "Discovery — public Hacker News product signals",
+    "url": "https://hn.algolia.com",
+    "kind": "search",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "discoveryProvider": "hackernews",
+    "discoveryQueries": [
+      "SaaS",
+      "AI agents",
+      "product"
+    ],
+    "notes": "Public unauthenticated Hacker News Search API, verified 26 October 2026. Three bounded topic queries discover linked public essays, product launches, experiments and research without a social account or paid service. HN submission time, ranking and snippets are discovery leads only, never source publication dates, popularity evidence or proof of quality. Fetch the linked original article and verify its own publication date and readable text before ranking. Skip jobs, social-only links, thin promotions, inaccessible pages and configured competitor feeds. free-only; no paid fallback. A newly submitted old essay is not fresh research; preserve original dates."
+  },
+  {
+    "id": "linear-product-craft",
+    "name": "Linear — product craft and workflow essays",
+    "url": "https://linear.app/now",
+    "feedUrl": "https://linear.app/rss/now.xml",
+    "kind": "rss",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Official RSS verified 26 October 2026: sixty dated entries, fifty-nine with substantial public text. Public product-craft essays and workflow decisions precede several successful practitioner discussions. Prefer concrete design judgment, feedback, project/product communication and AI-workflow lessons. Preserve original dates and attribute first-party product claims. Use RSS rather than the web index, whose visible dates are not reliably parsed."
+  },
+  {
+    "id": "fyxer-product-changelog",
+    "name": "Fyxer — public product changelog",
+    "url": "https://www.fyxer.com/changelog",
+    "kind": "web",
+    "category": "industry",
+    "enabled": true,
+    "priority": 2,
+    "maxDiscoveryLinks": 12,
+    "notes": "Public changelog verified 26 October 2026: ten dated entries including dashboard and inbox-agent changes preceding selected product-practitioner commentary. Seven entries have substantial readable body text; shorter entries still need enough source evidence before ranking. Prefer concrete onboarding, permission, task-completion and collaboration changes. Do not import testimonial, promised productivity or marketing claims as independent results. Preserve each release date and actual availability."
+  },
+  {
+    "id": "every-chain-of-thought",
+    "name": "Every — original AI operating essays",
+    "url": "https://every.to/chain-of-thought",
+    "kind": "web",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "articlePathPrefixes": [
+      "/chain-of-thought/"
+    ],
+    "maxDiscoveryLinks": 12,
+    "notes": "Public essay index verified 26 October 2026: six readable dated articles, including Dan Shipper’s original Two-slice Team source. Observed index publication dates were January–July; these are historical inputs, not new daily stories. Advertised feed endpoint returned404, so use bounded web discovery. Prefer original practitioner reasoning and operating examples, with attributed limits; paid continuations and unseen sections are not evidence. Updated times do not replace original publication dates."
+  },
+  {
+    "id": "posthog-original-product-practice",
+    "name": "PostHog — original operating and product practice",
+    "url": "https://posthog.com/blog",
+    "kind": "web",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "articlePathPrefixes": [
+      "/blog/"
+    ],
+    "maxDiscoveryLinks": 12,
+    "notes": "Public original-author blog verified 26 October 2026 after publisher-specific original byline support: ten readable dated articles. First-hand marketing experiments, ownership, hiring and product-team tradeoffs are useful when a supported mechanism or considered observation fits a personal profile. Exclude generic competitor advertising and unsupported success promises. First-party figures are attributed, not causal proof. RSS exceeds the collector’s safe body limit and is not used."
+  },
+  {
+    "id": "lyssna-research-workflows",
+    "name": "Lyssna — public research workflows and releases",
+    "url": "https://www.lyssna.com/blog/",
+    "kind": "web",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "articlePathPrefixes": [
+      "/blog/"
+    ],
+    "maxDiscoveryLinks": 12,
+    "notes": "Public article index verified 26 October 2026: ten readable dated articles after excluding category/author archives and pagination before the link cap. Original MCP research connection and research-synthesis materials supply public signals behind selected practitioner posts. Prefer inspectable research workflows, study methods and concrete release capabilities; exclude generic SEO and unverified tool-performance promises. Preserve original JSON-LD publication time: the MCP article was first published29July, despite a later visible September update. Living skill documentation is supporting reference, not a newly dated research article."
   }
 ];

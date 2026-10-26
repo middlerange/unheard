@@ -15,6 +15,7 @@ export type ResearchSourceSeed = {
   articlePathPrefixes?: string[];
   maxDiscoveryLinks?: number;
   discoveryQueries?: string[];
+  discoveryProvider?: "treg" | "hackernews";
   discoverySearchType?: "web" | "news";
   discoveryBlockedHosts?: string[];
 };

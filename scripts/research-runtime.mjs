@@ -46,7 +46,12 @@ export async function runResearchWorkflow(runId, step, invoke) {
     // A model request can be billed even if its response is interrupted. Resume via
     // persisted analysis records rather than automatically repeating a paid step.
     const paidOptions = { retries: { limit: 0, delay: '1 second', backoff: 'constant' }, timeout: '10 minutes' };
-    await step.do('Rank findings', paidOptions, () => invoke({ operation: 'rank', runId }));
+    let batch = 1;
+    let ranking = await step.do('Rank findings', paidOptions, () => invoke({ operation: 'rank', runId }));
+    while (ranking?.pending === true) {
+      batch++;
+      ranking = await step.do(`Rank findings batch ${batch}`, paidOptions, () => invoke({ operation: 'rank', runId }));
+    }
     return await step.do('Draft daily posts', paidOptions, () => invoke({ operation: 'drafts', runId }));
   } catch (error) {
     await step.do('Record research failure', collectionOptions, () => invoke({

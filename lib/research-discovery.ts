@@ -55,6 +55,18 @@ async function searchPublicResearch(query: string, windowStart: number, news: bo
   return results.filter(hit => typeof hit.url === "string" && typeof hit.title === "string").slice(0, 10);
 }
 
+async function searchHackerNewsSignals(query: string, windowStart: number, windowEnd: number): Promise<SearchHit[]> {
+  const url = new URL("https://hn.algolia.com/api/v1/search_by_date");
+  url.searchParams.set("query", query);
+  url.searchParams.set("tags", "story");
+  url.searchParams.set("numericFilters", `created_at_i>=${Math.floor(windowStart / 1000)},created_at_i<=${Math.floor(windowEnd / 1000)}`);
+  url.searchParams.set("hitsPerPage", "10");
+  const text = await fetchResearchText(url.href, new Set(["hn.algolia.com"]));
+  const payload = JSON.parse(text) as { hits?: Array<{ url?: unknown; title?: unknown }> };
+  if (!Array.isArray(payload.hits)) throw new Error("Hacker News discovery returned no result list");
+  return payload.hits.flatMap(hit => typeof hit.url === "string" && typeof hit.title === "string" ? [{ url: hit.url, title: hit.title }] : []).slice(0, 10);
+}
+
 export async function collectDiscoveredResearchSource(
   source: ResearchSourceSeed,
   windowStart: number,
@@ -64,7 +76,9 @@ export async function collectDiscoveredResearchSource(
   if (source.kind !== "search") return { items: await collectResearchSource(source), warning: null };
   const queries = source.discoveryQueries?.slice(0, 3) ?? [];
   if (!queries.length) throw new Error("Topic discovery needs at least one query");
-  const searched = await Promise.allSettled(queries.map(query => searchPublicResearch(query, windowStart, source.discoverySearchType === "news")));
+  const searched = await Promise.allSettled(queries.map(query => source.discoveryProvider === "hackernews"
+    ? searchHackerNewsSignals(query, windowStart, windowEnd)
+    : searchPublicResearch(query, windowStart, source.discoverySearchType === "news")));
   const lists = searched.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
   if (!lists.length) throw (searched[0] as PromiseRejectedResult).reason;
   const urls = new Map<string, SearchHit>();

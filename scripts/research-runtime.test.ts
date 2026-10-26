@@ -32,6 +32,38 @@ describe('durable research execution', () => {
     expect(invoke.mock.calls.map(([payload]) => payload.operation)).toEqual(['plan', 'collect', 'fail']);
   });
 
+  it('continues pending ranking in separate durable steps before drafting', async () => {
+    let rankingCalls = 0;
+    const invoke = vi.fn(async (payload: { operation: string }) => {
+      if (payload.operation === 'plan') return { sourceIds: [] };
+      if (payload.operation === 'rank') return { ok: true, pending: ++rankingCalls < 3 };
+      return { drafted: 1 };
+    });
+    const doStep = vi.fn(async (_name: string, _config: unknown, work: () => Promise<unknown>) => work());
+    expect(await runResearchWorkflow('large-run', { do: doStep }, invoke)).toEqual({ drafted: 1 });
+    expect(doStep.mock.calls.map(([name]) => name)).toEqual([
+      'Plan research collection', 'Rank findings', 'Rank findings batch 2', 'Rank findings batch 3', 'Draft daily posts',
+    ]);
+    for (const [, config] of doStep.mock.calls.slice(1)) expect(config).toMatchObject({ retries: { limit: 0 } });
+    expect(invoke.mock.calls.map(([payload]) => payload.operation)).toEqual(['plan', 'rank', 'rank', 'rank', 'drafts']);
+  });
+
+  it('does not repeat an interrupted paid continuation or draft partial findings', async () => {
+    let rankingCalls = 0;
+    const invoke = vi.fn(async (payload: { operation: string }) => {
+      if (payload.operation === 'plan') return { sourceIds: [] };
+      if (payload.operation === 'rank') {
+        if (++rankingCalls === 1) return { pending: true };
+        throw new Error('Model response interrupted');
+      }
+      return { ok: true };
+    });
+    const doStep = vi.fn(async (_name: string, _config: unknown, work: () => Promise<unknown>) => work());
+    await expect(runResearchWorkflow('large-run', { do: doStep }, invoke)).rejects.toThrow('Model response interrupted');
+    expect(invoke.mock.calls.map(([payload]) => payload.operation)).toEqual(['plan', 'rank', 'rank', 'fail']);
+    expect(doStep.mock.calls.find(([name]) => name === 'Rank findings batch 2')?.[1]).toMatchObject({ retries: { limit: 0 } });
+  });
+
   it('signs internal dispatch and surfaces a failed handler response', async () => {
     let received: Request | undefined;
     const handler = {

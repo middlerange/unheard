@@ -17,6 +17,7 @@ import {
   RESEARCH_MODEL,
   researchHash,
 } from "./research-model";
+import { RESEARCH_POST_MIN_SCORE } from "./research-policy";
 import { RESEARCH_TEXT_PLATFORMS } from "./research-profiles";
 import { PLATFORM_LIMITS } from "./validation";
 import { countTwitterCharacters } from "./twitter-text";
@@ -494,7 +495,7 @@ export async function processResearchDraftJob(runId: string) {
           research_findings.source_id,
           JSON.parse(run.source_ids) as string[],
         ),
-        gte(research_findings.score, 80),
+        gte(research_findings.score, RESEARCH_POST_MIN_SCORE),
         gte(research_findings.published_at, run.created_at - 86400000),
         lte(research_findings.published_at, run.created_at),
         ne(research_findings.status, "dismissed"),
@@ -623,7 +624,7 @@ export async function processResearchDraftJob(runId: string) {
   if (drafted > 0) {
     outcome = `Created ${drafted} draft${drafted === 1 ? "" : "s"}; review delivery is tracked with each draft.`;
   } else if (candidates.length === 0) {
-    outcome = `${diagnostics.outcome || "Research finished."} No fresh findings scored at least 80 for drafting.`;
+    outcome = `${diagnostics.outcome || "Research finished."} No fresh findings scored at least ${RESEARCH_POST_MIN_SCORE} for drafting.`;
   } else if (selected.length === 0) {
     outcome = "Strong findings were already drafted; duplicate stories were skipped.";
   } else if (validationSkips) {

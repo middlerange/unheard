@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { validateResearchEvidence } from "./research-model";
+import {
+  validateResearchEvidence, researchScreeningSchema, screeningJsonSchema,
+  RESEARCH_SCREEN_BATCH_SIZE,
+} from "./research-model";
 
 const quote = "Only 35% of projects have a formal policy permitting GenAI use";
 const finding = {
@@ -37,5 +40,15 @@ describe("research evidence quote formatting", () => {
     expect(validateResearchEvidence([
       { ...wrapped, score: 67 }, { ...wrapped, itemId: "unknown" }, wrapped, wrapped,
     ], items)).toEqual([finding]);
+  });
+});
+
+
+describe("research screening capacity", () => {
+  it("allows every item in a full screening batch without a twelve-story quota", () => {
+    const itemIds = Array.from({ length: RESEARCH_SCREEN_BATCH_SIZE }, (_, index) => `item-${index}`);
+    expect(researchScreeningSchema.parse({ itemIds }).itemIds).toEqual(itemIds);
+    expect(screeningJsonSchema.properties.itemIds.maxItems).toBe(RESEARCH_SCREEN_BATCH_SIZE);
+    expect(() => researchScreeningSchema.parse({ itemIds: [...itemIds, "beyond-batch"] })).toThrow();
   });
 });

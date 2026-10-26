@@ -278,6 +278,56 @@ function articleRegion(html: string): string {
   return mains[0]?.content || articles.sort((a, b) => b.content.length - a.content.length)[0]?.content || "";
 }
 
+function publisherBylineDate(html: string, articleUrl: string | undefined, now: number): number | null {
+  if (!articleUrl) return null;
+  let url: URL;
+  try { url = new URL(articleUrl); } catch { return null; }
+  const host = url.hostname.replace(/^www\./, "");
+  const wynter = host === "wynter.com" && /^\/post\/[^/]+\/?$/.test(url.pathname);
+  const measuringU = host === "measuringu.com" && /^\/(?!blogs?\/?$)[^/]+\/?$/.test(url.pathname);
+  const posthog = host === "posthog.com" && /^\/blog\/[^/]+\/?$/.test(url.pathname);
+  if (!wynter && !measuringU && !posthog) return null;
+  const clean = html.replace(/<!--[\s\S]*?-->|<(script|style|nav|footer|aside)\b(?:"[^"]*"|'[^']*'|[^'">])*>[\s\S]*?<\/\1>/gi, " ");
+  const region = wynter ? clean : articleRegion(clean);
+  const heading = htmlElements(region, "h1")[0];
+  if (!heading) return null;
+  const hasClass = (element: { start: number; end: number }, name: string, content: string) => {
+    const opening = content.slice(element.start, content.indexOf(">", element.start) + 1);
+    return (htmlAttributes(opening).class || "").split(/\s+/).includes(name);
+  };
+  if (posthog) {
+    const following = region.slice(heading.end);
+    const byline = htmlElements(following, "div")[0];
+    if (!byline || following.slice(0, byline.start).trim()
+      || !["flex", "items-center", "space-x-2", "mb-4", "flex-wrap"].every(name => hasClass(byline, name, following))
+      || !/href=["']\/community\/profiles\/\d+["']/.test(byline.content)) return null;
+    const dates = htmlElements(byline.content, "p").filter(element => {
+      const opening = byline.content.slice(element.start, byline.content.indexOf(">", element.start) + 1);
+      const attributes = htmlAttributes(opening);
+      return !/modified|updated/i.test(`${attributes.itemprop || ""} ${attributes.class || ""}`)
+        && ["text-sm", "text-secondary", "m-0"].every(name => hasClass(element, name, byline.content));
+    });
+    if (dates.length !== 1) return null;
+    const visibleDate = plainResearchText(dates[0].content);
+    return /^[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}$/.test(visibleDate)
+      ? parseResearchDate(visibleDate, now) : null;
+  }
+  // These publishers expose publication dates only in their own title/byline widgets.
+  const containers = htmlElements(region, wynter ? "div" : "section")
+    .filter(element => element.start <= heading.start && element.end >= heading.end
+      && hasClass(element, wynter ? "content-container" : "elementor-top-section", region))
+    .sort((a, b) => a.content.length - b.content.length);
+  const byline = containers[0]?.content;
+  if (!byline) return null;
+  const dates = htmlElements(byline, "div").filter(element =>
+    hasClass(element, wynter ? "wfu-post-byline-date" : "post-date", byline),
+  );
+  if (dates.length !== 1) return null;
+  const visibleDate = plainResearchText(dates[0].content);
+  if (!/^[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}$/.test(visibleDate)) return null;
+  return parseResearchDate(visibleDate, now);
+}
+
 export function articleResearchDate(
   html: string,
   articleUrl?: string,
@@ -342,6 +392,8 @@ export function articleResearchDate(
     const date = parseResearchDate(attributes.datetime, now);
     if (date !== null) return date;
   }
+  const publisherDate = publisherBylineDate(html, articleUrl, now);
+  if (publisherDate !== null) return publisherDate;
   const published = plainResearchText(region.replace(/<\/?header\b[^>]*>/gi, "")).match(
     /\bPublished(?:\s+on)?\s*:?\s+((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:st|nd|rd|th)?[,]?\s+\d{4}|\d{4}-\d{2}-\d{2})\b/i,
   )?.[1];
@@ -377,6 +429,8 @@ export function discoverResearchLinks(
         if (url === canonicalResearchUrl(source.url)
           || /\/(tags?|categor(?:y|ies)|about|contact|privacy|terms|login|sign-?in|subscribe|archive|search|authors?|teams?|people|topics?|careers|jobs|pricing|demo)(\/|$)/i.test(path)
           || /\.(pdf|zip|png|jpe?g|gif|mp[34])$/i.test(path)) continue;
+        if (new URL(url).hostname.replace(/^www\./, "") === "lyssna.com"
+          && /^\/blog\/(?:[^/]+-articles|\d+)\/?$/.test(path)) continue;
         const prefixes = source.articlePathPrefixes;
         const scopedArticle = prefixes?.some(prefix => path.startsWith(`${prefix.replace(/\/$/, "")}/`));
         if (prefixes?.length && !scopedArticle) continue;
