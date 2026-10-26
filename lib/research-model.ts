@@ -31,29 +31,37 @@ export async function researchHash(value: string) {
     (b) => b.toString(16).padStart(2, "0"),
   ).join("");
 }
+export function matchResearchQuote(content: string, evidence: string): string | null {
+  const normalize = (value: string) => value.replace(/\s+/g, " ").toLowerCase();
+  const source = normalize(content);
+  let quote = evidence.trim();
+  if (quote.length >= 20 && source.includes(normalize(quote))) return quote;
+  const closingMarks: Record<string, string> = { '"': '"', "'": "'", "“": "”", "‘": "’" };
+  if (closingMarks[quote[0]] !== quote.at(-1)) return null;
+  quote = quote.slice(1, -1).trim();
+  return quote.length >= 20 && source.includes(normalize(quote)) ? quote : null;
+}
 export function validateResearchEvidence(
   evidence: ResearchEvidence[],
   items: Array<{ id: string; content: string }>,
 ) {
-  const inputs = new Map(
-    items.map((item) => [
-      item.id,
-      item.content.replace(/\s+/g, " ").toLowerCase(),
-    ]),
-  );
+  const inputs = new Map(items.map((item) => [item.id, item.content]));
   const seen = new Set<string>();
-  return evidence.filter((finding) => {
+  const accepted: ResearchEvidence[] = [];
+  for (const finding of evidence) {
     const content = inputs.get(finding.itemId);
     if (
       !content ||
       seen.has(finding.itemId) ||
-      finding.score < 70 ||
-      !content.includes(finding.evidence.replace(/\s+/g, " ").toLowerCase())
+      finding.score < 70
     )
-      return false;
+      continue;
+    const quote = matchResearchQuote(content, finding.evidence);
+    if (!quote) continue;
     seen.add(finding.itemId);
-    return true;
-  });
+    accepted.push({ ...finding, evidence: quote });
+  }
+  return accepted;
 }
 export async function callResearchModel(
   system: string,

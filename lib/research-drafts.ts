@@ -13,6 +13,7 @@ import {
 } from "./schema";
 import {
   callResearchModel,
+  matchResearchQuote,
   RESEARCH_MODEL,
   researchHash,
 } from "./research-model";
@@ -97,7 +98,6 @@ type Destination = {
   systemPrompt?: string;
   groupName?: string | null;
 };
-const normalize = (text: string) => text.replace(/\s+/g, " ").toLowerCase();
 
 export class ResearchDraftValidationError extends Error {
   constructor(message: string) {
@@ -134,7 +134,7 @@ export function validateResearchDraftContent(
   const targets = generated.targets.map((target) => {
     const destination = destinations.find(destination => destination.id === target.channelId);
     const label = `${target.platform} (${destination?.name || target.channelId})`;
-    if (!normalize(source.content).includes(normalize(target.supportQuote)))
+    if (!matchResearchQuote(source.content, target.supportQuote))
       errors.push(`${label}: Draft support quote was not found in the source`);
     const limit = PLATFORM_LIMITS[target.platform].maxCharacters;
     const length = target.platform === "twitter" ? countTwitterCharacters(target.content) : [...target.content].length;

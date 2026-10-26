@@ -25,6 +25,14 @@ function generated() {
   };
 }
 describe("research draft grounding and publication boundaries", () => {
+  it("accepts quote wrappers only around an exact source excerpt", () => {
+    const value = generated();
+    value.targets[0].supportQuote = `“${value.targets[0].supportQuote}”`;
+    value.targets[1].supportQuote = `"${value.targets[1].supportQuote}"`;
+    expect(validateResearchDraftContent(value, destinations, source)?.targets).toHaveLength(2);
+    value.targets[0].supportQuote = "“onboarding friction...support conversations”";
+    expect(() => validateResearchDraftContent(value, destinations, source)).toThrow("not found in the source");
+  });
   it("accepts grounded attributed copy only for the exact supplied destinations", () => {
     expect(
       validateResearchDraftContent(generated(), destinations, source)?.targets,
