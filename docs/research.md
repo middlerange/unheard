@@ -8,7 +8,7 @@ and customer communication.
 ## Sources and coverage
 
 The catalog in `lib/research-sources.ts` preserves all 43 original entries and adds
-64 sources: 107 entries with 67 enabled defaults. These combine individual
+66 sources: 109 entries with 69 enabled defaults. These combine individual
 practitioners, original research, primary industry announcements, product
 interviews, and three optional discovery lanes. All 23 competitor sources remain
 disabled by default. Each team's existing source preferences are preserved.
@@ -16,7 +16,7 @@ disabled by default. Each team's existing source preferences are preserved.
 Source tracing and recall calibration on 26 October 2026 added verified public
 product/research inputs, including How I AI, Product Experience, Parlance, Lovable,
 Cursor, Shopify, Paywall Index, SaaStr, Wynter, MeasuringU, Linear, Fyxer, Every,
-PostHog and Lyssna. Each registry entry records its scope, access and cadence.
+PostHog, Lyssna and ProductLed podcast notes. Each registry entry records its scope, access and cadence.
 Original publisher bylines are supported for Wynter, MeasuringU and PostHog;
 Lyssna archive/category links are excluded before applying its discovery cap.
 RSS is used where it preserves publication metadata better than a web index.

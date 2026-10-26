@@ -1233,5 +1233,31 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     ],
     "maxDiscoveryLinks": 12,
     "notes": "Public article index verified 26 October 2026: ten readable dated articles after excluding category/author archives and pagination before the link cap. Original MCP research connection and research-synthesis materials supply public signals behind selected practitioner posts. Prefer inspectable research workflows, study methods and concrete release capabilities; exclude generic SEO and unverified tool-performance promises. Preserve original JSON-LD publication time: the MCP article was first published29July, despite a later visible September update. Living skill documentation is supporting reference, not a newly dated research article."
+  },
+  {
+    "id": "productled-original-podcast",
+    "name": "ProductLed — original practitioner podcast notes",
+    "url": "https://pod.co/product-led-podcast",
+    "feedUrl": "https://feed.pod.co/product-led-podcast",
+    "kind": "rss",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "author": "Wes Bush and guests",
+    "notes": "Public publisher-distributed RSS verified 26 October 2026: sixty dated episodes, including the exact September8 Day27 AI-product case preceding a selected social post. Public written show notes hydrate to3142characters for that example. Use only the written notes actually collected; a podcast description is not a transcript or proof the audio was heard. Prefer inspectable product-led activation, customer learning, pricing and first-hand build experiments; attribute anecdotal outcomes and preserve episode publication dates."
+  },
+  {
+    "id": "lyssna-ai-research-guide",
+    "name": "Lyssna — AI research methods guide",
+    "url": "https://www.lyssna.com/guides/ai-in-user-research-guide/",
+    "kind": "web",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "articlePathPrefixes": [
+      "/guides/ai-in-user-research-guide/"
+    ],
+    "maxDiscoveryLinks": 12,
+    "notes": "Public guide hub verified 26 October 2026: six dated readable chapters, including source-grounded research synthesis, contradictory evidence and study-age/sample checks behind selected practitioner advice. These are method recommendations and implementation guidance, not proof of promoted-tool effectiveness. Original September publication dates govern freshness; later revision text may differ from what was present at publication. Living reports linked from chapters keep their own access/date limitations."
   }
 ];
