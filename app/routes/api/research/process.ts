@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { z } from "zod";
 import { processResearchJob } from "@/lib/research";
 import { verifyResearchRequest } from "@/lib/research-internal";
+import { researchJobErrorMessage } from "@/lib/research-errors";
 export const researchJobSchema = z
   .object({
     operation: z.enum(["plan", "collect", "rank", "drafts", "fail", "daily"]),
@@ -32,9 +33,10 @@ export async function handleResearchProcess(request: Request) {
   } catch (error) {
     if (error instanceof z.ZodError || error instanceof SyntaxError)
       return Response.json({ error: "Invalid research job" }, { status: 400 });
-    console.error("Research job failed:", error);
+    const message = researchJobErrorMessage(error);
+    console.error("Research job failed:", message);
     return Response.json(
-      { error: error instanceof Error ? error.message : "Research job failed" },
+      { error: message },
       { status: 500 },
     );
   }

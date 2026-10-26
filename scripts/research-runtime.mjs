@@ -54,9 +54,13 @@ export async function runResearchWorkflow(runId, step, invoke) {
     }
     return await step.do('Draft daily posts', paidOptions, () => invoke({ operation: 'drafts', runId }));
   } catch (error) {
-    await step.do('Record research failure', collectionOptions, () => invoke({
-      operation: 'fail', runId, error: error instanceof Error ? error.message : 'Research failed.',
-    }));
+    try {
+      await step.do('Record research failure', collectionOptions, () => invoke({
+        operation: 'fail', runId, error: error instanceof Error ? error.message.slice(0, 500) : 'Research failed.',
+      }));
+    } catch (recordError) {
+      console.error('Could not record research failure:', recordError);
+    }
     throw error;
   }
 }

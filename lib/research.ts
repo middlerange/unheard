@@ -855,6 +855,18 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
           .replace(/[^a-z0-9]+/g, "-")
           .replace(/^-|-$/g, "");
         if (!familyKey) continue;
+        const familyOwner = await db.select({ itemId: research_findings.item_id })
+          .from(research_findings).where(and(
+            eq(research_findings.team_id, run.team_id),
+            eq(research_findings.family_key, familyKey),
+          )).get();
+        if (familyOwner && familyOwner.itemId !== item.id) {
+          diagnostics.rejectedStories.push({
+            title: item.title, score: finding.score,
+            reason: "This story family already has a saved finding from another source; retained that finding and its review state.",
+          });
+          continue;
+        }
         await db
           .insert(research_findings)
           .values({

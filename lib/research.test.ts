@@ -710,6 +710,42 @@ describe("research persistence and team isolation", () => {
       else process.env.OPENAI_API_KEY = previousKey;
     }
   }, 20_000);
+  it("retains an existing reviewed story when another source produces the same family", async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
+    const now = Date.now();
+    const quote = "A shared product scaffold removes repeated setup before the first prototype.";
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('family','Family','family',?,?)", params: [now, now] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp,source_count,source_ids) VALUES('family-run','family','scan','collecting',7,?,'Product practitioners',1,?)", params: [now, JSON.stringify([seed.id])] },
+      { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES('family-step','family-run',?,'completed')", params: [seed.id] },
+      ...["original", "second"].map(id => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,'family',?,?,?,?,?,?,?,'public_feed')",
+        params: [id, seed.id, `${new URL(seed.url).origin}/family-${id}`, id, quote, now - 1000, now, `${quote} ${"Detailed product workflow evidence. ".repeat(30)}`],
+      })),
+      { sql: "INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key,status) VALUES('original-finding','family','family-run','original',?,'Original','https://example.com/original',?,85,'Saved summary','Useful','Saved angle',?,'Attributed',?,'shared-scaffold','dismissed')", params: [seed.id, now - 1000, quote, now] },
+    ] });
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-family-key";
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const value = request.text.format.schema.properties.itemIds
+        ? { itemIds: ["second"] }
+        : { findings: [{ itemId: "second", score: 90, summary: "New coverage", whyItMatters: "Useful", contentAngle: "Same launch", evidence: quote, limitations: "Attributed", familyKey: "shared-scaffold" }] };
+      return Response.json({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }] });
+    });
+    try {
+      expect(await processResearchJob({ operation: "rank", runId: "family-run" })).toEqual({ ok: true, pending: false });
+      expect(execute({ queries: [{ sql: "SELECT id,item_id,status,score,summary FROM research_findings WHERE team_id='family'" }] })[0].results)
+        .toEqual([{ id: "original-finding", item_id: "original", status: "dismissed", score: 85, summary: "Saved summary" }]);
+      const run = (await getResearchSnapshot("family")).runs[0];
+      expect(run.status).toBe("completed");
+      expect(run.diagnostics).toMatchObject({ evidenceCount: 1, rejectedStories: [{ title: "second", score: 90, reason: expect.stringContaining("already has a saved finding") }] });
+    } finally {
+      fetcher.mockRestore();
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+    }
+  }, 20_000);
   it("screens older eligible items beyond the first metadata batch and caches model responses", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(
       (source) => source.feedUrl && source.kind === "rss",

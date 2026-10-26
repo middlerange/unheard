@@ -32,6 +32,38 @@ describe('durable research execution', () => {
     expect(invoke.mock.calls.map(([payload]) => payload.operation)).toEqual(['plan', 'collect', 'fail']);
   });
 
+  it('bounds failure dispatch before validation and preserves the original exception', async () => {
+    const original = new Error(`Database unavailable: ${'x'.repeat(6000)}`);
+    const invoke = vi.fn(async (payload: { operation: string; error?: string }) => {
+      if (payload.operation === 'plan') return { sourceIds: [] };
+      if (payload.operation === 'rank') throw original;
+      if ((payload.error?.length || 0) > 1000) throw new Error('Invalid research job');
+      return { status: 'failed' };
+    });
+    const step = { do: async (_name: string, _config: unknown, work: () => Promise<unknown>) => work() };
+    await expect(runResearchWorkflow('run-1', step, invoke)).rejects.toBe(original);
+    expect(invoke.mock.calls.at(-1)?.[0]).toEqual({ operation: 'fail', runId: 'run-1', error: original.message.slice(0, 500) });
+    expect(invoke.mock.calls.map(([payload]) => payload.operation)).toEqual(['plan', 'rank', 'fail']);
+  });
+
+  it('does not mask the original failure if its recording also fails', async () => {
+    const original = new Error('Ranking failed');
+    const recording = new Error('Failure recording unavailable');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const invoke = vi.fn(async (payload: { operation: string }) => {
+        if (payload.operation === 'plan') return { sourceIds: [] };
+        if (payload.operation === 'fail') throw recording;
+        throw original;
+      });
+      const step = { do: async (_name: string, _config: unknown, work: () => Promise<unknown>) => work() };
+      await expect(runResearchWorkflow('run-1', step, invoke)).rejects.toBe(original);
+      expect(log).toHaveBeenCalledWith('Could not record research failure:', recording);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it('continues pending ranking in separate durable steps before drafting', async () => {
     let rankingCalls = 0;
     const invoke = vi.fn(async (payload: { operation: string }) => {
