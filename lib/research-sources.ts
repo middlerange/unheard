@@ -1030,5 +1030,45 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
       "AI agents production lessons experiment evaluation engineering case study -jobs -careers",
       "AI coding experiment what I learned engineering workflow -jobs -careers"
     ]
+  },
+  {
+    "id": "claire-vo-how-i-ai",
+    "name": "How I AI — Claire Vo",
+    "url": "https://www.chatprd.ai/how-i-ai",
+    "kind": "web",
+    "category": "practitioner",
+    "author": "Claire Vo",
+    "enabled": true,
+    "priority": 1,
+    "articlePathPrefixes": [
+      "/how-i-ai/"
+    ],
+    "maxDiscoveryLinks": 14,
+    "notes": "Public written episode notes and screen-shared practitioner workflows verified 26 October 2026. Prefer product feedback, prototyping, evaluation, customer support and operational experiments; filter personal hobbies, sponsorship and generic model hype. Written notes are not verbatim transcripts. Attribute first-hand demonstrations and self-reported outcomes; do not infer controlled productivity gains. Preserve original publication dates; the undated workflows directory is ineligible."
+  },
+  {
+    "id": "product-experience-episodes",
+    "name": "The Product Experience — practitioner interviews",
+    "url": "https://www.mindtheproduct.com/podcasts/the-product-experience/",
+    "kind": "web",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "maxDiscoveryLinks": 12,
+    "notes": "Narrow weekly episode index verified 26 October 2026, traced from successful social clips. Collect public episode text: some pages contain transcripts, others only key takeaways and chapters. Use only the readable portion, not unseen audio or a claimed complete transcript; article collection is bounded to 14000 characters. Prefer first-hand discovery, activation, retention, positioning and AI-product case studies; filter career, event and training promotion. Deduplicate clips and YouTube uploads against the same interview; preserve original episode dates. The broad Mind the Product blog remains opt-in."
+  },
+  {
+    "id": "parlance-labs-evaluations",
+    "name": "Parlance Labs — original AI evaluation experiments",
+    "url": "https://parlance-labs.com/blog/",
+    "kind": "web",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "articlePathPrefixes": [
+      "/blog/posts/"
+    ],
+    "maxDiscoveryLinks": 12,
+    "notes": "Original experiments by evaluation practitioners, verified 26 October 2026. The public automated-evals comparison reports 100 production traces, 39 human-labelled failures and explicit single-dataset limits; do not generalize vendor rankings or causal product gains. Sparse publication cadence; the verified July article is historical, not a new daily finding. This collector follows only same-host articles; author posts linked on hamel.dev, sh-reya.com or other hosts require separate primary-source verification and are not silently collected. Exclude course promotion and preserve original dates."
   }
 ];

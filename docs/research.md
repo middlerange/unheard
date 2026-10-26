@@ -8,10 +8,21 @@ and customer communication.
 ## Sources and coverage
 
 The catalog in `lib/research-sources.ts` preserves all 43 original entries and adds
-48 sources: 91 entries with 51 enabled defaults. These combine individual
+51 sources: 94 entries with 54 enabled defaults. These combine individual
 practitioners, original research, primary industry announcements, product
 interviews, and three optional discovery lanes. All 23 competitor sources remain
 disabled by default. Each team's existing source preferences are preserved.
+
+Source tracing on 26 October 2026 added three verified public inputs: Claire Vo’s
+How I AI written workflow notes, The Product Experience’s narrow episode index,
+and Parlance Labs’ original evaluation experiments. Episode notes and partial
+transcripts support only their readable text, and repeated social clips do not
+constitute independent evidence. Parlance’s index links to outside author sites;
+only same-host articles are collected. Its sparse cadence does not imply daily
+new research. Wynter’s original research remains a manual reference: the current
+collector cannot verify its visible byline dates, so it is not enabled for fresh
+ranking. Vendor survey samples and first-hand demonstrations require explicit
+attribution and limitations.
 
 The three search sources contain eight targeted queries:
 
