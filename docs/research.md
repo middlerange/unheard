@@ -58,10 +58,11 @@ blocked, paywalled, or inaccessible pages can fail; source errors appear in the 
 ## Collection and scans
 
 Daily research starts after a team first opens Research. The existing minute
-cron checks fixed schedules every minute and scans the preceding 24 hours. Set
+cron checks daily schedules every minute and scans the preceding 24 hours. Set
 **Settings → Research schedule** to a local time and IANA timezone; the next
 start is shown there and in Research. Teams without a saved fixed time retain
-their hourly eligibility check and rolling 24-hour interval. Fixed schedules run
+their rolling 24-hour interval. Eligibility uses the saved due time rather than
+requiring cron timestamps to align exactly with an hour. Fixed schedules run
 once per local day, move a nonexistent daylight-saving time to the first valid
 minute, and use the first occurrence when a clock time repeats. A manual scan
 does not reset the automatic schedule. If another scan is active, the scheduled

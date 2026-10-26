@@ -957,10 +957,6 @@ export async function processResearchJob(job: ResearchJob) {
   const db = await getDb();
   if (job.operation === "daily") {
     const now = Date.now();
-    // Existing rolling schedules keep their hourly cadence. Fixed wall-clock
-    // schedules are checked every minute by the Worker's existing cron trigger.
-    const rollingTick = job.scheduledTime === undefined
-      || job.scheduledTime % 3_600_000 === 0;
     const unclaimed = or(
       isNull(research_settings.daily_claim_until),
       lte(research_settings.daily_claim_until, now),
@@ -976,13 +972,13 @@ export async function processResearchJob(job: ResearchJob) {
               isNotNull(research_settings.daily_time),
               lte(research_settings.next_daily_at, now),
             ),
-            rollingTick ? and(
+            and(
               isNull(research_settings.daily_time),
               or(
                 isNull(research_settings.last_daily_at),
                 lte(research_settings.last_daily_at, now - 86_400_000),
               ),
-            ) : undefined,
+            ),
           ),
           unclaimed,
         ),
@@ -1062,8 +1058,11 @@ export async function processResearchJob(job: ResearchJob) {
           ))
           .returning({ teamId: research_settings.team_id }).get();
         if (saved) dispatched++;
-      } catch {
-        /* Leave the team due so the next scheduled tick retries. */
+      } catch (error) {
+        console.error("[research] Daily dispatch failed; the next tick will retry", {
+          teamId: settings.team_id,
+          error: researchSourceErrorMessage(error),
+        });
       } finally {
         await db.update(research_settings)
           .set({ daily_claim_id: null, daily_claim_until: null })

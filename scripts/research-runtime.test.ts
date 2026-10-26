@@ -49,8 +49,8 @@ describe('durable research execution', () => {
     expect(await crypto.subtle.verify('HMAC', key, bytes, new TextEncoder().encode(`${timestamp}.${rawBody}`))).toBe(true);
   });
 
-  it('checks fixed daily schedules every minute and forwards the tick for legacy hourly schedules', () => {
-    for (const time of ['2026-10-23T03:00:00Z', '2026-10-23T03:01:00Z']) {
+  it('forwards minute cron ticks including Cloudflare timestamps with seconds and milliseconds', () => {
+    for (const time of ['2026-10-23T03:00:00Z', '2026-10-23T03:01:00Z', '2026-10-26T09:50:51.409Z']) {
       expect(researchDailyJob(Date.parse(time))).toEqual({ operation: 'daily', scheduledTime: Date.parse(time) });
     }
   });

@@ -852,7 +852,7 @@ describe("research persistence and team isolation", () => {
       else process.env.OPENAI_API_KEY = previousKey;
     }
   }, 30_000);
-  it("dispatches one editorial scan of exactly24hours daily, with model work in durable steps", async () => {
+  it("dispatches one 24-hour editorial scan on unaligned cron ticks without repeating model work", async () => {
     execute({
       queries: [
         { sql: "UPDATE research_settings SET daily_enabled=0" },
@@ -867,22 +867,32 @@ describe("research persistence and team isolation", () => {
     const fetcher = vi.spyOn(globalThis, "fetch");
     const previousKey = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "test-daily-key";
+    const tick = Date.parse("2026-10-26T09:50:51.409Z");
+    const now = vi.spyOn(Date, "now").mockReturnValue(tick);
     try {
-      expect(await processResearchJob({ operation: "daily", scheduledTime: Date.parse("2026-10-23T03:01:00Z") })).toEqual({ dispatched: 0 });
-      expect(await processResearchJob({ operation: "daily" })).toEqual({
+      expect(await processResearchJob({ operation: "daily", scheduledTime: tick })).toEqual({
         dispatched: 1,
       });
-      expect(await processResearchJob({ operation: "daily" })).toEqual({
-        dispatched: 0,
-      });
-      expect(dispatch).toHaveBeenCalledTimes(1);
       expect((await getResearchSnapshot("daily")).runs[0]).toMatchObject({
         mode: "scan",
         days: 1,
         editorial: true,
       });
+      execute({ queries: [{ sql: "UPDATE research_runs SET status='completed' WHERE team_id='daily'" }] });
+      now.mockReturnValue(tick + 60_000);
+      expect(await processResearchJob({ operation: "daily", scheduledTime: Date.now() })).toEqual({
+        dispatched: 0,
+      });
+      now.mockReturnValue(tick + 86_400_000 - 1);
+      expect(await processResearchJob({ operation: "daily", scheduledTime: Date.now() })).toEqual({ dispatched: 0 });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      now.mockReturnValue(tick + 86_400_000 + 500);
+      expect(await processResearchJob({ operation: "daily", scheduledTime: Date.now() })).toEqual({ dispatched: 1 });
+      expect(await processResearchJob({ operation: "daily", scheduledTime: Date.now() })).toEqual({ dispatched: 0 });
+      expect(dispatch).toHaveBeenCalledTimes(2);
       expect(fetcher).not.toHaveBeenCalled();
     } finally {
+      now.mockRestore();
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;
