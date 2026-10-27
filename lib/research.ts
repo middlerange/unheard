@@ -912,7 +912,53 @@ type ResearchRankProgress = {
   coverageWarning: string | null;
 };
 const MAX_RANK_EVIDENCE_BATCHES = 3;
-const MAX_RANK_SCREEN_BATCHES = 3;
+const MAX_RANK_ROUTING_BATCHES = 3;
+
+function researchScreenMetadata(item: typeof research_items.$inferSelect, run: typeof research_runs.$inferSelect) {
+  return {
+    id: item.id, title: item.title, excerpt: item.excerpt.slice(0, 900), publicText: item.content || null,
+    contentProvenance: item.content_provenance, publishedAt: item.published_at, discoveredAt: item.collected_at,
+    signalKind: item.published_at! >= run.created_at - run.days * 86_400_000 ? "fresh" : "evergreen_newly_discovered",
+    sourceId: item.source_id,
+  };
+}
+type ResearchRoutingPlan = {
+  version: string; runId: string; teamId: string; offset: number; candidateIds: string[];
+  decisions: Array<{ itemId: string; route: "direct_evidence" | "metadata_screen" | "unavailable";
+    bodyCharacters: number; contentProvenance: string | null; contentHash: string | null; reason: string }>;
+  screenInput: ReturnType<typeof researchScreenMetadata>[];
+};
+async function researchRoutingPlan(run: typeof research_runs.$inferSelect, ids: string[], rows: Array<typeof research_items.$inferSelect>, offset: number) {
+  const db = await getDb(), id = `research-routing:${run.id}:${offset}`;
+  const read = () => db.select().from(research_cache).where(and(eq(research_cache.id, id), eq(research_cache.team_id, run.team_id))).get();
+  let saved = await read();
+  if (!saved) {
+    const decisions: ResearchRoutingPlan["decisions"] = [];
+    for (const itemId of ids) {
+      const item = rows.find(row => row.id === itemId), bodyCharacters = item?.content?.trim().length || 0;
+      const usable = bodyCharacters >= 500 && (item?.source_id !== "pew-ai-original-research" || hasUsablePewResearchBody(item.content, item.title));
+      decisions.push({ itemId, route: !item ? "unavailable" : usable ? "direct_evidence" : "metadata_screen",
+        bodyCharacters, contentProvenance: item?.content_provenance || null, contentHash: item?.content ? await researchHash(item.content) : null,
+        reason: !item ? "Frozen eligible item is no longer available; no model decision made."
+          : usable ? "Existing usable public body meets the 500-character availability floor; assess its actual evidence and profile fit without a preliminary rejection gate."
+          : "Public body is absent, shorter than the existing availability floor, or publisher chrome; screen supplied metadata before any required hydration.",
+      });
+    }
+    const plan: ResearchRoutingPlan = { version: RESEARCH_PROMPT_VERSION, runId: run.id, teamId: run.team_id, offset,
+      candidateIds: ids, decisions, screenInput: rows.filter(item => decisions.some(decision => decision.itemId === item.id && decision.route === "metadata_screen")).map(item => researchScreenMetadata(item, run)) };
+    const value = JSON.stringify(plan), createdAt = Date.now();
+    await retryResearchStorage(async () => db.insert(research_cache).values({ id, team_id: run.team_id, value, created_at: createdAt }).onConflictDoNothing());
+    saved = await read();
+  }
+  if (!saved) throw new Error("Research routing plan was not saved");
+  const plan = JSON.parse(saved.value) as ResearchRoutingPlan;
+  const screenIds = plan.decisions?.filter(decision => decision.route === "metadata_screen").map(decision => decision.itemId);
+  if (plan.version !== RESEARCH_PROMPT_VERSION || plan.runId !== run.id || plan.teamId !== run.team_id || plan.offset !== offset
+    || JSON.stringify(plan.candidateIds) !== JSON.stringify(ids) || JSON.stringify(plan.decisions?.map(decision => decision.itemId)) !== JSON.stringify(ids)
+    || plan.decisions.some(decision => !["direct_evidence", "metadata_screen", "unavailable"].includes(decision.route))
+    || JSON.stringify(plan.screenInput?.map(item => item.id)) !== JSON.stringify(screenIds)) throw new Error("Saved research routing plan does not match its frozen candidate batch");
+  return plan;
+}
 
 async function rankRun(run: typeof research_runs.$inferSelect) {
   const db = await getDb();
@@ -983,8 +1029,9 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       eligibleCount: Number(coverage?.eligible || 0), undatedCount: Number(coverage?.undated || 0),
       freshCount: Number(coverage?.fresh || 0), evergreenCount: Number(coverage?.evergreen || 0),
       unavailableVideoCount: Number(coverage?.unavailableVideos || 0), screenedCount: 0,
+      routedCount: 0, directEvidenceCount: 0, incompleteScreenedCount: 0, routingUnavailableCount: 0,
       shortlistedCount: 0, evidenceCount: 0, rejectedStories,
-      outcome: candidates.length ? 'Screening eligible material for useful stories.' : 'No dated, readable items in this window. Check source coverage and unavailable transcripts.',
+      outcome: candidates.length ? 'Routing readable public bodies to evidence assessment and incomplete material to screening.' : 'No dated, readable items in this window. Check source coverage and unavailable transcripts.',
     };
     await db.update(research_runs).set({ diagnostics: JSON.stringify(diagnostics) }).where(eq(research_runs.id, run.id));
     progress = { candidateIds: candidates.map(item => item.id), discoveryCutoff, screenOffset: 0, selectedIds: [], nextOffset: 0, diagnostics, coverageWarning: null };
@@ -993,23 +1040,15 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
   // Freeze membership before any evidence hydration changes stored item metadata.
   // Older checkpoints already contain their completed screening selection.
   const candidateIds = progress.candidateIds || [];
-  for (let batches = 0; batches < MAX_RANK_SCREEN_BATCHES && (progress.screenOffset || 0) < candidateIds.length; batches++) {
+  for (let batches = 0; batches < MAX_RANK_ROUTING_BATCHES && (progress.screenOffset || 0) < candidateIds.length; batches++) {
       const ids = candidateIds.slice(progress.screenOffset || 0, (progress.screenOffset || 0) + RESEARCH_SCREEN_BATCH_SIZE);
       const rows = await db.select().from(research_items).where(and(
         eq(research_items.team_id, run.team_id), inArray(research_items.id, ids),
       )).all();
       const candidates = ids.flatMap(id => rows.filter(item => item.id === id));
-      const metadata = candidates.map((item) => ({
-        id: item.id,
-        title: item.title,
-        excerpt: item.excerpt.slice(0, 900),
-        publicText: item.content || null,
-        contentProvenance: item.content_provenance,
-        publishedAt: item.published_at,
-        discoveredAt: item.collected_at,
-        signalKind: item.published_at! >= run.created_at - run.days * 86_400_000 ? "fresh" : "evergreen_newly_discovered",
-        sourceId: item.source_id,
-      }));
+      const routing = await researchRoutingPlan(run, ids, candidates, progress.screenOffset || 0);
+      const metadata = routing.screenInput;
+      const selected = new Set(routing.decisions.filter(decision => decision.route === "direct_evidence").map(decision => decision.itemId));
       if (metadata.length) {
         const screened = validateResearchScreening(
           researchScreeningSchema.parse(await cachedModel(
@@ -1021,17 +1060,23 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
             5000,
           )), metadata.map(item => item.id),
         );
-        const selected = new Set(screened.itemIds);
-        progress.selectedIds.push(...ids.filter(id => selected.has(id)));
+        for (const itemId of screened.itemIds) selected.add(itemId);
         progress.diagnostics.rejectedStories.push(...screened.assessments.filter(item => !item.selected).map(assessment => ({
-          title: candidates.find(item => item.id === assessment.itemId)!.title,
+          title: metadata.find(item => item.id === assessment.itemId)!.title,
           score: null, reason: `Screening: ${assessment.reason}`,
         })));
       }
+      progress.selectedIds.push(...ids.filter(id => selected.has(id)));
+      const unavailable = routing.decisions.filter(decision => decision.route === "unavailable");
+      for (const decision of unavailable) progress.diagnostics.rejectedStories.push({ title: decision.itemId, score: null, reason: decision.reason });
+      progress.diagnostics.routedCount = (progress.diagnostics.routedCount ?? progress.screenOffset ?? 0) + ids.length;
+      progress.diagnostics.directEvidenceCount = (progress.diagnostics.directEvidenceCount || 0) + routing.decisions.filter(decision => decision.route === "direct_evidence").length;
+      progress.diagnostics.incompleteScreenedCount = (progress.diagnostics.incompleteScreenedCount || 0) + metadata.length;
+      progress.diagnostics.routingUnavailableCount = (progress.diagnostics.routingUnavailableCount || 0) + unavailable.length;
       progress.screenOffset = (progress.screenOffset || 0) + ids.length;
-      progress.diagnostics.screenedCount += candidates.length;
+      progress.diagnostics.screenedCount += metadata.length;
       progress.diagnostics.shortlistedCount = progress.selectedIds.length;
-      progress.diagnostics.outcome = `Screened ${progress.diagnostics.screenedCount} of ${candidateIds.length} eligible items.`;
+      progress.diagnostics.outcome = `Routed ${progress.diagnostics.routedCount} of ${candidateIds.length} eligible items: ${progress.diagnostics.directEvidenceCount} directly to evidence; ${progress.diagnostics.screenedCount} total model-screened, including ${progress.diagnostics.incompleteScreenedCount} incomplete-body decisions under this routing policy.`;
       await persistProgress(progress);
   }
   if ((progress.screenOffset || 0) < candidateIds.length) return { ok: true, pending: true };
@@ -1042,6 +1087,9 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       eq(research_items.team_id, run.team_id), inArray(research_items.id, ids),
     )).all();
     const shortlisted = ids.flatMap(id => rows.filter(item => item.id === id));
+    for (const itemId of ids.filter(id => !shortlisted.some(item => item.id === id))) diagnostics.rejectedStories.push({
+      title: itemId, score: null, reason: "Public evidence unavailable: the frozen selected item no longer exists.",
+    });
     const full = await Promise.allSettled(shortlisted.map(async item => {
       if (item.content) return item;
       const source = RESEARCH_SOURCE_SEEDS.find(seed => seed.id === item.source_id)!;

@@ -195,7 +195,23 @@ rather than silently reusing the wrong source set. Omitting `sourceIds` retains
 the all-enabled default. Subsets change only the new run's frozen source list;
 source preferences, schedules, publication dates and first-seen times stay intact.
 
-Research prompt version `research-v13-core-first-screening` asks screening to
+Research version `research-v14-readable-evidence-routing` sends dated eligible
+items with at least 500 characters of available public source text directly to
+evidence assessment. This is the existing body-availability floor, not a finding
+quality score. Article, public-feed, abstract and transcript provenance stays
+explicit; available text does not imply access to a full paper or paid article.
+Only incomplete items use initial screening before hydration. A readable source
+must still pass profile relevance, the 70-point evidence threshold and exact quote
+verification, then writing and editorial review. No source is automatically
+qualified by its publisher or inclusion in a benchmark.
+
+Routing stores each frozen candidate's reason, body hash and provenance before
+any paid screening call, plus the exact incomplete-item model input. Progress
+distinguishes all routed candidates, direct evidence candidates and actual model
+screening decisions. A continuation reuses that plan rather than changing a paid
+input when an excerpt refreshes. Earlier completed checkpoints remain valid.
+
+Incomplete-item screening retains the v13 core-first contract: it must
 inspect the full supplied public text before using the shorter lead excerpt.
 Each response explains the strongest supported core, best-fitting profile and
 bounded reader decision before returning its selection boolean. A concrete

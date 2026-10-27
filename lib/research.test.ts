@@ -537,6 +537,63 @@ describe("research persistence and team isolation", () => {
       error: "test finished",
     });
   }, 20_000);
+  it("routes usable public bodies directly to evidence while screening incomplete sources and retaining negative assessments", async () => {
+    const team = "body-routing", runId = "body-routing-run", now = Date.now();
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
+    const quote = "The team validates the proposed requirements before implementation and keeps the decision context in the repository.";
+    const body = `${quote} ${"The public account describes the method and its practical limitations. ".repeat(12)}`;
+    const items = [
+      ...["article", "public_feed", "abstract", "transcript"].map(provenance => ({ id: `full-${provenance}`, provenance, content: body })),
+      { id: "full-off-profile", provenance: "article", content: `A complete account of telescope optics, with no product-team implication. ${body}` },
+      { id: "full-promotion", provenance: "public_feed", content: `An unsupported promotional promise, without a concrete mechanism. ${body}` },
+      { id: "partial-useful", provenance: "unknown", content: null },
+      { id: "partial-reject", provenance: "unknown", content: "General company update." },
+    ];
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)", params: [team, team, team] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'scan','collecting',7,0,?,'Product practitioners',1,?)", params: [runId, team, now, JSON.stringify([seed.id])] },
+      { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: [`${runId}-step`, runId, seed.id] },
+      ...items.map((item, index) => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance,content_type,transcript_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        params: [item.id, team, seed.id, `${new URL(seed.url).origin}/${item.id}`, item.id, quote, now - (index + 1) * 1000, now, item.content, item.provenance, item.provenance === "transcript" ? "video" : "article", item.provenance === "transcript" ? "available" : "not_applicable"],
+      })),
+    ] });
+    const previousKey = process.env.ANTHROPIC_API_KEY; process.env.ANTHROPIC_API_KEY = "test-routing";
+    const screened: string[] = [], assessed: string[] = [];
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url) === `${new URL(seed.url).origin}/partial-useful`) return new Response(`<article><p>${body}</p></article>`);
+      expect(String(url)).toBe("https://api.anthropic.com/v1/messages");
+      const request = JSON.parse(String(init?.body)), input = JSON.parse(request.messages[0].content);
+      const value = request.output_config.format.schema.properties.assessments
+        ? (screened.push(...input.items.map((item: { id: string }) => item.id)), screeningFixture({ itemIds: ["partial-useful"] }, input.items))
+        : { findings: input.items.map((item: { id: string; contentProvenance: string }) => {
+          assessed.push(item.id);
+          const original = items.find(candidate => candidate.id === item.id)!;
+          expect(item.contentProvenance).toBe(item.id === "partial-useful" ? "article" : original.provenance);
+          return { itemId: item.id, score: item.id === "full-off-profile" ? 20 : item.id === "full-promotion" ? 45 : 85,
+            summary: item.id, whyItMatters: "Review the requirements handoff", contentAngle: "Inspect human approval and persisted context", evidence: quote,
+            limitations: item.id === "full-off-profile" ? "Outside the product-practitioner audience" : item.id === "full-promotion" ? "Unsupported promotion" : "Descriptive method, no outcome proof", familyKey: item.id };
+        }) };
+      return modelResponseFixture({ status: "completed", usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }] });
+    });
+    try {
+      await finishResearchRankJob(runId);
+      expect(screened).toEqual(["partial-useful", "partial-reject"]);
+      expect(assessed).toEqual(items.filter(item => item.id !== "partial-reject").map(item => item.id));
+      const [run, audit] = execute({ queries: [
+        { sql: "SELECT findings_count,diagnostics FROM research_runs WHERE id=?", params: [runId] },
+        { sql: "SELECT value FROM research_cache WHERE id=?", params: [`research-routing:${runId}:0`] },
+      ] }).map((result: { results: any[] }) => result.results[0]);
+      expect(run.findings_count).toBe(5);
+      expect(JSON.parse(run.diagnostics)).toMatchObject({ eligibleCount: 8, routedCount: 8, directEvidenceCount: 6, screenedCount: 2, incompleteScreenedCount: 2, routingUnavailableCount: 0, shortlistedCount: 7, evidenceCount: 7,
+        rejectedStories: expect.arrayContaining([{ title: "full-off-profile", score: 20, reason: "Outside the product-practitioner audience" }, { title: "full-promotion", score: 45, reason: "Unsupported promotion" }]) });
+      expect(JSON.parse(audit.value).decisions.map((decision: { route: string }) => decision.route)).toEqual([...Array(6).fill("direct_evidence"), "metadata_screen", "metadata_screen"]);
+      expect(JSON.parse(audit.value).screenInput.map((item: { id: string }) => item.id)).toEqual(screened);
+      const calls = fetcher.mock.calls.length;
+      await finishResearchRankJob(runId);
+      expect(fetcher).toHaveBeenCalledTimes(calls);
+    } finally { fetcher.mockRestore(); if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = previousKey; }
+  }, 30_000);
   it("accepts a seven-day discovery run, respects publication and discovery windows, and never drafts", async () => {
     const now = Date.now();
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.feedUrl && source.kind === "rss")!;
@@ -583,10 +640,10 @@ describe("research persistence and team isolation", () => {
       await processResearchJob({ operation: "rank", runId: run.id });
       await processResearchJob({ operation: "drafts", runId: run.id });
       const snapshot = await getResearchSnapshot("weekly-window");
-      expect(snapshot.runs.find(row => row.id === run.id)).toMatchObject({ status: "completed", days: 7, editorial: false, diagnostics: { eligibleCount: 2, screenedCount: 2, undatedCount: 1 } });
+      expect(snapshot.runs.find(row => row.id === run.id)).toMatchObject({ status: "completed", days: 7, editorial: false, diagnostics: { eligibleCount: 2, routedCount: 2, directEvidenceCount: 2, screenedCount: 0, undatedCount: 1 } });
       expect(snapshot.findings.map(row => row.itemId).sort()).toEqual([...selected].sort());
       expect(snapshot.drafts).toEqual([]);
-      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(fetcher).toHaveBeenCalledTimes(1);
     } finally {
       fetcher?.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
@@ -1121,7 +1178,7 @@ describe("research persistence and team isolation", () => {
     });
     try {
       await processResearchJob({ operation: "rank", runId: "assessments-run" });
-      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(fetcher).toHaveBeenCalledTimes(1);
       expect(execute({ queries: [{ sql: "SELECT item_id,score FROM research_findings WHERE team_id='assessments' AND run_id='assessments-run'" }] })[0].results)
         .toEqual([{ item_id: "assessed-strong", score: 86 }]);
       expect(execute({ queries: [{ sql: "SELECT score,status,idea_id,created_at,summary FROM research_findings WHERE item_id='assessed-strong' AND team_id='assessments'" }] })[0].results)
@@ -1136,7 +1193,7 @@ describe("research persistence and team isolation", () => {
       });
       expect(await finishResearchDraftJob("assessments-run")).toEqual({ drafted: 1 });
       expect(draftedTitles).toEqual(["A documented signup design tradeoff"]);
-      expect(fetcher).toHaveBeenCalledTimes(4);
+      expect(fetcher).toHaveBeenCalledTimes(3);
     } finally {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
@@ -1162,7 +1219,7 @@ describe("research persistence and team isolation", () => {
       { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES('recall-step','recall-run',?,'completed')", params: [seed.id] },
       ...all.map((item, index) => ({
         sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,'recall',?,?,?,?,?,?,?,'public_feed')",
-        params: [item.id, seed.id, `${new URL(seed.url).origin}/${item.id}`, item.title, item.quote, now - (index + 1) * 60_000, now, `${item.quote} ${"This is a first-party account of one product workflow. ".repeat(20)}`],
+        params: [item.id, seed.id, `${new URL(seed.url).origin}/${item.id}`, item.title, item.quote, now - (index + 1) * 60_000, now, item.id === career.id ? item.quote : `${item.quote} ${"This is a first-party account of one product workflow. ".repeat(20)}`],
       })),
     ] });
     const previousKey = process.env.OPENAI_API_KEY;
@@ -1205,13 +1262,13 @@ describe("research persistence and team isolation", () => {
       await processResearchJob({ operation: "rank", runId: "recall-run" });
       expect(reviewedIds.sort()).toEqual([...useful.map(item => item.id), thinAd.id].sort());
       expect(evidenceBatchSizes).toEqual([6, 6, 6]);
-      expect(fetcher).toHaveBeenCalledTimes(Math.ceil(all.length / RESEARCH_SCREEN_BATCH_SIZE) + 3);
+      expect(fetcher).toHaveBeenCalledTimes(4);
       const snapshot = await getResearchSnapshot("recall");
       expect(snapshot.findings.map(finding => finding.itemId).sort()).toEqual(useful.map(item => item.id).sort());
       expect(snapshot.runs[0]).toMatchObject({
         findingsCount: 17,
         diagnostics: {
-          eligibleCount: 19, screenedCount: 19, shortlistedCount: 18, evidenceCount: 18,
+          eligibleCount: 19, routedCount: 19, directEvidenceCount: 18, screenedCount: 1, shortlistedCount: 18, evidenceCount: 18,
           rejectedStories: expect.arrayContaining([{ title: thinAd.title, score: 42, reason: "Thin promotional claims without a specific supported workflow." }]),
         },
       });
@@ -1234,7 +1291,7 @@ describe("research persistence and team isolation", () => {
       { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES('family-step','family-run',?,'completed')", params: [seed.id] },
       ...["original", "second", "third"].map(id => ({
         sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,'family',?,?,?,?,?,?,?,'public_feed')",
-        params: [id, seed.id, `${new URL(seed.url).origin}/family-${id}`, id, quote, now - 1000, now, `${id}: ${quote} ${"Detailed product workflow evidence. ".repeat(30)}`],
+        params: [id, seed.id, `${new URL(seed.url).origin}/family-${id}`, id, quote, now - 1000, now, id === "original" ? quote : `${id}: ${quote} ${"Detailed product workflow evidence. ".repeat(30)}`],
       })),
       { sql: "INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key,status) VALUES('original-finding','family','family-run','original',?,'Original','https://example.com/original',?,85,'Saved summary','Useful','Saved angle',?,'Attributed',?,'shared-scaffold','dismissed')", params: [seed.id, now - 1000, quote, now] },
       { sql: "INSERT INTO research_drafts(id,team_id,run_id,finding_id,content,status,revision,slack_channel_id,slack_thread_ts,created_at,updated_at) VALUES('family-existing-review','family','family-run','original-finding','{\"targets\":[]}','pending',3,'CEXISTING','123.456',?,?)", params: [now, now] },
@@ -1247,7 +1304,7 @@ describe("research persistence and team isolation", () => {
       const request = JSON.parse(String(init?.body));
       const input = JSON.parse(request.input ?? request.messages[0].content);
       const value = (request.text?.format.schema ?? request.output_config.format.schema).properties.assessments
-        ? { itemIds: ["second", "third"] }
+        ? { itemIds: [] }
         : { findings: input.items.map((item: { id: string }) => ({ itemId: item.id, score: 90, summary: "New coverage", whyItMatters: "Useful", contentAngle: "Same launch", evidence: quote, limitations: "Attributed", familyKey: "shared-scaffold" })) };
       return modelResponseFixture({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
     });
@@ -1387,15 +1444,15 @@ describe("research persistence and team isolation", () => {
       });
     try {
       await finishResearchRankJob("ranking-run");
-      expect(screenedIds).toHaveLength(81);
-      expect(screenedIds).toContain("rank-item-80");
+      expect(screenedIds).toHaveLength(80);
+      expect(screenedIds).not.toContain("rank-item-80");
       expect(
         (await getResearchSnapshot("a")).findings.some(
           (finding) => finding.itemId === "rank-item-80",
         ),
       ).toBe(true);
       expect((await getResearchSnapshot("a")).runs.find(run => run.id === "ranking-run")?.diagnostics).toMatchObject({
-        eligibleCount: 81, screenedCount: 81, shortlistedCount: 1, evidenceCount: 1,
+        eligibleCount: 81, routedCount: 81, directEvidenceCount: 1, screenedCount: 80, shortlistedCount: 1, evidenceCount: 1,
         outcome: "Reviewed public evidence for 1 shortlisted stories.",
       });
       expect(
@@ -1406,7 +1463,7 @@ describe("research persistence and team isolation", () => {
             },
           ],
         })[0].results,
-      ).toEqual([{ input_tokens: 20 * (Math.ceil(81 / RESEARCH_SCREEN_BATCH_SIZE) + 1) }]);
+      ).toEqual([{ input_tokens: 20 * (Math.ceil(80 / RESEARCH_SCREEN_BATCH_SIZE) + 1) }]);
       execute({
         queries: [
           {
@@ -1418,7 +1475,7 @@ describe("research persistence and team isolation", () => {
         ],
       });
       await finishResearchRankJob("ranking-run");
-      expect(fetcher).toHaveBeenCalledTimes(Math.ceil(81 / RESEARCH_SCREEN_BATCH_SIZE) + 1);
+      expect(fetcher).toHaveBeenCalledTimes(Math.ceil(80 / RESEARCH_SCREEN_BATCH_SIZE) + 1);
       expect(
         execute({
           queries: [
@@ -1427,7 +1484,7 @@ describe("research persistence and team isolation", () => {
             },
           ],
         })[0].results,
-      ).toEqual([{ cache_hits: Math.ceil(81 / RESEARCH_SCREEN_BATCH_SIZE) + 1 }]);
+      ).toEqual([{ cache_hits: Math.ceil(80 / RESEARCH_SCREEN_BATCH_SIZE) + 1 }]);
     } finally {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
@@ -1498,7 +1555,7 @@ describe("research persistence and team isolation", () => {
       expect(batchSizes).toEqual([6, 6, 6]);
       const [partial] = execute({ queries: [{ sql: "SELECT status,completed_at,findings_count,diagnostics FROM research_runs WHERE id='resume-run'" }] })[0].results;
       expect(partial).toMatchObject({ status: "ranking", completed_at: null, findings_count: 17 });
-      expect(JSON.parse(partial.diagnostics)).toMatchObject({ screenedCount: 25, shortlistedCount: 25, evidenceCount: 18, rejectedStories: [{ title: items[5].title, score: 42 }] });
+      expect(JSON.parse(partial.diagnostics)).toMatchObject({ routedCount: 25, directEvidenceCount: 24, screenedCount: 1, shortlistedCount: 25, evidenceCount: 18, rejectedStories: [{ title: items[5].title, score: 42 }] });
       const [checkpoint] = execute({ queries: [{ sql: "SELECT value FROM research_cache WHERE id='rank-progress:resume-run'" }] })[0].results;
       expect(JSON.parse(checkpoint.value)).toMatchObject({ selectedIds: items.map(item => item.id), nextOffset: 18 });
       execute({ queries: [{
@@ -1506,13 +1563,13 @@ describe("research persistence and team isolation", () => {
         params: [seed.id, `${new URL(seed.url).origin}/new-arrival`, now - 1000, now, content(0)],
       }] });
       expect(await processResearchJob({ operation: "rank", runId: "resume-run" })).toEqual({ ok: true, pending: false });
-      expect(screened).toBe(Math.ceil(25 / RESEARCH_SCREEN_BATCH_SIZE));
+      expect(screened).toBe(1);
       expect(batchSizes).toEqual([6, 6, 6, 6, 1]);
       expect(reviewedIds).toEqual(items.map(item => item.id));
       const [finished] = execute({ queries: [{ sql: "SELECT status,completed_at,findings_count,diagnostics FROM research_runs WHERE id='resume-run'" }] })[0].results;
       expect(finished).toMatchObject({ status: "drafting", findings_count: 24 });
       expect(finished.completed_at).toBeGreaterThanOrEqual(now);
-      expect(JSON.parse(finished.diagnostics)).toMatchObject({ eligibleCount: 25, screenedCount: 25, shortlistedCount: 25, evidenceCount: 25, rejectedStories: [{ title: items[5].title, score: 42 }] });
+      expect(JSON.parse(finished.diagnostics)).toMatchObject({ eligibleCount: 25, routedCount: 25, directEvidenceCount: 24, screenedCount: 1, shortlistedCount: 25, evidenceCount: 25, rejectedStories: [{ title: items[5].title, score: 42 }] });
       const calls = fetcher.mock.calls.length;
       expect(await processResearchJob({ operation: "rank", runId: "resume-run" })).toEqual({ ok: true, pending: false });
       expect(fetcher).toHaveBeenCalledTimes(calls);
@@ -1852,7 +1909,7 @@ describe("research persistence and team isolation", () => {
         { sql: "SELECT diagnostics FROM research_runs WHERE id='signal-lanes-run'" },
         { sql: "SELECT published_at FROM research_findings WHERE team_id='signal-lanes' AND item_id='lane-new-evergreen'" },
       ] }).map((result: { results: unknown[] }) => result.results[0]);
-      expect(JSON.parse(run.diagnostics)).toMatchObject({ eligibleCount: 2, freshCount: 1, evergreenCount: 1, undatedCount: 1, screenedCount: 2, evidenceCount: 2 });
+      expect(JSON.parse(run.diagnostics)).toMatchObject({ eligibleCount: 2, freshCount: 1, evergreenCount: 1, undatedCount: 1, routedCount: 2, directEvidenceCount: 2, screenedCount: 0, evidenceCount: 2 });
       expect(evergreen.published_at).toBe(now - 180 * 86400000);
     } finally {
       fetcher.mockRestore();
@@ -1863,6 +1920,37 @@ describe("research persistence and team isolation", () => {
     }
   }, 30_000);
 
+  it.each([false, true])("preserves legacy screen counts and explicitly reports a missing selected body: %s", async sourceMissing => {
+    const team = `legacy-routing-${sourceMissing}`, runId = `${team}-run`, now = Date.now();
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
+    const quote = "The team reviews the proposed requirements before implementation and persists decision context.";
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)", params: [team, team, team] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'scan','ranking',7,0,?,'Product practitioners',1,?)", params: [runId, team, now, JSON.stringify([seed.id])] },
+      { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: [`${runId}-step`, runId, seed.id] },
+      ...[...(sourceMissing ? [] : ["legacy-selected"]), "new-incomplete"].map(id => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content) VALUES(?,?,?,?,?,?,?,?,?)",
+        params: [`${team}-${id}`, team, seed.id, `${new URL(seed.url).origin}/${team}-${id}`, id, quote, now - 1000, now, id === "legacy-selected" ? quote.repeat(8) : null],
+      })),
+      { sql: "INSERT INTO research_cache(id,team_id,value,created_at) VALUES(?,?,?,?)", params: [`rank-progress:${runId}`, team, JSON.stringify({ candidateIds: [`${team}-legacy-selected`, `${team}-new-incomplete`], discoveryCutoff: now, screenOffset: 1, selectedIds: [`${team}-legacy-selected`], nextOffset: 0, diagnostics: { eligibleCount: 2, screenedCount: 1, shortlistedCount: 1, evidenceCount: 0, rejectedStories: [] }, coverageWarning: null }), now] },
+    ] });
+    const previousKey = process.env.ANTHROPIC_API_KEY; process.env.ANTHROPIC_API_KEY = "test-legacy-routing";
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const request = JSON.parse(String(init?.body)), input = JSON.parse(request.messages[0].content);
+      const value = request.output_config.format.schema.properties.assessments ? screeningFixture({ itemIds: [] }, input.items)
+        : { findings: [{ itemId: `${team}-legacy-selected`, score: 85, summary: "An attributed requirements method", evidence: quote, contentAngle: "Review requirements before implementation", whyItMatters: "A product-team handoff", limitations: "No outcome proof", familyKey: `${team}-method` }] };
+      return modelResponseFixture({ status: "completed", usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }] });
+    });
+    try {
+      await finishResearchRankJob(runId);
+      const [run] = execute({ queries: [{ sql: "SELECT findings_count,diagnostics FROM research_runs WHERE id=?", params: [runId] }] })[0].results;
+      const diagnostics = JSON.parse(run.diagnostics);
+      expect(diagnostics).toMatchObject({ routedCount: 2, directEvidenceCount: 0, screenedCount: 2, incompleteScreenedCount: 1, shortlistedCount: 1, evidenceCount: sourceMissing ? 0 : 1 });
+      expect(run.findings_count).toBe(sourceMissing ? 0 : 1);
+      expect(fetcher).toHaveBeenCalledTimes(sourceMissing ? 1 : 2);
+      if (sourceMissing) expect(diagnostics.rejectedStories).toContainEqual({ title: `${team}-legacy-selected`, score: null, reason: "Public evidence unavailable: the frozen selected item no longer exists." });
+    } finally { fetcher.mockRestore(); if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = previousKey; }
+  }, 20_000);
   it("screens every eligible item beyond one thousand using a frozen, resumable queue", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
     const now = Date.now();
@@ -1870,7 +1958,7 @@ describe("research persistence and team isolation", () => {
     const items = Array.from({ length: 1005 }, (_, index) => ({ id: `uncapped-item-${index}`, title: `Workflow ${index}` }));
     const insertItem = (id: string, title: string, at: number) => ({
       sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content) VALUES(?,'uncapped-screen',?,?,?,?,?,?,?)",
-      params: [id, seed.id, `${new URL(seed.url).origin}/${id}`, title, quote, at, now, `${quote} ${"Detailed implementation evidence. ".repeat(20)}`],
+      params: [id, seed.id, `${new URL(seed.url).origin}/${id}`, title, quote, at, now, quote],
     });
     execute({ queries: [
       { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('uncapped-screen','Uncapped','uncapped-screen',0,0)" },
@@ -1925,8 +2013,12 @@ describe("research persistence and team isolation", () => {
     }
   }, 120_000);
 
-  it.each(['committed reply lost', 'checkpoint outage'])('preserves paid screening and absolute progress through storage failure: %s', async mode => {
-    const teamId = mode === 'committed reply lost' ? 'storage-committed' : 'storage-exhausted';
+  it.each([
+    { mode: 'committed reply lost', route: 'screen', sourceDisappears: false }, { mode: 'checkpoint outage', route: 'screen', sourceDisappears: false },
+    { mode: 'committed reply lost', route: 'evidence', sourceDisappears: false }, { mode: 'checkpoint outage', route: 'evidence', sourceDisappears: false },
+    { mode: 'checkpoint outage', route: 'screen', sourceDisappears: true },
+  ])('preserves paid $route assessment through $mode (missing source: $sourceDisappears)', async ({ mode, route, sourceDisappears }) => {
+    const teamId = `${mode === 'committed reply lost' ? 'storage-committed' : 'storage-exhausted'}-${route}${sourceDisappears ? '-missing' : ''}`;
     const runId = `${teamId}-run`;
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === 'rss' && source.feedUrl)!;
     const now = Date.now();
@@ -1934,14 +2026,15 @@ describe("research persistence and team isolation", () => {
       { sql: 'INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)', params: [teamId, teamId, teamId] },
       { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'scan','collecting',1,0,?,'Product managers',1,?)", params: [runId, teamId, now, JSON.stringify([seed.id])] },
       { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: [`${teamId}-step`, runId, seed.id] },
-      { sql: 'INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content) VALUES(?,?,?,?,?,?,?,?,?)', params: [`${teamId}-item`, teamId, seed.id, `${new URL(seed.url).origin}/${teamId}`, 'A general update', 'No concrete mechanism.', now - 1000, now, 'No concrete mechanism. '.repeat(30)] },
+      { sql: 'INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content) VALUES(?,?,?,?,?,?,?,?,?)', params: [`${teamId}-item`, teamId, seed.id, `${new URL(seed.url).origin}/${teamId}`, 'A general update', 'No concrete mechanism.', now - 1000, now, 'No concrete mechanism. '.repeat(route === 'evidence' ? 30 : 1)] },
     ] });
     const previousKey = process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_API_KEY = 'test-storage';
     const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
       const request = JSON.parse(String(init?.body));
       const input = JSON.parse(request.input ?? request.messages[0].content);
-      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify(screeningFixture({ itemIds: [] }, input.items)) }] }] });
+      const value = route === 'screen' ? screeningFixture({ itemIds: [] }, input.items) : { findings: [{ itemId: `${teamId}-item`, score: 20, summary: 'Generic promotion', evidence: '', contentAngle: 'No supported method', whyItMatters: 'Off-profile', limitations: 'No concrete mechanism', familyKey: 'generic-update' }] };
+      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify(value) }] }] });
     });
     let cacheFailures = 0;
     const cacheWrites: unknown[][] = [];
@@ -1952,7 +2045,7 @@ describe("research persistence and team isolation", () => {
         cacheWrites.push([...cache.params]);
         if (cacheFailures++ === 0) throw new Error('Network connection lost.');
       }
-      const checkpoint = queries.find(query => query.params.includes(`rank-progress:${runId}`) && query.params.some(param => typeof param === 'string' && param.includes('"screenOffset":1')));
+      const checkpoint = queries.find(query => query.params.includes(`rank-progress:${runId}`) && query.params.some(param => typeof param === 'string' && param.includes(route === 'screen' ? '"screenOffset":1' : '"nextOffset":1')));
       if (checkpoint && phase === (mode === 'committed reply lost' ? 'after' : 'before')) {
         expect(queries).toHaveLength(2);
         expect(queries[1].sql.toLowerCase()).toContain('update');
@@ -1965,8 +2058,10 @@ describe("research persistence and team isolation", () => {
         await expect(processResearchJob({ operation: 'rank', runId })).rejects.toThrow('Network connection lost');
         expect(checkpointWrites).toHaveLength(3);
         const checkpoint = execute({ queries: [{ sql: 'SELECT value FROM research_cache WHERE id=?', params: [`rank-progress:${runId}`] }] })[0].results[0];
-        expect(JSON.parse(checkpoint.value).screenOffset).toBe(0);
-        expect(execute({ queries: [{ sql: "SELECT COUNT(*) count FROM research_cache WHERE team_id=? AND json_type(value,'$.assessments')='array'", params: [teamId] }] })[0].results[0].count).toBe(1);
+        expect(JSON.parse(checkpoint.value)[route === 'screen' ? 'screenOffset' : 'nextOffset']).toBe(0);
+        expect(execute({ queries: [{ sql: `SELECT COUNT(*) count FROM research_cache WHERE team_id=? AND json_type(value,'$.${route === 'screen' ? 'assessments' : 'findings'}')='array'`, params: [teamId] }] })[0].results[0].count).toBe(1);
+        if (sourceDisappears) execute({ queries: [{ sql: 'DELETE FROM research_items WHERE team_id=?', params: [teamId] }] });
+        else if (route === 'screen') execute({ queries: [{ sql: 'UPDATE research_items SET excerpt=? WHERE team_id=?', params: ['Refreshed metadata must not change the already-paid frozen screening input.', teamId] }] });
         storageFault = undefined;
       }
       expect(await processResearchJob({ operation: 'rank', runId })).toEqual({ ok: true, pending: false });
@@ -1976,8 +2071,8 @@ describe("research persistence and team isolation", () => {
         { sql: 'SELECT diagnostics,input_tokens,output_tokens,cache_hits FROM research_runs WHERE id=?', params: [runId] },
         { sql: 'SELECT COUNT(*) count FROM research_usage WHERE run_id=?', params: [runId] },
       ] }).map((result: { results: unknown[] }) => result.results[0]);
-      expect(JSON.parse(checkpoint.value)).toMatchObject({ screenOffset: 1, diagnostics: { screenedCount: 1, rejectedStories: [{ title: 'A general update' }] } });
-      expect(JSON.parse(run.diagnostics).screenedCount).toBe(1);
+      expect(JSON.parse(checkpoint.value)).toMatchObject({ screenOffset: 1, diagnostics: { routedCount: 1, directEvidenceCount: route === 'evidence' ? 1 : 0, screenedCount: route === 'screen' ? 1 : 0, evidenceCount: route === 'evidence' ? 1 : 0, rejectedStories: [{ title: 'A general update' }] } });
+      expect(JSON.parse(run.diagnostics).screenedCount).toBe(route === 'screen' ? 1 : 0);
       expect(run).toMatchObject({ input_tokens: 20, output_tokens: 10, cache_hits: mode === 'checkpoint outage' ? 1 : 0 });
       expect(usage.count).toBe(1);
       expect(checkpointWrites.slice(0, mode === 'checkpoint outage' ? 3 : 2).every(params => JSON.stringify(params) === JSON.stringify(checkpointWrites[0]))).toBe(true);
@@ -2070,7 +2165,7 @@ describe("research persistence and team isolation", () => {
         expect(archives.count).toBe(attempt);
       }
       expect(await processResearchJob({ operation: "rank", runId: "coverage-boundary-run" })).toEqual({ ok: true, pending: false });
-      expect(screenCalls).toBe(1);
+      expect(screenCalls).toBe(0);
       expect(evidenceCalls).toBe(3);
       expect(execute({ queries: [{ sql: "SELECT findings_count FROM research_runs WHERE id='coverage-boundary-run'" }] })[0].results).toEqual([{ findings_count: 2 }]);
     } finally {

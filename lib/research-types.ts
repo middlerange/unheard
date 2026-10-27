@@ -32,6 +32,10 @@ export type ResearchRunDiagnostics = {
   undatedCount?: number;
   unavailableVideoCount?: number;
   screenedCount?: number;
+  routedCount?: number;
+  directEvidenceCount?: number;
+  incompleteScreenedCount?: number;
+  routingUnavailableCount?: number;
   shortlistedCount?: number;
   evidenceCount?: number;
   draftCandidatesCount?: number;
