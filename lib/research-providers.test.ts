@@ -17,7 +17,7 @@ it.each(['claude-haiku-5-5', 'claude-haiku-5-5-20261021'])('checks metadata with
   const result = await checkResearchProviders(fetcher);
   expect(fetcher).toHaveBeenCalledTimes(1);
   expect(fetcher).toHaveBeenCalledWith('https://api.anthropic.com/v1/models/claude-haiku-5-5', expect.objectContaining({
-    method: 'GET', redirect: 'error', signal: expect.any(AbortSignal),
+    method: 'GET', redirect: 'manual', signal: expect.any(AbortSignal),
     headers: { 'x-api-key': secret, 'anthropic-version': '2026-10-21', Accept: 'application/json' },
   }));
   expect(fetcher.mock.calls[0]).toHaveLength(2);
@@ -75,4 +75,17 @@ it('authenticates before provider access and keeps the successful response uncac
   expect(response.headers.get('cache-control')).toBe('no-store');
   expect((await response.json()).research.status).toBe('metadata_accessible');
   expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+it('reports redirects without forwarding the bound key to another destination', async () => {
+  process.env.ANTHROPIC_API_KEY = secret;
+  const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+    if (init?.redirect !== 'manual') throw new TypeError('Workers supports only follow or manual');
+    return new Response(null, { status: 302, headers: { location: 'https://other.example/' + secret } });
+  });
+  const result = await checkResearchProviders(fetcher);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(result.research).toMatchObject({ status: 'rejected', httpStatus: 302, bodyKind: 'empty' });
+  expect(JSON.stringify(result)).not.toContain(secret);
+  expect(JSON.stringify(result)).not.toContain('other.example');
 });

@@ -13,7 +13,7 @@ export async function checkResearchProviders(fetcher: typeof fetch = fetch) {
   if (!key) return { research: { ...base, status: 'unconfigured' }, writing };
   try {
     const response = await fetcher(`https://api.anthropic.com/v1/models/${RESEARCH_MODEL}`, {
-      method: 'GET', redirect: 'error', signal: AbortSignal.timeout(10_000),
+      method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(10_000),
       headers: { 'x-api-key': key, 'anthropic-version': '2026-10-21', Accept: 'application/json' },
     });
     if (!response.ok) {
