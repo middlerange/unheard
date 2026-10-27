@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "./db/client";
 import {
@@ -26,6 +26,7 @@ import { SLACK_TEST_PROMPT } from "./slack-test-content";
 import type { ResearchDraftContent, ResearchRunDiagnostics } from "./research-types";
 import { researchNoveltyContext, type ResearchNoveltyContext } from "./research-novelty";
 import { retryResearchStorage } from "./research-storage";
+import { getDraftResearchFindings, getRunResearchFindings, saveResearchFindingSnapshot } from "./research-finding-snapshots";
 
 import {
   RESEARCH_WRITING_VERSION, RESEARCH_WRITING_MODEL, RESEARCH_DRAFT_INSTRUCTIONS,
@@ -348,8 +349,15 @@ async function generateDraft(
     )
       throw new ResearchDraftValidationError("Full source evidence is unavailable for this draft");
     const sourceContent = item.content.slice(0, 14000);
-    const noveltyContext = researchNoveltyContext(priorDrafts, teamChannels, {
-      findingId: finding.id, familyKey: finding.family_key, title: finding.title, url: finding.url,
+    const originals = await getDraftResearchFindings(run.team_id, priorDrafts);
+    const originalPriorDrafts = priorDrafts.map(draft => {
+      const original = originals.get(`${draft.runId}:${draft.findingId}`);
+      return original ? { ...draft, familyKey: original.family_key, title: original.title, url: original.url,
+        publishedAt: original.published_at, summary: original.summary, contentAngle: original.content_angle,
+        evidence: original.evidence } : draft;
+    });
+    const noveltyContext = researchNoveltyContext(originalPriorDrafts, teamChannels, {
+      runId: run.id, findingId: finding.id, familyKey: finding.family_key, title: finding.title, url: finding.url,
       summary: finding.summary, contentAngle: finding.content_angle, evidence: finding.evidence, content: sourceContent,
     }, destinations);
     const bundled = sourceBundle ? JSON.parse(sourceBundle.value) as { items: Array<{ itemId: string; evidence: string }> } : null;
@@ -466,16 +474,7 @@ export async function rewriteResearchDraftContent(
         ),
       )
       .get(),
-    db
-      .select()
-      .from(research_findings)
-      .where(
-        and(
-          eq(research_findings.id, draft.finding_id),
-          eq(research_findings.team_id, teamId),
-        ),
-      )
-      .get(),
+    getRunResearchFindings(teamId, draft.run_id, [draft.finding_id]).then(rows => rows[0]),
   ]);
   if (!run || !finding) throw new Error("Draft evidence not found");
   const current = JSON.parse(draft.content) as ResearchDraftContent;
@@ -608,30 +607,15 @@ export async function processResearchDraftJob(runId: string) {
     eq(research_cache.id, progressId), eq(research_cache.team_id, run.team_id),
   )).get();
   let progress = saved ? JSON.parse(saved.value) as ResearchDraftProgress : undefined;
-  const candidates = progress ? [] : await db
-    .select()
-    .from(research_findings)
-    .where(
-      and(
-        eq(research_findings.team_id, run.team_id),
-        eq(research_findings.run_id, run.id),
-        inArray(
-          research_findings.source_id,
-          JSON.parse(run.source_ids) as string[],
-        ),
-        gte(research_findings.score, RESEARCH_POST_MIN_SCORE),
-        lte(research_findings.published_at, run.created_at),
-        ne(research_findings.status, "dismissed"),
-      ),
-    )
-    .orderBy(
-      desc(research_findings.score),
-      desc(research_findings.published_at),
-    )
-    .all();
+  const sourceIds = new Set(JSON.parse(run.source_ids) as string[]);
+  const candidates = progress ? [] : (await getRunResearchFindings(run.team_id, run.id)).filter(finding =>
+    sourceIds.has(finding.source_id) && finding.score >= RESEARCH_POST_MIN_SCORE
+    && finding.published_at <= run.created_at && finding.status !== "dismissed");
+  for (const finding of candidates) await saveResearchFindingSnapshot(finding);
   const previous = await db
     .select({
       runId: research_drafts.run_id,
+      findingId: research_drafts.finding_id,
       family: research_findings.family_key,
     })
     .from(research_drafts)
@@ -644,7 +628,8 @@ export async function processResearchDraftJob(runId: string) {
     )
     .where(eq(research_drafts.team_id, run.team_id))
     .all();
-  const families = new Set(previous.map((entry) => entry.family));
+  const originals = await getDraftResearchFindings(run.team_id, previous);
+  const families = new Set(previous.map(entry => originals.get(`${entry.runId}:${entry.findingId}`)?.family_key || entry.family));
   let drafted = previous.filter((entry) => entry.runId === run.id).length;
   const diagnostics = JSON.parse(run.diagnostics) as ResearchRunDiagnostics;
   progress ||= {
@@ -668,9 +653,7 @@ export async function processResearchDraftJob(runId: string) {
   }
   await checkpointDrafts();
   const batchIds = progress.selectedIds.slice(progress.nextOffset, progress.nextOffset + RESEARCH_DRAFT_BATCH_SIZE);
-  const rows = batchIds.length ? await db.select().from(research_findings).where(and(
-    eq(research_findings.team_id, run.team_id), inArray(research_findings.id, batchIds),
-  )).all() : [];
+  const rows = batchIds.length ? await getRunResearchFindings(run.team_id, run.id, batchIds) : [];
   for (const findingId of batchIds) {
     const finding = rows.find(row => row.id === findingId);
     if (!finding || families.has(finding.family_key) || finding.status === "dismissed") {

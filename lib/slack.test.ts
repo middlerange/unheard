@@ -53,6 +53,7 @@ import {
 import { targetsPendingPublication } from "./publisher";
 import { createSlackTestReview } from "./slack-test-review";
 import { assertNotSlackManagedPost } from "./slack-post-lock";
+import { saveResearchFindingSnapshot } from "./research-finding-snapshots";
 
 const folder = mkdtempSync(join(tmpdir(), "content-hub-slack-")),
   path = join(folder, "db.sqlite");
@@ -280,6 +281,29 @@ describe("Slack signing and safe integration configuration", () => {
   });
 });
 describe("Slack review threads and approval safety", () => {
+  it("delivers the original run's qualification after another run requalifies the source", async () => {
+    draft("historical-review");
+    const original = await getResearchDraft("a", "historical-review");
+    await saveResearchFindingSnapshot(row("SELECT * FROM research_findings WHERE id='historical-review'"));
+    run("INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp)VALUES('rescan-review','a','scan','completed',1,2,'Product leaders')");
+    run("UPDATE research_findings SET run_id='rescan-review',title='Changed later title',url='https://example.com/later',score=75,why_it_matters='Later qualification implication',evidence='Later source claim replaces the original assessment' WHERE id='historical-review'");
+    const historicalFetch = vi.fn(async (_url?: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(JSON.stringify({ ok: true, ts: "124.456" }), { headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", historicalFetch);
+    const job = await queueResearchDraftForSlack("historical-review");
+    await expect(processSlackJob(job.jobId)).resolves.toEqual({ status: "completed" });
+    const packet = JSON.stringify(JSON.parse(String(historicalFetch.mock.calls[0]?.[1]?.body)));
+    expect(packet).toContain("Strong practitioner lesson");
+    expect(packet).toContain("Fits product leaders");
+    expect(packet).toContain("Exact source statement supports this claim");
+    expect(packet).not.toContain("Later qualification implication");
+    expect(packet).not.toContain("Later source claim");
+    expect(packet).not.toContain("Changed later title");
+    const saved = await getResearchDraft("a", "historical-review");
+    expect(saved).toMatchObject({ content: original!.content, revision: original!.revision, status: "pending" });
+    expect(row("SELECT state FROM posts WHERE id='research-historical-review'").state).toBe("awaiting_approval");
+    expect(state.published).not.toHaveBeenCalled();
+  });
   it("delivers an exact destination preview and never publishes when sending", async () => {
     draft("initial");
     vi.stubGlobal("fetch", fetcher);

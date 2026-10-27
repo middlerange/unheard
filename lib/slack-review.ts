@@ -13,6 +13,7 @@ import { getSlackCredentials, getSlackIntegration, slackApi } from "./slack";
 import type { ResearchDraftContent } from "./research-types";
 import { assertResearchIdentityTargets } from "./research-identity";
 import { RESEARCH_TEXT_PLATFORMS } from "./research-profiles";
+import { getRunResearchFindings } from "./research-finding-snapshots";
 
 declare global {
   var __contentHubSlackWorkflow__:
@@ -656,18 +657,7 @@ async function deliverReview(draft: Draft) {
     throw new Error(
       "Post already started publishing; refusing to request another approval",
     );
-  const finding = (
-    await db
-      .select()
-      .from(schema.research_findings)
-      .where(
-        and(
-          eq(schema.research_findings.id, draft.finding_id),
-          eq(schema.research_findings.team_id, draft.team_id),
-        ),
-      )
-      .limit(1)
-  )[0];
+  const [finding] = await getRunResearchFindings(draft.team_id, draft.run_id, [draft.finding_id]);
   if (!finding) throw new Error("Source finding not found");
   if (post.state === "failed")
     await db

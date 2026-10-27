@@ -8,6 +8,7 @@ import { closeSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { drizzle } from "drizzle-orm/d1";
+import { eq } from "drizzle-orm";
 import * as schema from "./schema";
 import {
   assertPublicResearchUrl,
@@ -40,6 +41,7 @@ import { createSlackTestReview } from "./slack-test-review";
 import { SLACK_TEST_EVIDENCE, SLACK_TEST_PROMPT } from "./slack-test-content";
 import type { ResearchSourceSeed } from "./research-types";
 import { RESEARCH_SOURCE_SEEDS } from "./research-sources";
+import { getRunResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot } from "./research-finding-snapshots";
 function editorialFixture(content: string) {
   return {
     writingStyle: "b2b-practitioner-teardown", styleRationale: "The source describes a concrete practitioner workflow to inspect.",
@@ -344,6 +346,102 @@ describe("research persistence and team isolation", () => {
     rmSync(folder, { recursive: true, force: true });
     globalThis.__contentHubResearchWorkflow__ = undefined;
   });
+  it("preserves each run's qualification through a shared-item rescan and resumed writing", async () => {
+    const team = "run-finding-snapshots", oldRun = "qualification-old", newRun = "qualification-new";
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.enabled && source.kind === "rss" && source.feedUrl)!;
+    const now = Date.now(), oldQuote = "The original source explains why teams validate requirements before implementation.";
+    const newQuote = "The updated source describes explicit human approval gates before implementing the proposed work.";
+    const findingId = await researchHash(`${team}:shared-qualification-item`);
+    const sourceUrl = `${new URL(seed.url).origin}/shared-qualification`;
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)", params: [team, team, team] },
+      { sql: "INSERT INTO channels(id,team_id,name,platform,group_name,research_enabled,system_prompt,created_at) VALUES('snapshot-li',?,'Product reasoning','linkedin','custom',1,'Explain concrete product team decisions with attributed source evidence',0)", params: [team] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'scan','failed',1,1,?,'Product practitioners',1,?)", params: [oldRun, team, now, JSON.stringify([seed.id])] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'scan','collecting',7,0,?,'Product practitioners',1,?)", params: [newRun, team, now + 1, JSON.stringify([seed.id])] },
+      { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES('snapshot-collection',?,?,'completed')", params: [newRun, seed.id] },
+      ...["shared-qualification-item", "legacy-peer-a", "legacy-peer-b"].map(id => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,'article')",
+        params: [id, team, id === "shared-qualification-item" ? seed.id : "legacy-source", `${sourceUrl}/${id}`, "Updated source title", newQuote, now - 1000, now, `${oldQuote} ${newQuote} ${"Specific implementation detail and limitations. ".repeat(25)}`],
+      })),
+      ...[findingId, "legacy-finding-a", "legacy-finding-b"].map((id, index) => ({
+        sql: "INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key,status) VALUES(?,?,?,?,?,'Original source title',?, ?,85,'Original summary','Original implication','Original angle',?,'Original limitations',?,?,'new')",
+        params: [id, team, oldRun, ["shared-qualification-item", "legacy-peer-a", "legacy-peer-b"][index], index ? "legacy-source" : seed.id, sourceUrl, now - 2000, oldQuote, now, `old-family-${index}`],
+      })),
+      { sql: "INSERT INTO research_cache(id,team_id,value,created_at) VALUES(?,?,?,?)", params: [`draft-progress:${oldRun}`, team, JSON.stringify({ candidateIds: [findingId], selectedIds: [findingId], nextOffset: 0, validationSkips: 0, rejectedStories: [], deliveryIds: [], deliveryOffset: 0 }), now] },
+    ] });
+    await saveResearchFindingSnapshot((await getRunResearchFindings(team, oldRun, ["legacy-finding-a"]))[0]);
+    const oldGlobals = execute({ queries: [{ sql: "SELECT * FROM research_findings WHERE id=?", params: [findingId] }] })[0].results[0];
+    const previousOpenAI = process.env.OPENAI_API_KEY, previousAnthropic = process.env.ANTHROPIC_API_KEY;
+    process.env.OPENAI_API_KEY = "test-snapshot", process.env.ANTHROPIC_API_KEY = "test-snapshot";
+    let writingCalls = 0;
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const input = JSON.parse(request.input ?? request.messages[0].content);
+      let value: unknown;
+      if (input.items) value = (request.output_config.format.schema).properties.assessments
+        ? screeningFixture({ itemIds: ["shared-qualification-item"] }, input.items)
+        : { findings: [{ itemId: "shared-qualification-item", score: 88, summary: "Updated summary", whyItMatters: "Updated implication", contentAngle: "Updated angle", evidence: newQuote, limitations: "Updated limitations", familyKey: "new-family" }] };
+      else {
+        writingCalls++;
+        if (writingCalls === 1) {
+          expect(input.source).toMatchObject({ title: "Original source title", url: sourceUrl, publishedAt: new Date(now - 2000).toISOString() });
+          expect(input.finding).toMatchObject({ summary: "Original summary", contentAngle: "Original angle", evidence: oldQuote });
+        } else {
+          expect(input.source).toMatchObject({ title: "Drifted later title", url: "https://example.com/new-attribution" });
+          expect(input.finding).toMatchObject({ summary: "Drifted summary", contentAngle: "Drifted angle", evidence: newQuote });
+        }
+        expect(input.priorPosts.find((post: { draftId: string }) => post.draftId === "snapshot-existing-review"))
+          .toMatchObject({ title: "Original source title", sourceUrl, familyKey: "old-family-1", findingContentAngle: "Original angle", sourceFact: oldQuote });
+        value = { ready: false, reason: "Controlled local decline after verifying original qualification input", targets: [] };
+      }
+      return modelResponseFixture({ status: "completed", usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }] });
+    });
+    try {
+      await finishResearchRankJob(newRun);
+      const [oldFinding] = await getRunResearchFindings(team, oldRun, [findingId]);
+      const [newFinding] = await getRunResearchFindings(team, newRun, [findingId]);
+      expect(oldFinding).toEqual(oldGlobals);
+      expect(newFinding).toMatchObject({ run_id: newRun, score: 88, title: "Updated source title", published_at: now - 1000, summary: "Updated summary", content_angle: "Updated angle", evidence: newQuote });
+      await saveResearchFindingSnapshot({ ...oldFinding, summary: "Do not replace immutable original", score: 1 });
+      expect((await getRunResearchFindings(team, oldRun, [findingId]))[0].summary).toBe("Original summary");
+      try {
+        storageFault = queries => {
+          for (const query of queries) expect(query.params.length).toBeLessThanOrEqual(81);
+        };
+        expect(await getRunResearchFindings(team, oldRun, Array.from({ length: 101 }, () => findingId)))
+          .toEqual([oldFinding]);
+      } finally { storageFault = undefined; }
+      await (state.db as ReturnType<typeof drizzle>).update(schema.research_runs).set({ findings_count: researchRunFindingsCount(team, oldRun) }).where(eq(schema.research_runs.id, oldRun));
+      expect(execute({ queries: [{ sql: "SELECT findings_count FROM research_runs WHERE id=?", params: [oldRun] }] })[0].results[0].findings_count).toBe(3);
+      execute({ queries: [{ sql: "UPDATE research_findings SET status='dismissed' WHERE id=?", params: [findingId] }] });
+      expect((await getRunResearchFindings(team, oldRun, [findingId]))[0]).toMatchObject({ score: 85, status: "dismissed" });
+      expect(await getRunResearchFindings("b", oldRun, [findingId])).toEqual([]);
+      const previousCopy = JSON.stringify({ targets: [{ channelId: "snapshot-li", platform: "linkedin", content: "Original pending review copy", thread: [] }] });
+      execute({ queries: [
+        { sql: "INSERT INTO research_drafts(id,team_id,run_id,finding_id,content,status,revision,created_at,updated_at) VALUES('snapshot-existing-review',?,?,'legacy-finding-a',?,'pending',3,?,?)", params: [team, oldRun, previousCopy, now, now] },
+        { sql: "UPDATE research_findings SET run_id=?, title='Drifted later title',url='https://example.com/new-attribution',summary='Drifted summary',why_it_matters='Drifted rationale',content_angle='Drifted angle',evidence=?,family_key='drifted-family' WHERE id='legacy-finding-a'", params: [newRun, newQuote] },
+      ] });
+      const priorReview = (await getResearchSnapshot(team)).drafts.find(draft => draft.id === "snapshot-existing-review");
+      expect(priorReview).toMatchObject({ title: "Original source title", sourceUrl, whyItMatters: "Original implication", revision: 3, status: "pending" });
+      expect(priorReview?.content.targets[0].content).toBe("Original pending review copy");
+      execute({ queries: [{ sql: "UPDATE research_findings SET status='new' WHERE id=?", params: [findingId] }, { sql: "UPDATE research_runs SET status='drafting' WHERE id=?", params: [oldRun] }] });
+      await finishResearchDraftJob(oldRun);
+      expect(writingCalls).toBe(1);
+      expect((await getRunResearchFindings(team, oldRun, [findingId]))[0]).toMatchObject({ score: 85, content_angle: "Original angle", evidence: oldQuote });
+      execute({ queries: [
+        { sql: "UPDATE research_runs SET status='drafting',days=1,editorial=1 WHERE id=?", params: [newRun] },
+        { sql: "INSERT INTO research_cache(id,team_id,value,created_at) VALUES(?,?,?,?)", params: [`draft-progress:${newRun}`, team, JSON.stringify({ candidateIds: ["legacy-finding-a"], selectedIds: ["legacy-finding-a"], nextOffset: 0, validationSkips: 0, rejectedStories: [], deliveryIds: [], deliveryOffset: 0 }), now] },
+      ] });
+      await finishResearchDraftJob(newRun);
+      expect(writingCalls).toBe(2);
+      expect(execute({ queries: [{ sql: "SELECT content,revision,status FROM research_drafts WHERE id='snapshot-existing-review'" }] })[0].results)
+        .toEqual([{ content: previousCopy, revision: 3, status: "pending" }]);
+    } finally {
+      fetcher.mockRestore();
+      if (previousOpenAI === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previousOpenAI;
+      if (previousAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = previousAnthropic;
+    }
+  }, 30_000);
   it("requires both provider keys before starting an editorial scan", async () => {
     const previousWorkflow = globalThis.__contentHubResearchWorkflow__;
     const dispatch = vi.fn(async () => ({}));
@@ -496,6 +594,50 @@ describe("research persistence and team isolation", () => {
       if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
+  }, 20_000);
+  it("rehydrates cached Pew publisher chrome while preserving dates, first-seen identity, and usable bodies", async () => {
+    const team = "pew-cached-body", now = Date.now();
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.id === "pew-ai-original-research")!;
+    const base = "https://www.pewresearch.org/short-reads/2026/10/23/";
+    const title = "A public AI research study";
+    const urls = [`${base}jobs-study`, `${base}usage-study`, canonicalResearchUrl(seed.backfillUrls![0])];
+    const firstSeen = now - 1000, originalDate = now - 2 * 86_400_000;
+    const cleanBody = "The researchers describe the sampling decisions, the observed comparison, and limitations of this study. ".repeat(7).trim();
+    const stale = [
+      `Short Reads | October 23, 2026 ${title} X Threads WhatsApp Facebook LinkedIn ${"Nicole Smith is a senior researcher studying technology at Pew Research Center. ".repeat(10)}`,
+      `The researchers describe how respondents reported their use of these tools. data-wp-context="${"serialized chart configuration ".repeat(25)}"`,
+      cleanBody,
+    ];
+    globalThis.__contentHubResearchWorkflow__ = { create: vi.fn(async () => ({})) };
+    execute({ queries: [{ sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)", params: [team, team, team] }] });
+    await initializeResearch(team);
+    execute({ queries: [
+      { sql: "UPDATE research_sources SET enabled=0 WHERE team_id=?", params: [team] },
+      { sql: "UPDATE research_sources SET enabled=1 WHERE team_id=? AND seed_id=?", params: [team, seed.id] },
+      ...urls.map((url, index) => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,'',?,?,?,'article')",
+        params: [`pew-cached-${index}`, team, seed.id, url, title, originalDate, firstSeen, stale[index]],
+      })),
+    ] });
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      const url = new URL(String(input));
+      if (url.href === seed.url) return new Response(urls.slice(0, 2).map(href => `<a href="${href}">${title}</a>`).join(""));
+      expect(url.pathname).toBe("/wp-json/wp/v2/short-read");
+      const slug = url.searchParams.get("slug")!;
+      expect(["jobs-study", "usage-study"]).toContain(slug);
+      return Response.json([{
+        status: "publish", type: "short-read", categories: [299], link: `${base}${slug}/`,
+        date_gmt: new Date(originalDate).toISOString().slice(0, 19),
+        title: { rendered: title }, content: { protected: false, rendered: `<p>${cleanBody}</p>` },
+      }]);
+    });
+    try {
+      const { run } = await createResearchRun(team, { mode: "collect", days: 7 });
+      await processResearchJob({ operation: "collect", runId: run.id, sourceId: seed.id });
+      expect(fetcher).toHaveBeenCalledTimes(3);
+      const rows = execute({ queries: [{ sql: "SELECT id,canonical_url,published_at,collected_at,content FROM research_items WHERE team_id=? ORDER BY id", params: [team] }] })[0].results;
+      expect(rows).toEqual(urls.map((url, index) => ({ id: `pew-cached-${index}`, canonical_url: url, published_at: originalDate, collected_at: firstSeen, content: cleanBody })));
+    } finally { fetcher.mockRestore(); }
   }, 20_000);
   it("collects RSS once per step, recovers missing dates/public evidence, and preserves an established publication date", async () => {
     globalThis.__contentHubResearchWorkflow__ = { create: vi.fn(async () => ({})) };

@@ -4,6 +4,7 @@ import {
   discoverResearchLinks, parseResearchDate, plainResearchText, sourceHosts, type CollectedItem,
 } from "./research-collectors";
 import type { ResearchSourceSeed } from "./research-types";
+import { fetchPewResearchArticle, isPewResearchSource } from "./research-pew";
 
 type SearchHit = { url: string; title: string; snippet?: string };
 type SearchResults = { hits: SearchHit[]; warnings: string[]; pages: number; exhaustive: boolean };
@@ -20,6 +21,7 @@ export async function fetchDiscoveredResearchArticle(
   target: DiscoveryArticleTarget,
   windowEnd: number,
 ): Promise<CollectedItem> {
+  if (isPewResearchSource(source)) return fetchPewResearchArticle(source, target.url, windowEnd);
   const candidateSource = { ...source, url: target.url, feedUrl: undefined };
   const html = await fetchResearchText(target.url, sourceHosts(source.kind === "search" ? candidateSource : source));
   const url = new URL(target.url);

@@ -6,7 +6,7 @@ const profiles = [
   { id: 'company-li', platform: 'linkedin', groupName: 'Company' },
 ];
 const current = {
-  findingId: 'current-finding', familyKey: 'prototype-handoff-checkpoint',
+  runId: 'current-run', findingId: 'current-finding', familyKey: 'prototype-handoff-checkpoint',
   title: 'Reddit AI prototyping harness', url: 'https://source-two.example/reddit-proto',
   summary: 'Realistic signed-in data and reviewed PRDs connect a prototype to engineering readiness.',
   contentAngle: 'Review the specification before engineering ships the prototype.',
@@ -54,11 +54,11 @@ describe('prior-post novelty context', () => {
     expect(context.priorPosts[0].copyExcerpt.length).toBeLessThan(1850);
   });
 
-  it('includes current-run history, excludes the finding being edited and explicitly marked test artifacts', () => {
-    const drafts = [history('saved-this-run', { runId: 'current-run' }), history('self', { findingId: current.findingId }), history('test-artifact', { isTest: true })];
+  it('includes earlier-run copy of the same finding while excluding the current edit and test artifacts', () => {
+    const drafts = [history('saved-this-run', { runId: 'current-run' }), history('self', { runId: 'current-run', findingId: current.findingId }), history('earlier-same-finding', { findingId: current.findingId }), history('test-artifact', { isTest: true })];
     const context = researchNoveltyContext(drafts, profiles, current, profiles);
-    expect(context.priorPosts.map(post => post.draftId)).toEqual(['saved-this-run']);
-    expect(context.priorPostRetrieval).toMatchObject({ scannedCount: 3, eligibleCount: 1 });
+    expect(context.priorPosts.map(post => post.draftId).sort()).toEqual(['earlier-same-finding', 'saved-this-run']);
+    expect(context.priorPostRetrieval).toMatchObject({ scannedCount: 4, eligibleCount: 2 });
   });
 
   it('does not feed unrelated history or another identity into a single-account comparison', () => {

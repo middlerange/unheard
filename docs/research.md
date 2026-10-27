@@ -31,9 +31,16 @@ evidence, with short summaries hydrated before screening. Undated living
 artifacts were not enabled as fresh sources.
 Pew's scoped AI research index adds original search-use and survey studies.
 Its exact July 2025 AI-summary click study is explicitly backfilled because it is
-absent from the current index. A local adapter probe read all 13 planned pages;
-Cloudflare access and ICP qualification remain separate checks. The consumer
-sample and click denominators must not become causal B2B traffic claims.
+absent from the current index. Local HTML access succeeded where Worker article
+requests returned HTTP403. For this registered source only, canonical article
+targets now use the publisher-advertised public WordPress JSON representation,
+filtered by exact slug and AI category. The reader verifies the returned canonical
+URL, published status, expected post type, unprotected body and original UTC
+publication date; modified dates never establish freshness. It removes sharing
+widget attributes before decoding text and queues weak cached publisher metadata
+for rehydration. This does not widen discovery beyond the existing scoped index
+and backfill. Worker access and ICP qualification remain separate checks. The
+consumer sample and click denominators must not become causal B2B traffic claims.
 Known original articles that have aged out of a current index or RSS response
 can be supplied through a source's explicit `backfillUrls`. AWS's original AI-DLC
 definition, Gartner's original agent-project forecast, Swan's Brain release,
@@ -188,7 +195,15 @@ rather than silently reusing the wrong source set. Omitting `sourceIds` retains
 the all-enabled default. Subsets change only the new run's frozen source list;
 source preferences, schedules, publication dates and first-seen times stay intact.
 
-Research prompt version `research-v12-claim-first-evidence` asks the assessor to
+Research prompt version `research-v13-core-first-screening` asks screening to
+inspect the full supplied public text before using the shorter lead excerpt.
+Each response explains the strongest supported core, best-fitting profile and
+bounded reader decision before returning its selection boolean. A concrete
+sequence, approval gate, handoff or persisted decision context can support an
+attributed method; a renamed ritual, benefit promise or unrelated infrastructure
+task still needs an actual method and concrete profile relevance. This ordering
+does not guarantee acceptance or establish recall until verified on real inputs.
+The evidence assessor retains the claim-first contract introduced in v12: it must
 identify the strongest currently supported claim, exact quote, bounded angle and
 claim-specific limitations before assigning its final score. A described method
 can support an attributed inspection or test without proving the publisher's
@@ -214,6 +229,16 @@ readable text, not automatic source coverage or future engagement.
 Canonical URLs and story families prevent duplicate findings. **Save as idea**
 copies the finding and evidence into the existing ideas queue; repeated saves
 return the same idea. Saving does not create or publish a social post.
+
+The global finding index can be updated when a later run assesses the same
+article. Each run therefore retains an immutable qualification snapshot before
+that update, including the prior run's assessment when migrating a legacy row.
+Draft selection, rewrites, novelty comparisons and review cards use the original
+run's qualification. Live dismissal and idea state still apply; snapshots never
+restore an old approval or rewrite an existing post. Run counts use the distinct
+union of snapshot and legacy finding IDs, so partially migrated histories remain
+complete. Previously overwritten legacy assessments require an exact preserved
+original; the current global row cannot reconstruct their former reasoning.
 
 Daily post generation, repairs, editorial reviews and Slack-requested rewrites use
 `gpt-6-sol` with reasoning disabled. Research screening and evidence scoring stay

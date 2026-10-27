@@ -94,6 +94,29 @@ it("constrains IDs to the input batch and derives selection without a duplicate 
   expect(schema.additionalProperties).toBe(false);
 });
 
+it("puts the screening reason before selection while preserving both decisions from legacy caches", () => {
+  const keyed = screeningJsonSchemaForItems(["method", "off-profile"]);
+  const converted = anthropicResearchSchema(keyed) as typeof keyed;
+  for (const id of ["method", "off-profile"]) {
+    expect(Object.keys(keyed.properties.assessments.properties[id].properties)).toEqual(["reason", "selected"]);
+    expect(keyed.properties.assessments.properties[id].required).toEqual(["reason", "selected"]);
+    expect(Object.keys(converted.properties.assessments.properties[id].properties)).toEqual(["reason", "selected"]);
+  }
+  expect(Object.keys(screeningJsonSchema.properties.assessments.items.properties)).toEqual(["itemId", "reason", "selected"]);
+  const legacy = { assessments: [
+    { itemId: "method", selected: true, reason: "An explicit review gate supports a product builder's handoff decision; outcomes are unmeasured." },
+    { itemId: "off-profile", selected: false, reason: "The infrastructure configuration supplies no concrete product or growth decision." },
+  ] };
+  const original = JSON.stringify(legacy);
+  const normalized = validateResearchScreening(researchScreeningSchema.parse(legacy), ["method", "off-profile"]);
+  expect(normalized.itemIds).toEqual(["method"]);
+  expect(normalized.assessments).toEqual(legacy.assessments);
+  expect(Object.keys(normalized.assessments[0])).toEqual(["itemId", "reason", "selected"]);
+  expect(JSON.stringify(legacy)).toBe(original);
+  const keyedOutput = { assessments: Object.fromEntries(legacy.assessments.map(({ itemId, ...assessment }) => [itemId, assessment])) };
+  expect(validateResearchScreening(researchScreeningSchema.parse(keyedOutput), ["method", "off-profile"])).toEqual(normalized);
+});
+
 it("requires every screening answer as a named field even when the provider removes array length constraints", () => {
   const ids = Array.from({ length: 8 }, (_, i) => `article-${i}`);
   const schema = screeningJsonSchemaForItems(ids);

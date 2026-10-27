@@ -44,14 +44,14 @@ function excerpt(value: string) {
 /** Inspect all saved history before selecting a small, auditable model context. */
 export function researchNoveltyContext(
   drafts: ResearchPriorDraft[], channels: ResearchIdentityProfile[],
-  current: { findingId: string; familyKey: string; title: string; url: string; summary: string; contentAngle: string; evidence: string; content: string },
+  current: { runId: string; findingId: string; familyKey: string; title: string; url: string; summary: string; contentAngle: string; evidence: string; content: string },
   destinations: ResearchIdentityProfile[],
 ): ResearchNoveltyContext {
   const identities = new Set(destinations.map(researchIdentityKey));
   const profiles = new Map(channels.map(channel => [channel.id, channel]));
   const eligible: Array<{ post: ResearchPriorPost; words: Set<string> }> = [];
   for (const draft of drafts) {
-    if (draft.findingId === current.findingId || draft.isTest) continue;
+    if (draft.findingId === current.findingId && draft.runId === current.runId || draft.isTest) continue;
     let parsed: { targets?: Array<{ channelId: string; content: string; thread?: string[] }>; editorial?: { sourceFact?: string; alpha?: string; readerDecision?: string } };
     try { parsed = JSON.parse(draft.content); } catch { continue; }
     if (!parsed || !Array.isArray(parsed.targets)) continue;

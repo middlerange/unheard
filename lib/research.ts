@@ -2,6 +2,8 @@ import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, ne, or, sql } from
 import { z } from "zod";
 import { getDb } from "./db/client";
 import { retryResearchStorage } from "./research-storage";
+import { getDraftResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
+import { hasUsablePewResearchBody, isPewResearchSource } from "./research-pew";
 import {
   ideas,
   channels,
@@ -188,6 +190,9 @@ export async function getResearchSnapshot(
       .where(eq(slack_integrations.team_id, teamId))
       .get(),
   ]);
+  const originalDraftFindings = await getDraftResearchFindings(teamId, drafts.map(({ draft }) => ({
+    runId: draft.run_id, findingId: draft.finding_id,
+  })));
   return {
     configured: Boolean(process.env.ANTHROPIC_API_KEY),
     workflowConfigured: Boolean(globalThis.__contentHubResearchWorkflow__),
@@ -214,9 +219,9 @@ export async function getResearchSnapshot(
       id: draft.id,
       runId: draft.run_id,
       findingId: draft.finding_id,
-      title,
-      sourceUrl,
-      whyItMatters,
+      title: originalDraftFindings.get(`${draft.run_id}:${draft.finding_id}`)?.title ?? title,
+      sourceUrl: originalDraftFindings.get(`${draft.run_id}:${draft.finding_id}`)?.url ?? sourceUrl,
+      whyItMatters: originalDraftFindings.get(`${draft.run_id}:${draft.finding_id}`)?.why_it_matters ?? whyItMatters,
       content: {
         targets: (
           JSON.parse(draft.content) as ResearchDraftContent
@@ -595,6 +600,7 @@ async function collectForRun(
     const available = await db
       .select({ url: research_items.canonical_url, collectedAt: research_items.collected_at, publishedAt: research_items.published_at, transcriptStatus: research_items.transcript_status,
         title: research_items.title, excerpt: research_items.excerpt, contentHash: research_items.content_hash, contentProvenance: research_items.content_provenance,
+        content: isPewResearchSource(source) ? research_items.content : sql<null>`NULL`,
         hasEvidence: sql<number>`${research_items.content} IS NOT NULL AND length(${research_items.content}) >= 500`,
       })
       .from(research_items)
@@ -604,7 +610,9 @@ async function collectForRun(
           eq(research_items.source_id, sourceId),
         ),
       );
-    const known = new Map(available.map(item => [item.url, item]));
+    const known = new Map(available.map(item => [item.url, { ...item,
+      hasEvidence: isPewResearchSource(source) ? hasUsablePewResearchBody(item.content, item.title) : item.hasEvidence,
+    }]));
     const articles = new Map((collection.pendingArticles || []).filter(target => {
       const item = known.get(target.url);
       return !item?.hasEvidence && (!item || item.collectedAt >= run.created_at - run.days * 86_400_000 ||
@@ -923,7 +931,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       }).onConflictDoUpdate({ target: research_cache.id, set: { value } }),
       db.update(research_runs).set({
         diagnostics,
-        findings_count: sql`(SELECT COUNT(*) FROM research_findings WHERE run_id = ${run.id})`,
+        findings_count: researchRunFindingsCount(run.team_id, run.id),
       }).where(eq(research_runs.id, run.id)),
     ]));
   }
@@ -1111,28 +1119,24 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
           });
           continue;
         }
+        const findingId = await researchHash(`${run.team_id}:${item.id}`);
+        const existingFinding = await db.select().from(research_findings).where(and(
+          eq(research_findings.id, findingId), eq(research_findings.team_id, run.team_id),
+        )).get();
+        if (existingFinding) await saveResearchFindingSnapshot(existingFinding);
+        const qualified: ResearchFindingRow = {
+          id: findingId, team_id: run.team_id, run_id: run.id, item_id: item.id,
+          source_id: item.source_id, title: item.title, url: item.canonical_url,
+          published_at: item.published_at!, status: existingFinding?.status || "new", idea_id: existingFinding?.idea_id || null,
+          created_at: existingFinding?.created_at ?? Date.now(), content_type: item.content_type, transcript_status: item.transcript_status,
+          score: finding.score, summary: finding.summary, why_it_matters: finding.whyItMatters,
+          content_angle: finding.contentAngle, evidence: finding.evidence, limitations: finding.limitations,
+          family_key: familyKey,
+        };
+        await saveResearchFindingSnapshot(qualified);
         await db
           .insert(research_findings)
-          .values({
-            id: await researchHash(`${run.team_id}:${item.id}`),
-            team_id: run.team_id,
-            run_id: run.id,
-            item_id: item.id,
-            source_id: item.source_id,
-            title: item.title,
-            url: item.canonical_url,
-            published_at: item.published_at!,
-            score: finding.score,
-            summary: finding.summary,
-            why_it_matters: finding.whyItMatters,
-            content_angle: finding.contentAngle,
-            evidence: finding.evidence,
-            limitations: finding.limitations,
-            created_at: Date.now(),
-            family_key: familyKey,
-            content_type: item.content_type,
-            transcript_status: item.transcript_status,
-          })
+          .values(qualified)
           .onConflictDoUpdate({
             target: research_findings.id,
             set: {
@@ -1144,6 +1148,12 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
               evidence: finding.evidence,
               limitations: finding.limitations,
               family_key: familyKey,
+              source_id: qualified.source_id,
+              title: qualified.title,
+              url: qualified.url,
+              published_at: qualified.published_at,
+              content_type: qualified.content_type,
+              transcript_status: qualified.transcript_status,
             },
           });
       }
@@ -1184,7 +1194,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
             ? "drafting"
             : "completed",
       completed_at: Date.now(),
-      findings_count: sql`(SELECT COUNT(*) FROM research_findings WHERE run_id = ${run.id})`,
+      findings_count: researchRunFindingsCount(run.team_id, run.id),
       error:
         [
           failed.length
