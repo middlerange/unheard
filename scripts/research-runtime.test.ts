@@ -47,7 +47,7 @@ describe('durable research execution', () => {
     expect(doStep.mock.calls.map(([name]) => name)).toContain('Collect public-video-source batch 3');
   });
 
-  it('sleeps durably for a saved source cooldown before resuming the same collection', async () => {
+  it('collects later ready sources before sleeping for the remaining source cooldown', async () => {
     const events: string[] = [];
     let calls = 0;
     const invoke = vi.fn(async (payload: { operation: string; sourceId?: string }) => {
@@ -59,8 +59,66 @@ describe('durable research execution', () => {
     const sleep = vi.fn(async (name: string, duration: string) => { events.push(`sleep:${name}:${duration}`); });
     const step = { do: async (_name: string, _options: unknown, work: () => Promise<unknown>) => work(), sleep };
     await runResearchWorkflow('cooldown-run', step, invoke);
-    expect(sleep).toHaveBeenCalledWith('Wait for limited batch 1', '121 seconds');
-    expect(events).toEqual(['plan', 'limited', 'sleep:Wait for limited batch 1:121 seconds', 'limited', 'next-source', 'rank', 'drafts']);
+    expect(sleep).toHaveBeenCalledWith('Wait for research collection round 1', '121 seconds');
+    expect(events).toEqual(['plan', 'limited', 'next-source', 'sleep:Wait for research collection round 1:121 seconds', 'limited', 'rank', 'drafts']);
+  });
+
+  it('visits every pending source once per round until all batches finish, without a cooled source blocking ready work', async () => {
+    const events: string[] = [];
+    const calls: Record<string, number> = {};
+    const invoke = vi.fn(async (payload: { operation: string; sourceId?: string }) => {
+      if (payload.operation === 'plan') return { sourceIds: ['limited', 'ready', 'failed-source'] };
+      if (payload.operation !== 'collect') { events.push(payload.operation); return { pending: false }; }
+      const source = payload.sourceId!;
+      const batch = calls[source] = (calls[source] || 0) + 1;
+      events.push(`${source}:${batch}`);
+      if (source === 'failed-source') return { error: 'Source returned HTTP 403' };
+      return { pending: batch < 3, ...(source === 'limited' && batch < 3 ? { retryAfterMs: 120_000 } : {}) };
+    });
+    const sleep = vi.fn(async () => {});
+    const doStep = vi.fn(async (_name: string, _options: unknown, work: () => Promise<unknown>) => work());
+    await runResearchWorkflow('fair-run', { do: doStep, sleep }, invoke);
+    expect(events).toEqual(['limited:1', 'ready:1', 'failed-source:1', 'limited:2', 'ready:2', 'limited:3', 'ready:3', 'rank', 'drafts']);
+    expect(sleep).not.toHaveBeenCalled();
+    expect(doStep.mock.calls.map(([name]) => name)).toEqual([
+      'Plan research collection', 'Collect limited', 'Collect ready', 'Collect failed-source',
+      'Collect limited batch 2', 'Collect ready batch 2', 'Collect limited batch 3', 'Collect ready batch 3', 'Rank findings', 'Draft daily posts',
+    ]);
+    expect(calls['failed-source']).toBe(1);
+    for (const [name, config] of doStep.mock.calls) {
+      if (name === 'Rank findings' || name === 'Draft daily posts') expect(config).toMatchObject({ retries: { limit: 0 } });
+    }
+  });
+
+  it('sleeps for the minimum persisted cooldown only when all remaining sources are cooling down, with deterministic replay', async () => {
+    const counts: Record<string, number> = {};
+    const invoke = vi.fn(async (payload: { operation: string; sourceId?: string }) => {
+      if (payload.operation === 'plan') return { sourceIds: ['slow', 'quick'] };
+      if (payload.operation !== 'collect') return { pending: false };
+      const source = payload.sourceId!;
+      const call = counts[source] = (counts[source] || 0) + 1;
+      if (source === 'slow') return call < 3 ? { pending: true, retryAfterMs: call === 1 ? 90_000 : 80_000 } : { pending: false };
+      return call === 1 ? { pending: true, retryAfterMs: 10_000 } : { pending: false };
+    });
+    const completed = new Map<string, unknown>();
+    const doStep = vi.fn(async (name: string, _options: unknown, work: () => Promise<unknown>) => {
+      if (!completed.has(name)) completed.set(name, await work());
+      return completed.get(name);
+    });
+    const sleep = vi.fn(async (_name: string, _duration: string) => {});
+    await runResearchWorkflow('all-cooling', { do: doStep, sleep }, invoke);
+    expect(sleep.mock.calls).toEqual([
+      ['Wait for research collection round 1', '10 seconds'], ['Wait for research collection round 2', '80 seconds'],
+    ]);
+    const names = doStep.mock.calls.map(([name]) => name);
+    const calls = invoke.mock.calls.length;
+    doStep.mockClear(); sleep.mockClear();
+    await runResearchWorkflow('all-cooling', { do: doStep, sleep }, invoke);
+    expect(invoke).toHaveBeenCalledTimes(calls);
+    expect(doStep.mock.calls.map(([name]) => name)).toEqual(names);
+    expect(sleep.mock.calls).toEqual([
+      ['Wait for research collection round 1', '10 seconds'], ['Wait for research collection round 2', '80 seconds'],
+    ]);
   });
 
   it('bounds failure dispatch before validation and preserves the original exception', async () => {

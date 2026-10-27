@@ -40,16 +40,24 @@ export async function runResearchWorkflow(runId, step, invoke) {
   const collectionOptions = { retries: { limit: 2, delay: '5 seconds', backoff: 'exponential' }, timeout: '10 minutes' };
   try {
     const plan = await step.do('Plan research collection', collectionOptions, () => invoke({ operation: 'plan', runId }));
-    for (const sourceId of plan.sourceIds) {
-      let batch = 1;
-      let collection = await step.do(`Collect ${sourceId}`, collectionOptions, () => invoke({ operation: 'collect', runId, sourceId }));
-      while (collection?.pending === true) {
-        if (Number.isFinite(collection.retryAfterMs) && collection.retryAfterMs > 0) {
-          await step.sleep(`Wait for ${sourceId} batch ${batch}`, `${Math.ceil(collection.retryAfterMs / 1000)} seconds`);
+    let pending = plan.sourceIds.map(sourceId => ({ sourceId, batch: 1 }));
+    let round = 1;
+    while (pending.length) {
+      const next = [];
+      const cooldowns = [];
+      for (const { sourceId, batch } of pending) {
+        const name = batch === 1 ? `Collect ${sourceId}` : `Collect ${sourceId} batch ${batch}`;
+        const collection = await step.do(name, collectionOptions, () => invoke({ operation: 'collect', runId, sourceId }));
+        if (collection?.pending === true) {
+          next.push({ sourceId, batch: batch + 1 });
+          cooldowns.push(Number.isFinite(collection.retryAfterMs) && collection.retryAfterMs > 0 ? collection.retryAfterMs : 0);
         }
-        batch++;
-        collection = await step.do(`Collect ${sourceId} batch ${batch}`, collectionOptions, () => invoke({ operation: 'collect', runId, sourceId }));
       }
+      pending = next;
+      if (pending.length && cooldowns.every(delay => delay > 0)) {
+        await step.sleep(`Wait for research collection round ${round}`, `${Math.ceil(Math.min(...cooldowns) / 1000)} seconds`);
+      }
+      round++;
     }
     // A model request can be billed even if its response is interrupted. Resume via
     // persisted analysis records rather than automatically repeating a paid step.

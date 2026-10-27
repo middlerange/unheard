@@ -84,7 +84,11 @@ first-seen times and readable source bodies stay in the database rather than a
 large workflow payload; per-page failures remain visible as incomplete coverage.
 An HTTP 429 preserves the server's `Retry-After` delay and pauses further requests
 to that host. Short cooldowns use durable workflow sleeps, with at most three
-technical attempts per host in one run. Longer waits or exhausted retries defer
+technical attempts per host in one run. Collection visits one durable batch per
+pending source in each round, so a cooled-down source does not block ready
+sources. It sleeps only when every remaining source reports a cooldown, using
+the minimum returned delay; step names and decisions use persisted responses for
+deterministic replay. Longer waits or exhausted retries defer
 every remaining URL for that host and record the count, URLs, deadline and reason;
 other hosts and sources continue. A later collection merges this saved backlog
 even when the original index no longer lists it. Readable successes are not
