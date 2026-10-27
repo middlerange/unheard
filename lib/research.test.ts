@@ -42,6 +42,7 @@ import { SLACK_TEST_EVIDENCE, SLACK_TEST_PROMPT } from "./slack-test-content";
 import type { ResearchSourceSeed } from "./research-types";
 import { RESEARCH_SOURCE_SEEDS } from "./research-sources";
 import { getRunResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot } from "./research-finding-snapshots";
+import { getFrozenResearchAudience, RESEARCH_AUDIENCE_ONLY_PROFILE_ID } from "./research-audience";
 function editorialFixture(content: string) {
   return {
     writingStyle: "b2b-practitioner-teardown", styleRationale: "The source describes a concrete practitioner workflow to inspect.",
@@ -57,10 +58,19 @@ function modelResponseFixture(value: {
   usage?: unknown;
   output?: Array<{ content: Array<{ type: string; text: string }> }>;
 }) {
+  const output = value.output?.map(item => ({ ...item, content: item.content.map(part => {
+    let parsed;
+    try { parsed = JSON.parse(part.text); } catch { return part; }
+    if (!Array.isArray(parsed.findings)) return part;
+    return { ...part, text: JSON.stringify({ ...parsed, findings: parsed.findings.map((finding: { chosenProfileId?: string | null; profileFit?: string }) => ({
+      chosenProfileId: RESEARCH_AUDIENCE_ONLY_PROFILE_ID, profileFit: "The saved general audience covers this bounded practitioner decision.", ...finding,
+    })) }) };
+  }) }));
   return Response.json({
     ...value,
+    output,
     stop_reason: value.status === "completed" ? "end_turn" : "max_tokens",
-    content: value.output?.flatMap(item => item.content.map(part => ({ ...part, type: "text" }))),
+    content: output?.flatMap(item => item.content.map(part => ({ ...part, type: "text" }))),
   });
 }
 function editorialReviewFixture() {
@@ -346,6 +356,100 @@ describe("research persistence and team isolation", () => {
     rmSync(folder, { recursive: true, force: true });
     globalThis.__contentHubResearchWorkflow__ = undefined;
   });
+  it("scores with frozen structured profiles and reuses the paid response after live profile edits", async () => {
+    const team = "structured-audience", now = Date.now();
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.enabled && source.kind === "rss" && source.feedUrl)!;
+    const general = "B2B product and growth practitioners investigating practical decisions.";
+    const company = "Only onboarding, activation and product adoption for the company account.";
+    const personal = "Product, marketing, SEO and distribution decisions for a personal practitioner profile.";
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)", params: [team, team, team] },
+      ...[["audience-company", "Company", company], ["audience-personal", "Personal", personal]].map(([id, group, prompt]) => ({
+        sql: "INSERT INTO channels(id,team_id,name,platform,group_name,research_enabled,system_prompt,created_at) VALUES(?,?,?,'linkedin',?,1,?,0)", params: [id, team, id, group, prompt],
+      })),
+    ] });
+    await initializeResearch(team);
+    execute({ queries: [{ sql: "UPDATE research_settings SET icp=? WHERE team_id=?", params: [general, team] }] });
+    const previousKey = process.env.ANTHROPIC_API_KEY, previousWorkflow = globalThis.__contentHubResearchWorkflow__;
+    process.env.ANTHROPIC_API_KEY = "test-structured-audience";
+    globalThis.__contentHubResearchWorkflow__ = { create: vi.fn(async () => ({})) };
+    const quote = "People who encountered an AI summary clicked a traditional search result less often in the observed visits.";
+    let calls = 0;
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      calls++;
+      const request = JSON.parse(String(init?.body)), input = JSON.parse(request.messages[0].content);
+      expect(input.icp).toBeUndefined();
+      expect(input.generalAudience).toBe(general);
+      expect(input.publishingProfiles).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: "audience-company", systemPrompt: company, enabled: true }),
+        expect.objectContaining({ id: "audience-personal", systemPrompt: personal, enabled: true }),
+      ]));
+      expect(input.publishingProfiles).toHaveLength(2);
+      const choice = request.output_config.format.schema.properties.findings.properties["audience-item"].properties.chosenProfileId;
+      expect(choice.anyOf[0].enum.sort()).toEqual(["audience-company", "audience-personal"]);
+      return modelResponseFixture({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ findings: [{
+        itemId: "audience-item", chosenProfileId: "audience-personal", profileFit: "The personal profile explicitly covers distribution; inspect qualified referral traffic rather than treating company onboarding scope as a veto.",
+        summary: "Observed search referral behavior", evidence: quote, contentAngle: "Measure qualified search referrals before changing distribution priorities", whyItMatters: "A personal growth practitioner chooses a distribution test", limitations: "Observational study, no causal claim", familyKey: "observed-search-referrals", score: 82,
+      }] }) }] }] });
+    });
+    try {
+      const { run } = await createResearchRun(team, { days: 7, mode: "scan", sourceIds: [seed.id] });
+      execute({ queries: [
+        { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: ["audience-source-step", run.id, seed.id] },
+        { sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES('audience-item',?,?,?,'Search behavior',?,?,?,?,'article')", params: [team, seed.id, `${new URL(seed.url).origin}/audience-item`, quote, now - 1000, now, quote.repeat(8)] },
+        { sql: "UPDATE channels SET system_prompt='Changed later to company adoption only',research_enabled=0 WHERE team_id=?", params: [team] },
+      ] });
+      storageFault = (queries, phase) => {
+        if (phase === "before" && queries.some(query => query.params.includes(`rank-progress:${run.id}`)
+          && query.params.some(param => typeof param === "string" && param.includes('"nextOffset":1')))) throw new Error("Network connection lost.");
+      };
+      await expect(processResearchJob({ operation: "rank", runId: run.id })).rejects.toThrow("Network connection lost");
+      storageFault = undefined;
+      await finishResearchRankJob(run.id);
+      expect(calls).toBe(1);
+      expect(execute({ queries: [{ sql: "SELECT findings_count,cache_hits FROM research_runs WHERE id=?", params: [run.id] }] })[0].results[0]).toMatchObject({ findings_count: 1, cache_hits: 1 });
+      const saved = execute({ queries: [{ sql: "SELECT * FROM research_runs WHERE id=?", params: [run.id] }] })[0].results[0];
+      expect((await getFrozenResearchAudience(saved)).publishingProfiles.find(profile => profile.id === "audience-personal")?.systemPrompt).toBe(personal);
+      const snapshot = execute({ queries: [{ sql: "SELECT value FROM research_cache WHERE id=?", params: [`research-audience:${run.id}`] }] })[0].results[0].value;
+      const tampered = JSON.parse(snapshot); tampered.publishingProfiles.pop();
+      execute({ queries: [{ sql: "UPDATE research_cache SET value=? WHERE id=?", params: [JSON.stringify(tampered), `research-audience:${run.id}`] }] });
+      await expect(getFrozenResearchAudience(saved)).rejects.toThrow("captured profiles");
+    } finally {
+      storageFault = undefined; fetcher.mockRestore(); globalThis.__contentHubResearchWorkflow__ = previousWorkflow;
+      if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = previousKey;
+    }
+  }, 30_000);
+  it.each([false, true])("recovers a failed audience-snapshot setup without stranding the run (scheduled: %s)", async scheduled => {
+    const team = `audience-setup-${scheduled}`, seed = RESEARCH_SOURCE_SEEDS.find(source => source.enabled)!;
+    const savedAudience = "Original product practitioners and growth decision makers.";
+    execute({ queries: [{ sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)", params: [team, team, team] }] });
+    await initializeResearch(team);
+    execute({ queries: [{ sql: "UPDATE research_settings SET icp=? WHERE team_id=?", params: [savedAudience, team] }] });
+    const previousWorkflow = globalThis.__contentHubResearchWorkflow__, dispatch = vi.fn(async () => ({}));
+    globalThis.__contentHubResearchWorkflow__ = { create: dispatch };
+    const scheduledId = scheduled ? "scheduled-audience-setup" : undefined;
+    try {
+      let snapshotWrites = 0;
+      storageFault = (queries, phase) => {
+        if (phase === "before" && queries.some(query => /^insert/i.test(query.sql) && query.params.some(param => typeof param === "string" && param.startsWith("research-audience:")))) {
+          snapshotWrites++; throw new Error("Network connection lost.");
+        }
+      };
+      await expect(createResearchRun(team, { days: 7, mode: "collect", sourceIds: [seed.id] }, false, scheduledId)).rejects.toThrow();
+      expect(snapshotWrites).toBe(3);
+      storageFault = undefined;
+      const failed = execute({ queries: [{ sql: "SELECT * FROM research_runs WHERE team_id=?", params: [team] }] })[0].results[0];
+      expect(failed.status).toBe(scheduled ? "queued" : "failed");
+      expect(dispatch).not.toHaveBeenCalled();
+      execute({ queries: [{ sql: "UPDATE research_settings SET icp='Different settings changed after the failed capture' WHERE team_id=?", params: [team] }] });
+      const { run } = await createResearchRun(team, { days: 7, mode: "collect", sourceIds: [seed.id] }, false, scheduledId);
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      if (scheduled) {
+        expect(run.id).toBe(failed.id);
+        expect((await getFrozenResearchAudience(failed)).generalAudience).toBe(savedAudience);
+      } else expect(run.id).not.toBe(failed.id);
+    } finally { storageFault = undefined; globalThis.__contentHubResearchWorkflow__ = previousWorkflow; }
+  }, 20_000);
   it("preserves each run's qualification through a shared-item rescan and resumed writing", async () => {
     const team = "run-finding-snapshots", oldRun = "qualification-old", newRun = "qualification-new";
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.enabled && source.kind === "rss" && source.feedUrl)!;

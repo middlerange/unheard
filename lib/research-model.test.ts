@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   validateResearchEvidenceCoverage, matchResearchQuote, validateResearchScreening, validateResearchEvidence, researchScreeningSchema, screeningJsonSchema, screeningJsonSchemaForItems, researchEvidenceSchema,
   RESEARCH_SCREEN_BATCH_SIZE, openAIResearchOutput, callResearchModel, evidenceJsonSchemaForItems,
+  validateResearchEvidenceProfiles,
 } from "./research-model";
 import { anthropicResearchSchema } from "./research-anthropic";
 
@@ -17,6 +18,43 @@ const finding = {
   evidence: quote, limitations: "Survey evidence", familyKey: "genai-policy-study",
 };
 const items = [{ id: "study", content: `The research suggests policy has not kept pace with practice. ${quote}, while others have no policy.` }];
+
+describe("v15 chosen-profile evidence protocol", () => {
+  it("requires profile choice and rationale before claim and score, including in Anthropic's wire schema", () => {
+    const wire = evidenceJsonSchemaForItems(["study"], ["company", "personal"]);
+    const schema = wire.properties.findings.properties.study;
+    expect(Object.keys(schema.properties)).toEqual(["chosenProfileId", "profileFit", "summary", "evidence", "contentAngle", "whyItMatters", "limitations", "familyKey", "score"]);
+    expect(schema.required.slice(0, 2)).toEqual(["chosenProfileId", "profileFit"]);
+    expect(schema.properties.chosenProfileId).toEqual({ anyOf: [{ type: "string", enum: ["company", "personal"] }, { type: "null" }] });
+    const converted = anthropicResearchSchema(wire) as typeof wire;
+    expect(Object.keys(converted.properties.findings.properties.study.properties)).toEqual(Object.keys(schema.properties));
+    expect(converted.properties.findings.properties.study.required).toContain("chosenProfileId");
+  });
+  it("accepts a personal distribution decision independently and preserves a genuine no-fit rejection", () => {
+    const decision = { ...finding, chosenProfileId: "personal", profileFit: "The personal profile covers distribution; inspect the effect on qualified website visits. Company onboarding scope is irrelevant to this choice." };
+    const rejected = { ...finding, itemId: "unrelated", score: 20, chosenProfileId: null, profileFit: "Neither profile covers telescope optics." };
+    const { itemId: _decisionId, ...decisionBody } = decision, { itemId: _rejectedId, ...rejectedBody } = rejected;
+    const parsed = researchEvidenceSchema.parse({ findings: { study: decisionBody, unrelated: rejectedBody } });
+    expect(validateResearchEvidenceProfiles(parsed.findings, ["company", "personal"])).toEqual([decision, rejected]);
+    expect(validateResearchEvidence([decision], items)).toEqual([decision]);
+  });
+  it.each([
+    { chosenProfileId: "foreign", profileFit: "A foreign profile cannot be chosen." },
+    { chosenProfileId: null, profileFit: "No profile fits, so a positive cannot be saved." },
+    { chosenProfileId: "personal", profileFit: " " },
+    {},
+  ])("rejects invalid or missing positive profile assignments: %j", choice => {
+    expect(() => validateResearchEvidenceProfiles([{ ...finding, ...choice }], ["company", "personal"])).toThrow("supplied enabled profile");
+  });
+  it("keeps legacy array/keyed parsing separate from required v15 validation", () => {
+    const oldArray = researchEvidenceSchema.parse({ findings: [finding] });
+    const { itemId: _id, ...assessment } = finding;
+    expect(researchEvidenceSchema.parse({ findings: { study: assessment } })).toEqual(oldArray);
+    expect(validateResearchEvidence(oldArray.findings, items)).toEqual([finding]);
+    expect(() => validateResearchEvidenceProfiles(oldArray.findings, ["personal"])).toThrow();
+    expect(() => validateResearchEvidenceProfiles([{ ...finding, score: 20, chosenProfileId: "foreign", profileFit: "Unknown even for rejection." }], ["personal"])).toThrow();
+  });
+});
 
 describe("research evidence quote formatting", () => {
   it.each([["“", "”"], ['"', '"'], ["‘", "’"], ["'", "'"]])(

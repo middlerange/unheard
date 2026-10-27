@@ -147,16 +147,16 @@ Draft candidates have no daily count quota. A durable step processes one story
 and queues at most six reviews, then continues from saved offsets until the frozen
 candidate queue is exhausted. Declined and invalid stories retain their reasons;
 existing drafts and review states are preserved rather than generated again.
-Daily ranking and drafting consume OpenAI API tokens. The daily switch is
+Daily ranking consumes Anthropic API tokens and drafting consumes OpenAI API tokens. The daily switch is
 team-specific. **Collect new items** only collects and makes no model calls. See
 [Slack reviews](slack-reviews.md) for setup, thread edits and approval controls.
 
-**7-day discovery** and **30-day discovery** collect enabled sources, then screen
-eligible items using
-`claude-haiku-5-5` with reasoning disabled. It screens every eligible collected item,
-without a total item or shortlist quota, and sends every potentially useful item
-to evidence review in batches of six. Ranking freezes candidate membership before
-screening and checkpoints every screening batch, selection and evidence offset.
+**7-day discovery** and **30-day discovery** collect enabled sources, then assess
+eligible items using `claude-haiku-5-5` with reasoning disabled. Available source
+bodies go directly to evidence review; incomplete items first receive screening.
+There is no total item or shortlist quota. Evidence review uses batches of six.
+Ranking freezes candidate membership before routing and checkpoints every
+screening batch, selection and evidence offset.
 Durable steps process at most three screening batches and 18 selected evidence
 items each, then continue until all eligible material is assessed. These batch
 sizes limit work per step; they do not truncate the run. New arrivals wait for a
@@ -195,7 +195,8 @@ rather than silently reusing the wrong source set. Omitting `sourceIds` retains
 the all-enabled default. Subsets change only the new run's frozen source list;
 source preferences, schedules, publication dates and first-seen times stay intact.
 
-Research version `research-v14-readable-evidence-routing` sends dated eligible
+Research version `research-v15-structured-profile-selection` retains v14 routing:
+it sends dated eligible
 items with at least 500 characters of available public source text directly to
 evidence assessment. This is the existing body-availability floor, not a finding
 quality score. Article, public-feed, abstract and transcript provenance stays
@@ -210,6 +211,17 @@ any paid screening call, plus the exact incomplete-item model input. Progress
 distinguishes all routed candidates, direct evidence candidates and actual model
 screening decisions. A continuation reuses that plan rather than changing a paid
 input when an excerpt refreshes. Earlier completed checkpoints remain valid.
+
+The scoring input separates the saved general audience from structured publishing
+profiles. Each run freezes the exact captured profile IDs and instructions before
+paid assessment; later channel edits cannot change that context. Evidence responses
+identify a supplied profile and explain its fit before returning the score. A
+positive finding requires a valid profile ID; a negative assessment can explicitly
+report no fitting profile. This does not relax the score or source-evidence guards.
+Malformed captured profiles fail visibly. Legacy runs with no captured profiles
+receive an explicit audience-only research profile, which cannot itself serve as a
+publishing destination. Earlier versioned decisions and completed checkpoints are
+preserved; changing the current prompt does not rescore an in-flight queue.
 
 Incomplete-item screening retains the v13 core-first contract: it must
 inspect the full supplied public text before using the shorter lead excerpt.
@@ -312,6 +324,11 @@ screening, evidence grounding and final qualification as separate measurements.
 The script checkpoints raw responses and token usage before parsing, resumes
 completed calls, and requires an explicit flag for one retry of known malformed
 output. Evaluation usage is saved with its artifacts, outside the app run ledger.
+The current replay uses the same structured audience, profile validation and
+readable-body routing as production. It records routed items and actual model
+screening separately. Its saved context includes the model, prompt/schema,
+audience, routing and benchmark configuration; incompatible older current replay
+folders fail before calling a model. Historical baseline behavior remains separate.
 Keep research evidence and benchmark files out of this public repository.
 
 ## Deployment

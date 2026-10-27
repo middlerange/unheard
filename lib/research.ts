@@ -2,6 +2,7 @@ import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, ne, or, sql } from
 import { z } from "zod";
 import { getDb } from "./db/client";
 import { retryResearchStorage } from "./research-storage";
+import { getFrozenResearchAudience } from "./research-audience";
 import { getDraftResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
 import { hasUsablePewResearchBody, isPewResearchSource } from "./research-pew";
 import {
@@ -56,6 +57,7 @@ import {
   screeningJsonSchemaForItems,
   validateResearchEvidence,
   validateResearchEvidenceCoverage,
+  validateResearchEvidenceProfiles,
   validateResearchScreening,
 } from "./research-model";
 export { RESEARCH_MODEL } from "./research-model";
@@ -412,8 +414,10 @@ export async function createResearchRun(
       if (activeIds.size !== data.sourceIds.length || data.sourceIds.some(id => !activeIds.has(id)))
         throw new Error("A research run with different sources is active. Wait for it to finish before starting this source subset.");
     }
-    if (!scheduledRunId || active.id === scheduledRunId)
+    if (!scheduledRunId || active.id === scheduledRunId) {
+      await getFrozenResearchAudience(active);
       await dispatchResearchRun(active.id);
+    }
     return { run: runView(active) };
   }
   const [settings, sources, profiles] = await Promise.all([
@@ -487,11 +491,14 @@ export async function createResearchRun(
       )
       .get();
     if (!other) throw new Error("Run could not be created");
-    if (!scheduledRunId || other.id === scheduledRunId)
+    if (!scheduledRunId || other.id === scheduledRunId) {
+      await getFrozenResearchAudience(other);
       await dispatchResearchRun(other.id);
+    }
     return { run: runView(other) };
   }
   try {
+    await getFrozenResearchAudience(row);
     await dispatchResearchRun(id);
   } catch (error) {
     await db
@@ -502,7 +509,7 @@ export async function createResearchRun(
         status: scheduledRunId ? "queued" : "failed",
         completed_at: scheduledRunId ? null : Date.now(),
         error:
-          "Workflow dispatch failed. Retry after checking the Cloudflare binding.",
+          "Research setup or Workflow dispatch failed. Retry after checking storage and the Cloudflare binding.",
       })
       .where(eq(research_runs.id, id));
     throw error;
@@ -840,12 +847,14 @@ async function cachedModel(
   outputTokens: number,
 ) {
   const db = await getDb();
+  const audience = await getFrozenResearchAudience(run);
+  const enabledProfileIds = audience.publishingProfiles.map(profile => profile.id);
   const id = await researchHash(
     JSON.stringify([
       run.team_id,
       RESEARCH_MODEL,
       RESEARCH_PROMPT_VERSION,
-      run.icp,
+      audience,
       stage,
       input,
     ]),
@@ -854,7 +863,10 @@ async function cachedModel(
     try {
       const ids = (input as Array<{ id: string }>).map(item => item.id);
       if (stage === "screen") validateResearchScreening(researchScreeningSchema.parse(value), ids);
-      if (stage === "evidence") validateResearchEvidenceCoverage(researchEvidenceSchema.parse(value).findings, ids);
+      if (stage === "evidence") {
+        const findings = validateResearchEvidenceCoverage(researchEvidenceSchema.parse(value).findings, ids);
+        validateResearchEvidenceProfiles(findings, enabledProfileIds);
+      }
     } catch (error) {
       await db.insert(research_cache).values({
         id: `invalid:${id}:${Date.now()}`, team_id: run.team_id,
@@ -882,8 +894,8 @@ async function cachedModel(
   }
   const result = await callResearchModel(
     system,
-    { icp: run.icp, items: input },
-    schema,
+    { ...audience, items: input },
+    stage === "evidence" ? evidenceJsonSchemaForItems((input as Array<{ id: string }>).map(item => item.id), enabledProfileIds) : schema,
     outputTokens,
     { teamId: run.team_id, runId: run.id, stage: "research", operation: stage },
   );
