@@ -1,14 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { anthropicResearchRequest, anthropicResearchSchema } from './research-anthropic';
-import { callResearchModel, RESEARCH_MODEL, evidenceJsonSchema } from './research-model';
+import { callResearchModel, RESEARCH_MODEL, evidenceJsonSchema, ResearchModelRateLimitError } from './research-model';
 import { beginResearchUsage, finishResearchUsage } from './research-usage';
 
+const rejectionWrites = vi.hoisted(() => vi.fn());
+const rejectionStorage = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock('./db/client', () => ({ getDb: async () => ({ insert: () => ({ values: (value: unknown) => {
+  rejectionWrites(value);
+  return { onConflictDoNothing: rejectionStorage };
+} }) }) }));
 vi.mock('./research-usage', () => ({
   beginResearchUsage: vi.fn(async () => 'usage-id'),
   finishResearchUsage: vi.fn(async () => {}),
 }));
 const context = { teamId: 'team', runId: 'run', stage: 'research' as const, operation: 'screen' };
-afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); vi.clearAllMocks(); });
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); vi.clearAllMocks(); rejectionStorage.mockReset().mockResolvedValue(undefined); });
 
 function mockMessage(overrides: Record<string, unknown> = {}) {
   return vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
@@ -60,8 +66,10 @@ describe('Claude research transport', () => {
   it('redacts provider errors and never exposes the response body', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'test');
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('private provider details', { status: 401 }));
-    await expect(callResearchModel('system', {}, {}, 100, context)).rejects.toThrow('Anthropic request failed (HTTP 401)');
-    expect(finishResearchUsage).toHaveBeenCalledWith('usage-id', context, { model: RESEARCH_MODEL, tier: 'default', status: 'unknown' });
+    await expect(callResearchModel('system', {}, {}, 100, context)).rejects.toThrow('Anthropic request rejected (HTTP 401)');
+    expect(finishResearchUsage).toHaveBeenNthCalledWith(1, 'usage-id', context, { model: RESEARCH_MODEL, tier: 'default', status: 'http_401' });
+    expect(rejectionWrites).toHaveBeenCalledWith(expect.objectContaining({ id: 'research-provider-error:usage-id', team_id: 'team' }));
+    expect(JSON.stringify(rejectionWrites.mock.calls)).not.toContain('private provider details');
   });
 
   it('keeps explicit Sol writing on the OpenAI transport', async () => {
@@ -70,6 +78,27 @@ describe('Claude research transport', () => {
     await callResearchModel('writer', {}, {}, 100, context, 'gpt-6-sol');
     expect(fetcher.mock.calls[0][0]).toBe('https://api.openai.com/v1/responses');
     expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ model: 'gpt-6-sol', reasoning: { effort: 'none' } });
+  });
+
+  it('preserves a known rejection when diagnostic-only storage fails', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test');
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ error: { type: 'rate_limit_error' } }, { status: 429 }));
+    rejectionStorage.mockRejectedValueOnce(new Error('Diagnostic cache unavailable'));
+    const logger = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await expect(callResearchModel('system', {}, {}, 100, context)).rejects.toBeInstanceOf(ResearchModelRateLimitError);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(finishResearchUsage).toHaveBeenCalledTimes(1);
+    expect(finishResearchUsage).toHaveBeenCalledWith('usage-id', context, expect.objectContaining({ status: 'http_429' }));
+    expect(logger).toHaveBeenCalledWith('Provider rejection diagnostic storage failed', expect.objectContaining({ temporary: true }));
+  });
+
+  it('fails visibly if known-rejection usage cannot be persisted, without mislabeling it unknown', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ error: { type: 'rate_limit_error' } }, { status: 429 }));
+    vi.mocked(finishResearchUsage).mockRejectedValueOnce(new Error('Usage storage unavailable'));
+    await expect(callResearchModel('system', {}, {}, 100, context)).rejects.toThrow('HTTP 429; rate_limit_error');
+    expect(finishResearchUsage).toHaveBeenCalledTimes(1);
+    expect(rejectionWrites).not.toHaveBeenCalled();
   });
 
   it('preserves schema property names and enums while translating constraints', () => {

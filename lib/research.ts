@@ -362,6 +362,10 @@ export async function createResearchRun(
     .object({
       days: z.union([z.literal(1), z.literal(7), z.literal(30)]).default(30),
       mode: z.enum(["scan", "collect"]).default("scan"),
+      sourceIds: z.array(z.string().min(1)).min(1)
+        .refine(ids => new Set(ids).size === ids.length, "Source IDs must be unique")
+        .refine(ids => ids.every(id => RESEARCH_SOURCE_SEEDS.some(source => source.id === id)), "Source IDs must identify registered research sources")
+        .optional(),
     })
     .strict()
     .parse(input);
@@ -375,6 +379,13 @@ export async function createResearchRun(
     throw new Error("Set OPENAI_API_KEY in Cloudflare secrets to generate research drafts");
   await initializeResearch(teamId);
   const db = await getDb();
+  if (data.sourceIds) {
+    const enabled = await db.select({ seedId: research_sources.seed_id }).from(research_sources).where(and(
+      eq(research_sources.team_id, teamId), eq(research_sources.enabled, true),
+    )).all();
+    const enabledIds = new Set(enabled.map(source => source.seedId));
+    z.array(z.string()).refine(ids => ids.every(id => enabledIds.has(id)), "Requested sources must be enabled for this team").parse(data.sourceIds);
+  }
   const active = await db
     .select()
     .from(research_runs)
@@ -391,6 +402,11 @@ export async function createResearchRun(
     )
     .get();
   if (active) {
+    if (data.sourceIds) {
+      const activeIds = new Set(JSON.parse(active.source_ids) as string[]);
+      if (activeIds.size !== data.sourceIds.length || data.sourceIds.some(id => !activeIds.has(id)))
+        throw new Error("A research run with different sources is active. Wait for it to finish before starting this source subset.");
+    }
     if (!scheduledRunId || active.id === scheduledRunId)
       await dispatchResearchRun(active.id);
     return { run: runView(active) };
@@ -425,7 +441,7 @@ export async function createResearchRun(
       )
       .all(),
   ]);
-  const ids = sources
+  const ids = data.sourceIds ?? sources
     .map((source) => source.seed_id)
     .filter((id) => RESEARCH_SOURCE_SEEDS.some((seed) => seed.id === id));
   if (!ids.length) throw new Error("Enable at least one research source");

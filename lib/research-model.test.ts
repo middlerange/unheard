@@ -126,10 +126,38 @@ it("normalizes keyed evidence while retaining legacy cached arrays and quote val
   expect(validateResearchEvidence(ungrounded.findings, items)).toEqual([]);
 });
 
+it("places the supported claim, exact evidence and limitations before the final evidence score", () => {
+  const fields = ["summary", "evidence", "contentAngle", "whyItMatters", "limitations", "familyKey", "score"];
+  const schema = evidenceJsonSchemaForItems(["study"]).properties.findings.properties.study;
+  expect(Object.keys(schema.properties)).toEqual(fields);
+  expect(schema.required).toEqual(fields);
+  expect(Object.keys(researchEvidenceSchema.parse({ findings: [finding] }).findings[0])).toEqual(["itemId", ...fields]);
+  expect(validateResearchEvidence([{ ...finding, evidence: "Unverified efficacy that the source does not contain." }], items)).toEqual([]);
+});
+
 it("preserves original quote offsets after Unicode case expansion", () => {
   const quote = "Measured conversion improved after reducing setup fields.";
   expect(matchResearchQuote(`İ News. ${quote} More text.`, quote)).toBe(quote);
   expect(matchResearchQuote(`İ News. ${quote}`, quote)).toBe(quote);
+});
+
+it("returns the actual contiguous source span for curly and straight quotation marks", () => {
+  const sourceQuote = 'The team’s “first‑run” test — recorded in March – was complete… then reviewed.';
+  const equivalent = `The team's "first‑run" test — recorded in March – was complete… then reviewed.`;
+  expect(matchResearchQuote(`İ Earlier… ${sourceQuote} Later.`, equivalent)).toBe(sourceQuote);
+  expect(matchResearchQuote(equivalent, sourceQuote)).toBe(equivalent);
+  expect(matchResearchQuote(sourceQuote, `"${equivalent}"`)).toBe(sourceQuote);
+  expect(matchResearchQuote(sourceQuote, `The team's "first‑run" test — recorded in March – was successful… then reviewed.`)).toBeNull();
+  expect(matchResearchQuote(sourceQuote, equivalent.replace('—', '-'))).toBeNull();
+  expect(matchResearchQuote(sourceQuote, equivalent.replace('…', '...'))).toBeNull();
+  expect(matchResearchQuote(sourceQuote, `The team's "first-run" test ... then reviewed.`)).toBeNull();
+});
+
+it("keeps transcript omissions, added attribution and stitched evidence outside typography matching", () => {
+  const source = 'Teams review the proposed requirements. [12:31] They approve the next phase. The vendor reports faster delivery.';
+  expect(matchResearchQuote(source, 'Teams review the proposed requirements. They approve the next phase.')).toBeNull();
+  expect(matchResearchQuote(source, 'According to AWS, teams review the proposed requirements.')).toBeNull();
+  expect(matchResearchQuote(source, 'Teams review the proposed requirements. The vendor reports faster delivery.')).toBeNull();
 });
 
 it("allows explicit rejections without inventing a supporting quote, but cannot save an ungrounded positive", () => {

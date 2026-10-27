@@ -363,6 +363,55 @@ describe("research persistence and team isolation", () => {
       globalThis.__contentHubResearchWorkflow__ = previousWorkflow;
     }
   });
+  it('validates explicit source subsets before dispatch and preserves preferences and the all-enabled default', async () => {
+    const teamId = 'source-subset';
+    const seeds = RESEARCH_SOURCE_SEEDS.filter(source => source.enabled).slice(0, 3);
+    execute({ queries: [{ sql: 'INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)', params: [teamId, teamId, teamId] }] });
+    await initializeResearch(teamId);
+    execute({ queries: [
+      { sql: 'UPDATE research_sources SET enabled=0 WHERE team_id=? AND seed_id=?', params: [teamId, seeds[2].id] },
+      { sql: "UPDATE research_settings SET daily_time='21:51',daily_timezone='Asia/Kolkata',next_daily_at=1793118060000 WHERE team_id=?", params: [teamId] },
+    ] });
+    const preferences = execute({ queries: [
+      { sql: 'SELECT * FROM research_sources WHERE team_id=? ORDER BY id', params: [teamId] },
+      { sql: 'SELECT * FROM research_settings WHERE team_id=?', params: [teamId] },
+    ] });
+    expect(execute({ queries: [{ sql: "SELECT enabled FROM research_sources WHERE team_id='b' AND seed_id=?", params: [seeds[2].id] }] })[0].results[0].enabled).toBe(1);
+    const priorWorkflow = globalThis.__contentHubResearchWorkflow__;
+    const dispatch = vi.fn(async () => ({}));
+    globalThis.__contentHubResearchWorkflow__ = { create: dispatch };
+    try {
+      for (const ids of [[], [seeds[0].id, seeds[0].id], ['not-a-registered-source'], [seeds[2].id]]) {
+        await expect(createResearchRun(teamId, { mode: 'collect', days: 7, sourceIds: ids })).rejects.toThrow();
+      }
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(execute({ queries: [{ sql: 'SELECT id FROM research_runs WHERE team_id=?', params: [teamId] }] })[0].results).toHaveLength(0);
+      const sourceIds = [seeds[1].id, seeds[0].id];
+      const first = await createResearchRun(teamId, { mode: 'collect', days: 7, sourceIds });
+      expect(first.run.sourceCount).toBe(2);
+      expect(await processResearchJob({ operation: 'plan', runId: first.run.id })).toEqual({ sourceIds });
+      const repeated = await createResearchRun(teamId, { mode: 'collect', days: 7, sourceIds: [...sourceIds].reverse() });
+      expect(repeated.run.id).toBe(first.run.id);
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      await expect(createResearchRun(teamId, { mode: 'collect', sourceIds: [seeds[0].id] })).rejects.toThrow('different sources');
+      await expect(createResearchRun(teamId, { mode: 'collect', sourceIds: [seeds[2].id] })).rejects.toThrow('enabled for this team');
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      await processResearchJob({ operation: 'fail', runId: first.run.id, error: 'Subset verification finished' });
+      const all = await createResearchRun(teamId, { mode: 'collect', days: 7 });
+      const expectedIds = preferences[0].results.filter((source: { enabled: number; seed_id: string }) => source.enabled && RESEARCH_SOURCE_SEEDS.some(seed => seed.id === source.seed_id)).map((source: { seed_id: string }) => source.seed_id);
+      const plan = await processResearchJob({ operation: 'plan', runId: all.run.id });
+      expect('sourceIds' in plan ? plan.sourceIds?.slice().sort() : undefined).toEqual(expectedIds.sort());
+      expect(all.run.sourceCount).toBe(expectedIds.length);
+      expect(execute({ queries: [
+        { sql: 'SELECT * FROM research_sources WHERE team_id=? ORDER BY id', params: [teamId] },
+        { sql: 'SELECT * FROM research_settings WHERE team_id=?', params: [teamId] },
+      ] })).toEqual(preferences);
+      await processResearchJob({ operation: 'fail', runId: all.run.id, error: 'Default verification finished' });
+    } finally {
+      globalThis.__contentHubResearchWorkflow__ = priorWorkflow;
+    }
+  }, 30_000);
+
   it("keeps source preferences and runs inside their team", async () => {
     const a = await getResearchSnapshot("a");
     const seedId = a.sources[0].id;
@@ -542,6 +591,78 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
     }
   }, 30_000);
+  it.each(['rate_limit_exceeded', 'insufficient_quota', 'unknown_rejection'])('freezes writing history across an explicitly rejected repair and only continues known temporary limits: %s', async code => {
+    const teamId = `writing-limit-${code}`;
+    const runId = `${teamId}-run`;
+    const now = Date.now();
+    const quote = 'The team moved account setup after the first preview so users could inspect the output first.';
+    execute({ queries: [
+      { sql: 'INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)', params: [teamId, teamId, teamId] },
+      { sql: "INSERT INTO channels(id,team_id,name,platform,group_name,research_enabled,system_prompt,created_at) VALUES(?,?,'Personal','twitter','personal',1,'Explain specific product decisions and useful practitioner tests.',0)", params: [`${teamId}-x`, teamId] },
+      ...['prior', 'current'].map(kind => ({ sql: 'INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_ids) VALUES(?,?,?,?,1,1,?,?,?)', params: [kind === 'prior' ? `${teamId}-prior-run` : runId, teamId, 'scan', kind === 'prior' ? 'completed' : 'drafting', now, 'Product teams', JSON.stringify(['limit-source'])] })),
+      ...['prior', 'current'].flatMap(kind => [
+        { sql: 'INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,?)', params: [`${teamId}-${kind}-item`, teamId, 'limit-source', `https://example.com/${teamId}-${kind}`, 'Preview onboarding setup choices', quote, now - 1000, now, quote.repeat(10), 'article'] },
+        { sql: 'INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', params: [`${teamId}-${kind}-finding`, teamId, kind === 'prior' ? `${teamId}-prior-run` : runId, `${teamId}-${kind}-item`, 'limit-source', 'Preview onboarding setup choices', `https://example.com/${teamId}-${kind}`, now - 1000, 90, 'Preview precedes setup.', 'Commitment follows useful output.', 'Inspect the first-preview path before asking for setup.', quote, 'Reported workflow, no conversion result.', now, `${teamId}-${kind}-family`] },
+      ]),
+      { sql: 'INSERT INTO research_drafts(id,team_id,run_id,finding_id,content,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)', params: [`${teamId}-prior-draft`, teamId, `${teamId}-prior-run`, `${teamId}-prior-finding`, JSON.stringify({ targets: [{ channelId: `${teamId}-x`, platform: 'twitter', content: 'Use onboarding preview feedback to identify who owns the setup guidance.', thread: [] }] }), 'draft', now - 1000, now - 1000] },
+    ] });
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'test-frozen-writing';
+    let draftCalls = 0, repairCalls = 0, reviewCalls = 0;
+    const requests: unknown[] = [];
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const input = JSON.parse(JSON.parse(String(init?.body)).input);
+      requests.push(input);
+      expect(input.priorPosts).toHaveLength(1);
+      expect(input.priorPosts[0]).toMatchObject({ draftId: `${teamId}-prior-draft`, status: 'draft' });
+      if (input.proposed) { reviewCalls++; return editorialReviewFixture(); }
+      if (input.previousInvalidResponse) {
+        repairCalls++;
+        expect(input.validationError).toContain('281 characters');
+        if (repairCalls === 1) return Response.json({ error: { code, message: 'Private provider detail must not be retained.' } }, { status: 429, headers: { 'retry-after': '59' } });
+      } else draftCalls++;
+      const content = input.previousInvalidResponse ? `Inspect the preview before asking for account setup. Source: ${input.source.url}` : `${'x'.repeat(257)} ${input.source.url}`;
+      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify({ ready: true, reason: 'A bounded first-preview decision.', editorial: editorialFixture(quote), targets: [{ channelId: `${teamId}-x`, platform: 'twitter', content, thread: [], supportQuote: quote, redditTitle: null, subreddit: null }] }) }] }] });
+    });
+    try {
+      if (code !== 'rate_limit_exceeded') {
+        await expect(processResearchDraftJob(runId)).rejects.toThrow('HTTP 429');
+      } else expect(await processResearchDraftJob(runId)).toEqual({ drafted: 0, pending: true, retryAfterMs: 60000 });
+      const [savedInput, progress] = execute({ queries: [
+        { sql: "SELECT value FROM research_cache WHERE team_id=? AND id LIKE 'research-writing-input:%'", params: [teamId] },
+        { sql: 'SELECT value FROM research_cache WHERE id=?', params: [`draft-progress:${runId}`] },
+      ] }).map((result: { results: unknown[] }) => result.results[0]);
+      expect(JSON.parse(progress.value)).toMatchObject({ nextOffset: 0, validationSkips: 0 });
+      expect(JSON.parse(savedInput.value).priorPosts[0].status).toBe('draft');
+      expect(draftCalls).toBe(1);
+      expect(repairCalls).toBe(1);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      if (code !== 'rate_limit_exceeded') return;
+      execute({ queries: [{ sql: "UPDATE research_drafts SET status='pending',updated_at=? WHERE id=?", params: [now + 1000, `${teamId}-prior-draft`] }] });
+      expect(await processResearchDraftJob(runId)).toEqual({ drafted: 1 });
+      expect(draftCalls).toBe(1);
+      expect(repairCalls).toBe(2);
+      expect(reviewCalls).toBe(1);
+      expect(fetcher).toHaveBeenCalledTimes(4);
+      expect(requests[1]).toEqual(requests[2]);
+      expect(execute({ queries: [{ sql: "SELECT value FROM research_cache WHERE team_id=? AND id LIKE 'research-writing-input:%'", params: [teamId] }] })[0].results).toEqual([{ value: savedInput.value }]);
+      const [drafts, revisions, run, usage] = execute({ queries: [
+        { sql: 'SELECT COUNT(*) count FROM research_drafts WHERE run_id=?', params: [runId] },
+        { sql: 'SELECT COUNT(*) count FROM research_draft_revisions WHERE team_id=?', params: [teamId] },
+        { sql: 'SELECT cache_hits FROM research_runs WHERE id=?', params: [runId] },
+        { sql: 'SELECT operation,status FROM research_usage WHERE run_id=? ORDER BY created_at', params: [runId] },
+      ] }).map((result: { results: unknown[] }) => result.results);
+      expect(drafts).toEqual([{ count: 1 }]);
+      expect(revisions).toEqual([{ count: 1 }]);
+      expect(run).toEqual([{ cache_hits: 1 }]);
+      expect(usage).toEqual([{ operation: 'draft', status: 'completed' }, { operation: 'draft_repair', status: 'http_429' }, { operation: 'draft_repair', status: 'completed' }, { operation: 'editorial_review', status: 'completed' }]);
+    } finally {
+      fetcher.mockRestore();
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+    }
+  }, 30_000);
+
   it.each(['committed reply lost', 'checkpoint outage'])('persists writing once through storage failure without repeating paid requests: %s', async mode => {
     const teamId = mode === 'committed reply lost' ? 'writing-storage-committed' : 'writing-storage-outage';
     const runId = `${teamId}-run`;

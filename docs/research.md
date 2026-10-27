@@ -177,6 +177,32 @@ token usage and cache hits. Changing the ICP or
 source set affects subsequent scans. The OpenAI API is billed separately from a
 Codex subscription; no subscription credentials are used.
 
+The authenticated `POST /api/research/runs` endpoint also accepts an optional
+`sourceIds` subset of registered sources enabled for that team. For example,
+`{"days":1,"mode":"collect","sourceIds":["pew-ai-original-research"]}`
+uses the normal collection workflow for Pew alone. Use `mode:"scan"` to include
+the normal screening/evidence stages and, for a daily scan, drafting. The array
+must be nonempty and unique; unknown or team-disabled IDs are rejected before
+dispatch. An explicit subset that differs from an active run returns HTTP409
+rather than silently reusing the wrong source set. Omitting `sourceIds` retains
+the all-enabled default. Subsets change only the new run's frozen source list;
+source preferences, schedules, publication dates and first-seen times stay intact.
+
+Research prompt version `research-v12-claim-first-evidence` asks the assessor to
+identify the strongest currently supported claim, exact quote, bounded angle and
+claim-specific limitations before assigning its final score. A described method
+can support an attributed inspection or test without proving the publisher's
+unrelated velocity or quality claims. Missing outcome evidence limits an outcome
+claim; it does not erase explicit method steps. Material contradictions and
+availability limits still apply, and a vague teaser must not be rescued with an
+invented mechanism. The score remains last in the evidence response contract.
+This changes future-version assessment requests; earlier versioned caches and
+saved decisions remain stored unchanged. The change does not establish higher
+recall or better content until measured against both positive and negative inputs.
+Quote matching tolerates curly versus straight quotation marks while returning
+the original contiguous source span. It does not accept word substitutions,
+stitched passages, removed transcript annotations or changed punctuation.
+
 Findings and draft candidates require a score of at least 70 and an evidence quote matched against
 collected article text or captions. Each finding includes the source, date, ICP
 relevance, content angle, and limitations. Weak evidence can yield zero findings. Scores of 80+ remain a higher-priority band,
@@ -220,6 +246,19 @@ than changing only its hook, source URL, style or family key. History retains it
 actual review status and is comparison material, not source evidence. The writing
 version changes independently of the research prompt/cache version.
 
+Each candidate's complete writing input is frozen before its first paid request.
+Later Slack status changes cannot change its history context or invalidate a
+completed generation cache during recovery. A requested edit has a separate
+snapshot keyed by the current copy and edit instruction. Input snapshots and
+model responses remain in the database; workflow steps carry only progress.
+An explicitly rejected HTTP429 with a recognized temporary rate-limit code
+returns a cooldown without advancing the candidate. The workflow waits durably,
+then starts a new step using the same frozen input and completed response caches.
+Quota/billing rejections, unrecognized429s and interrupted responses remain
+visible failures; they are not automatically retried. Paid requests and whole
+paid workflow steps retain zero automatic retries. Safe provider rejection
+metadata is stored separately from source text and credentials.
+
 ## Recall replay
 
 Use `bun scripts/evaluate-research-recall.ts --benchmark /private/benchmark.json
@@ -248,6 +287,20 @@ and usage-ledger writes retry
 only a lost storage connection, at most three times. Frozen write payloads and
 the usage ledger's pending-state guard make a committed write with a lost reply
 safe to repeat. This never retries a model request or an entire paid step.
+Writing freezes the complete per-candidate input before its first model request,
+including prior-review statuses and copy. Slack delivery cannot change that
+request's cache key during recovery. Edits receive separate snapshots based on
+their current content and instruction.
+
+A confirmed temporary HTTP429 rejection with a recognized provider rate-limit
+code/type can defer the same candidate until the provider's reset time. The
+Workflow sleeps durably and starts a new draft step; completed model responses
+remain cached and the candidate offset does not advance. Quota failures,
+unknown rejection codes, interrupted requests and storage failures remain visible
+failures. Paid-step retries remain disabled. Rejection diagnostics retain only
+allowlisted codes/types, request IDs and numeric limits; provider messages,
+prompts and credentials are excluded. Known HTTP usage status is persisted
+before optional diagnostic-cache storage. Unknown costs remain unknown.
 
 All user APIs are scoped to the authenticated team. Workflow operations use a
 timestamped HMAC-signed internal endpoint. API keys remain server-side. Fetching is

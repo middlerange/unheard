@@ -15,6 +15,7 @@ import {
   callResearchModel,
   matchResearchQuote,
   researchHash,
+  ResearchModelRateLimitError,
 } from "./research-model";
 import { RESEARCH_POST_MIN_SCORE } from "./research-policy";
 import { RESEARCH_TEXT_PLATFORMS } from "./research-profiles";
@@ -300,103 +301,119 @@ async function generateDraft(
   editorialInstruction?: string,
 ) {
   const db = await getDb();
-  const [item, brand, sourceBundle, priorDrafts, teamChannels] = await Promise.all([
-    db
-      .select()
-      .from(research_items)
-      .where(
-        and(
-          eq(research_items.id, finding.item_id),
-          eq(research_items.team_id, run.team_id),
-        ),
-      )
-      .get(),
-    db
-      .select()
-      .from(brand_profiles)
-      .where(
-        and(
-          eq(brand_profiles.team_id, run.team_id),
-          eq(brand_profiles.is_default, true),
-        ),
-      )
-      .get(),
-    db.select().from(research_cache).where(and(
-      eq(research_cache.id, `research-family-sources:${run.id}:${finding.family_key}`),
-      eq(research_cache.team_id, run.team_id),
-    )).get(),
-    db.select({
-      id: research_drafts.id, runId: research_drafts.run_id, findingId: research_drafts.finding_id,
-      content: research_drafts.content, createdAt: research_drafts.created_at, status: research_drafts.status, isTest: research_drafts.is_test,
-      familyKey: research_findings.family_key, title: research_findings.title, url: research_findings.url,
-      publishedAt: research_findings.published_at, summary: research_findings.summary, contentAngle: research_findings.content_angle, evidence: research_findings.evidence,
-    }).from(research_drafts).innerJoin(research_findings, and(
-      eq(research_findings.id, research_drafts.finding_id), eq(research_findings.team_id, research_drafts.team_id),
-    )).where(eq(research_drafts.team_id, run.team_id)).all(),
-    db.select({ id: channels.id, platform: channels.platform, name: channels.name, groupName: channels.group_name })
-      .from(channels).where(eq(channels.team_id, run.team_id)).all(),
-  ]);
-  if (
-    !item?.content ||
-    (item.content_type === "video" && item.transcript_status !== "available")
-  )
-    throw new ResearchDraftValidationError("Full source evidence is unavailable for this draft");
-  const sourceContent = item.content.slice(0, 14000);
-  const noveltyContext = researchNoveltyContext(priorDrafts, teamChannels, {
-    findingId: finding.id, familyKey: finding.family_key, title: finding.title, url: finding.url,
-    summary: finding.summary, contentAngle: finding.content_angle, evidence: finding.evidence, content: sourceContent,
-  }, destinations);
-  const bundled = sourceBundle ? JSON.parse(sourceBundle.value) as { items: Array<{ itemId: string; evidence: string }> } : null;
-  const relatedIds = bundled?.items.filter(member => member.itemId !== item.id).map(member => member.itemId) || [];
-  const relatedItems = relatedIds.length ? await db.select().from(research_items).where(and(
-    eq(research_items.team_id, run.team_id), inArray(research_items.id, relatedIds),
-  )).all() : [];
-  const supportingItem = relatedItems.find(candidate => candidate.canonical_url !== finding.url
-    && candidate.content && candidate.content.slice(0, 14000).trim() !== sourceContent.trim()
-    && candidate.published_at !== null && candidate.published_at <= run.created_at
-    && (candidate.content_type !== "video" || candidate.transcript_status === "available")
-    && matchResearchQuote(candidate.content.slice(0, 14000), bundled!.items.find(member => member.itemId === candidate.id)!.evidence));
-  const supportingSources = supportingItem?.content ? [{
-    url: supportingItem.canonical_url, title: supportingItem.title,
-    publishedAt: new Date(supportingItem.published_at!).toISOString(),
-    content: supportingItem.content.slice(0, 14000), contentProvenance: supportingItem.content_provenance,
-  }] : [];
-  const input = {
-    ...noveltyContext,
-    icp: run.icp,
-    brand: brand
-      ? {
-          name: brand.name,
-          voice: brand.voice,
-          audience: brand.audience,
-          writingGuidelines: brand.writing_prompt,
-        }
-      : null,
-    source: {
-      title: finding.title,
-      url: finding.url,
-      publishedAt: new Date(finding.published_at).toISOString(),
-      discoveredAt: new Date(item.collected_at).toISOString(),
-      signalKind: finding.published_at < run.created_at - run.days * 86400000
-        ? "evergreen_newly_discovered" : "fresh",
-      content: sourceContent,
-      contentProvenance: item.content_provenance,
-      ...(supportingSources.length ? { supportingSources } : {}),
-    },
-    finding: {
-      summary: finding.summary,
-      whyItMatters: finding.why_it_matters,
-      contentAngle: finding.content_angle,
-      evidence: finding.evidence,
-      limitations: finding.limitations,
-    },
-    destinations,
-    identityGroups: groupResearchIdentities(destinations).map(group => ({
-      id: group.id, name: group.name, channelIds: group.profiles.map(profile => profile.id),
-    })),
-    current: current || null,
-    editorialInstruction: editorialInstruction || null,
-  };
+  const inputId = `research-writing-input:${run.id}:${finding.id}:${DRAFT_PROMPT_VERSION}${current ? `:${await researchHash(JSON.stringify([current, editorialInstruction || null]))}` : ""}`;
+  let frozenInput = await db.select().from(research_cache).where(and(
+    eq(research_cache.id, inputId), eq(research_cache.team_id, run.team_id),
+  )).get();
+  if (!frozenInput) {
+    const [item, brand, sourceBundle, priorDrafts, teamChannels] = await Promise.all([
+      db
+        .select()
+        .from(research_items)
+        .where(
+          and(
+            eq(research_items.id, finding.item_id),
+            eq(research_items.team_id, run.team_id),
+          ),
+        )
+        .get(),
+      db
+        .select()
+        .from(brand_profiles)
+        .where(
+          and(
+            eq(brand_profiles.team_id, run.team_id),
+            eq(brand_profiles.is_default, true),
+          ),
+        )
+        .get(),
+      db.select().from(research_cache).where(and(
+        eq(research_cache.id, `research-family-sources:${run.id}:${finding.family_key}`),
+        eq(research_cache.team_id, run.team_id),
+      )).get(),
+      db.select({
+        id: research_drafts.id, runId: research_drafts.run_id, findingId: research_drafts.finding_id,
+        content: research_drafts.content, createdAt: research_drafts.created_at, status: research_drafts.status, isTest: research_drafts.is_test,
+        familyKey: research_findings.family_key, title: research_findings.title, url: research_findings.url,
+        publishedAt: research_findings.published_at, summary: research_findings.summary, contentAngle: research_findings.content_angle, evidence: research_findings.evidence,
+      }).from(research_drafts).innerJoin(research_findings, and(
+        eq(research_findings.id, research_drafts.finding_id), eq(research_findings.team_id, research_drafts.team_id),
+      )).where(eq(research_drafts.team_id, run.team_id)).all(),
+      db.select({ id: channels.id, platform: channels.platform, name: channels.name, groupName: channels.group_name })
+        .from(channels).where(eq(channels.team_id, run.team_id)).all(),
+    ]);
+    if (
+      !item?.content ||
+      (item.content_type === "video" && item.transcript_status !== "available")
+    )
+      throw new ResearchDraftValidationError("Full source evidence is unavailable for this draft");
+    const sourceContent = item.content.slice(0, 14000);
+    const noveltyContext = researchNoveltyContext(priorDrafts, teamChannels, {
+      findingId: finding.id, familyKey: finding.family_key, title: finding.title, url: finding.url,
+      summary: finding.summary, contentAngle: finding.content_angle, evidence: finding.evidence, content: sourceContent,
+    }, destinations);
+    const bundled = sourceBundle ? JSON.parse(sourceBundle.value) as { items: Array<{ itemId: string; evidence: string }> } : null;
+    const relatedIds = bundled?.items.filter(member => member.itemId !== item.id).map(member => member.itemId) || [];
+    const relatedItems = relatedIds.length ? await db.select().from(research_items).where(and(
+      eq(research_items.team_id, run.team_id), inArray(research_items.id, relatedIds),
+    )).all() : [];
+    const supportingItem = relatedItems.find(candidate => candidate.canonical_url !== finding.url
+      && candidate.content && candidate.content.slice(0, 14000).trim() !== sourceContent.trim()
+      && candidate.published_at !== null && candidate.published_at <= run.created_at
+      && (candidate.content_type !== "video" || candidate.transcript_status === "available")
+      && matchResearchQuote(candidate.content.slice(0, 14000), bundled!.items.find(member => member.itemId === candidate.id)!.evidence));
+    const supportingSources = supportingItem?.content ? [{
+      url: supportingItem.canonical_url, title: supportingItem.title,
+      publishedAt: new Date(supportingItem.published_at!).toISOString(),
+      content: supportingItem.content.slice(0, 14000), contentProvenance: supportingItem.content_provenance,
+    }] : [];
+    const proposedInput = {
+      ...noveltyContext,
+      icp: run.icp,
+      brand: brand
+        ? {
+            name: brand.name,
+            voice: brand.voice,
+            audience: brand.audience,
+            writingGuidelines: brand.writing_prompt,
+          }
+        : null,
+      source: {
+        title: finding.title,
+        url: finding.url,
+        publishedAt: new Date(finding.published_at).toISOString(),
+        discoveredAt: new Date(item.collected_at).toISOString(),
+        signalKind: finding.published_at < run.created_at - run.days * 86400000
+          ? "evergreen_newly_discovered" : "fresh",
+        content: sourceContent,
+        contentProvenance: item.content_provenance,
+        ...(supportingSources.length ? { supportingSources } : {}),
+      },
+      finding: {
+        summary: finding.summary,
+        whyItMatters: finding.why_it_matters,
+        contentAngle: finding.content_angle,
+        evidence: finding.evidence,
+        limitations: finding.limitations,
+      },
+      destinations,
+      identityGroups: groupResearchIdentities(destinations).map(group => ({
+        id: group.id, name: group.name, channelIds: group.profiles.map(profile => profile.id),
+      })),
+      current: current || null,
+      editorialInstruction: editorialInstruction || null,
+    };
+    const value = JSON.stringify(proposedInput);
+    const createdAt = Date.now();
+    await retryResearchStorage(async () => db.insert(research_cache).values({
+      id: inputId, team_id: run.team_id, value, created_at: createdAt,
+    }).onConflictDoNothing());
+    frozenInput = await db.select().from(research_cache).where(and(
+      eq(research_cache.id, inputId), eq(research_cache.team_id, run.team_id),
+    )).get();
+  }
+  if (!frozenInput) throw new Error("Writing input snapshot could not be read");
+  const input = JSON.parse(frozenInput.value) as ResearchDraftWritingInput;
   let inputTokens = 0, outputTokens = 0;
   const result = await runResearchDraftWriting(input, async (instructions, modelInput, schema, maxTokens, operation) => {
     const cacheId = await researchHash(JSON.stringify([run.team_id, RESEARCH_WRITING_MODEL, DRAFT_PROMPT_VERSION, operation, modelInput]));
@@ -665,6 +682,10 @@ export async function processResearchDraftJob(runId: string) {
     try {
       result = await generateDraft(run, finding, destinations);
     } catch (error) {
+      if (error instanceof ResearchModelRateLimitError) {
+        await checkpointDrafts();
+        return { drafted, pending: true, retryAfterMs: error.retryAfterMs };
+      }
       if (!(error instanceof ResearchDraftValidationError)) throw error;
       progress.validationSkips++;
       rejectedStories.push({

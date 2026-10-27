@@ -200,6 +200,45 @@ describe('durable research execution', () => {
     for (const [, config] of doStep.mock.calls.slice(1)) expect(config).toMatchObject({ retries: { limit: 0 } });
   });
 
+  it('waits durably before a new drafting step after an explicitly rejected temporary request, including replay', async () => {
+    let drafts = 0;
+    const invoke = vi.fn(async (payload: { operation: string }) => {
+      if (payload.operation === 'plan') return { sourceIds: [] };
+      if (payload.operation === 'rank') return { pending: false };
+      drafts++;
+      return drafts === 1 ? { drafted: 0, pending: true, retryAfterMs: 120001 } : { drafted: drafts - 1, pending: drafts < 3 };
+    });
+    const completed = new Map<string, unknown>();
+    const doStep = vi.fn(async (name: string, _options: unknown, work: () => Promise<unknown>) => {
+      if (!completed.has(name)) completed.set(name, await work());
+      return completed.get(name);
+    });
+    const sleep = vi.fn(async () => {});
+    expect(await runResearchWorkflow('limited-writing', { do: doStep, sleep }, invoke)).toEqual({ drafted: 2, pending: false });
+    expect(sleep).toHaveBeenCalledWith('Wait for research writing cooldown after batch 1', '121 seconds');
+    expect(doStep.mock.calls.map(([name]) => name)).toEqual(['Plan research collection', 'Rank findings', 'Draft daily posts', 'Draft daily posts batch 2', 'Draft daily posts batch 3']);
+    for (const [, options] of doStep.mock.calls.slice(1)) expect(options).toMatchObject({ retries: { limit: 0 } });
+    const requests = invoke.mock.calls.length;
+    await runResearchWorkflow('limited-writing', { do: doStep, sleep }, invoke);
+    expect(invoke).toHaveBeenCalledTimes(requests);
+    expect(drafts).toBe(3);
+  });
+
+  it('fails visibly without sleeping or repeating a writing request whose outcome is unknown', async () => {
+    const invoke = vi.fn(async (payload: { operation: string }) => {
+      if (payload.operation === 'plan') return { sourceIds: [] };
+      if (payload.operation === 'rank') return { pending: false };
+      if (payload.operation === 'drafts') throw new Error('Model response interrupted');
+      return { status: 'failed' };
+    });
+    const sleep = vi.fn(async () => {});
+    const doStep = vi.fn(async (_name: string, _options: unknown, work: () => Promise<unknown>) => work());
+    await expect(runResearchWorkflow('unknown-writing', { do: doStep, sleep }, invoke)).rejects.toThrow('Model response interrupted');
+    expect(sleep).not.toHaveBeenCalled();
+    expect(invoke.mock.calls.map(([payload]) => payload.operation)).toEqual(['plan', 'rank', 'drafts', 'fail']);
+    expect(doStep.mock.calls.find(([name]) => name === 'Draft daily posts')?.[1]).toMatchObject({ retries: { limit: 0 } });
+  });
+
   it('signs internal dispatch and surfaces a failed handler response', async () => {
     let received: Request | undefined;
     const handler = {

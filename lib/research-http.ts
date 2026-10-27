@@ -31,6 +31,8 @@ export async function researchHttp(
       return Response.json({ error: message }, { status: 400 });
     if (/Workflow is unavailable/i.test(message))
       return Response.json({ error: message }, { status: 503 });
+    if (/research run with different sources is active/i.test(message))
+      return Response.json({ error: message }, { status: 409 });
     console.error("Research request failed:", error);
     return Response.json(
       { error: "Research request failed. Please retry." },

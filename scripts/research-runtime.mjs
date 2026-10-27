@@ -71,6 +71,9 @@ export async function runResearchWorkflow(runId, step, invoke) {
     batch = 1;
     let drafts = await step.do('Draft daily posts', paidOptions, () => invoke({ operation: 'drafts', runId }));
     while (drafts?.pending === true) {
+      if (Number.isFinite(drafts.retryAfterMs) && drafts.retryAfterMs > 0) {
+        await step.sleep(`Wait for research writing cooldown after batch ${batch}`, `${Math.ceil(drafts.retryAfterMs / 1000)} seconds`);
+      }
       batch++;
       drafts = await step.do(`Draft daily posts batch ${batch}`, paidOptions, () => invoke({ operation: 'drafts', runId }));
     }
