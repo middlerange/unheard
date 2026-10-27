@@ -61,7 +61,7 @@ const evidenceAssessment = z.object({
   contentAngle: text,
   whyItMatters: text,
   limitations: text,
-  familyKey: z.string().min(3).max(160),
+  familyKey: z.union([z.string().min(3).max(160), z.literal("")]),
   score: z.number().int().min(0).max(100),
 });
 export const researchEvidenceSchema = z.object({
@@ -70,6 +70,11 @@ export const researchEvidenceSchema = z.object({
     z.record(z.string(), evidenceAssessment.omit({ itemId: true }).strict())
       .transform(value => Object.entries(value).map(([itemId, assessment]) => ({ itemId, ...assessment }))),
   ]).pipe(z.array(evidenceAssessment).max(12)),
+}).superRefine(({ findings }, context) => {
+  findings.forEach((finding, index) => {
+    if (finding.familyKey === "" && !(finding.score === 0 && finding.chosenProfileId === null))
+      context.addIssue({ code: "custom", path: ["findings", index, "familyKey"], message: "A story family is required except for an explicit zero-score no-profile rejection" });
+  });
 });
 export type ResearchEvidence = z.infer<
   typeof researchEvidenceSchema

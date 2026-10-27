@@ -26,13 +26,15 @@ export async function handleResearchProcess(request: Request) {
     ))
   )
     return Response.json({ error: "Unauthorized" }, { status: 401 });
+  let job: z.infer<typeof researchJobSchema>;
   try {
-    return Response.json(
-      await processResearchJob(researchJobSchema.parse(JSON.parse(body))),
-    );
+    job = researchJobSchema.parse(JSON.parse(body));
+  } catch {
+    return Response.json({ error: "Invalid research job" }, { status: 400 });
+  }
+  try {
+    return Response.json(await processResearchJob(job));
   } catch (error) {
-    if (error instanceof z.ZodError || error instanceof SyntaxError)
-      return Response.json({ error: "Invalid research job" }, { status: 400 });
     const message = researchJobErrorMessage(error);
     console.error("Research job failed:", message);
     return Response.json(

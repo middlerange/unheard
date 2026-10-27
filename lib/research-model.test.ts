@@ -56,6 +56,27 @@ describe("v15 chosen-profile evidence protocol", () => {
   });
 });
 
+describe("explicit no-profile rejection families", () => {
+  it("preserves a valid positive alongside zero-score no-profile answers without a story family", () => {
+    const positive = { ...finding, chosenProfileId: "personal", profileFit: "A supported product decision." };
+    const negative = { ...finding, itemId: "unrelated", familyKey: "", score: 0, chosenProfileId: null, profileFit: "No supplied profile covers this unrelated infrastructure report." };
+    const { itemId: _positiveId, ...positiveBody } = positive, { itemId: _negativeId, ...negativeBody } = negative;
+    const parsed = researchEvidenceSchema.parse({ findings: { study: positiveBody, unrelated: negativeBody } });
+    expect(validateResearchEvidenceCoverage(parsed.findings, ["study", "unrelated"])).toEqual([positive, negative]);
+    expect(validateResearchEvidenceProfiles(parsed.findings, ["personal"])).toEqual([positive, negative]);
+    expect(validateResearchEvidence(parsed.findings, items)).toEqual([positive]);
+  });
+  it.each([
+    { score: 70, chosenProfileId: "personal" },
+    { score: 70, chosenProfileId: null },
+    { score: 1, chosenProfileId: null },
+    { score: 0, chosenProfileId: "personal" },
+    { score: 0 },
+  ])("keeps story families required for every other assessment: %j", choice => {
+    expect(() => researchEvidenceSchema.parse({ findings: [{ ...finding, ...choice, familyKey: "" }] })).toThrow("story family");
+  });
+});
+
 describe("research evidence quote formatting", () => {
   it.each([["“", "”"], ['"', '"'], ["‘", "’"], ["'", "'"]])(
     "verifies an exact excerpt wrapped in %s%s and stores the excerpt itself",

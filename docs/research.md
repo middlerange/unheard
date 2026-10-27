@@ -218,6 +218,9 @@ paid assessment; later channel edits cannot change that context. Evidence respon
 identify a supplied profile and explain its fit before returning the score. A
 positive finding requires a valid profile ID; a negative assessment can explicitly
 report no fitting profile. This does not relax the score or source-evidence guards.
+An explicit zero-score, no-profile rejection may leave its unused story family
+empty. Every other assessment retains the minimum family-key length. Valid
+findings in the same response are preserved when such rejections are present.
 Malformed captured profiles fail visibly. Legacy runs with no captured profiles
 receive an explicit audience-only research profile, which cannot itself serve as a
 publishing destination. Earlier versioned decisions and completed checkpoints are
@@ -345,6 +348,9 @@ quality. Writing-provider access is not tested by this check. Known rejections
 retain only allowlisted diagnostics, including finite content-type/body-kind
 labels, so an unknown HTTP403 is not automatically described as a quota failure.
 See the [Claude model metadata API](https://platform.claude.com/docs/en/api/models/retrieve).
+The signed processing endpoint distinguishes malformed job input (HTTP400) from
+downstream model, cache or storage validation failures (HTTP500); valid job input
+does not become a client error because a later response fails validation.
 
 Apply D1 migrations `0025_research.sql` and `0026_daily_research_slack.sql` before deploying. Keep the existing
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and a `SESSION_SECRET` of at least 32 characters in Worker secrets.
