@@ -8,7 +8,7 @@ and customer communication.
 ## Sources and coverage
 
 The catalog in `lib/research-sources.ts` preserves all 43 original entries and adds
-71 sources: 114 entries with 74 enabled defaults. These combine individual
+72 sources: 115 entries with 75 enabled defaults. These combine individual
 practitioners, original research, primary industry announcements, product
 interviews, and three optional discovery lanes. All 23 competitor sources remain
 disabled by default. Each team's existing source preferences are preserved.
@@ -29,9 +29,15 @@ even when an earlier matching WebPage entry lacks a publication date. Gartner's
 initial HTTP403 failures remain a coverage warning; only public release text is
 evidence, with short summaries hydrated before screening. Undated living
 artifacts were not enabled as fresh sources.
+Pew's scoped AI research index adds original search-use and survey studies.
+Its exact July 2025 AI-summary click study is explicitly backfilled because it is
+absent from the current index. A local adapter probe read all 13 planned pages;
+Cloudflare access and ICP qualification remain separate checks. The consumer
+sample and click denominators must not become causal B2B traffic claims.
 Known original articles that have aged out of a current index or RSS response
 can be supplied through a source's explicit `backfillUrls`. AWS's original AI-DLC
-definition, Gartner's original agent-project forecast, and Swan's Brain release
+definition, Gartner's original agent-project forecast, Swan's Brain release,
+and Pew's original AI-summary study
 are connected this way. Backfill URLs enter the same durable public-page queue,
 retain their own publication dates, and qualify only under the separately labeled
 newly discovered evergreen policy when historical. Their discovery date never
@@ -237,7 +243,8 @@ entrypoint. The normal build generates the Worker wrapper and shared runtime.
 Cloudflare Workflows persist collection steps independently of browser requests.
 Source steps retry; paid ranking does not automatically retry an interrupted
 request. A failed run can be followed by a new scan, which reuses persisted caches.
-Idempotent model-cache, atomic ranking-checkpoint and usage-ledger writes retry
+Idempotent model-cache, atomic ranking/writing checkpoints, draft/revision inserts
+and usage-ledger writes retry
 only a lost storage connection, at most three times. Frozen write payloads and
 the usage ledger's pending-state guard make a committed write with a lost reply
 safe to repeat. This never retries a model request or an entire paid step.

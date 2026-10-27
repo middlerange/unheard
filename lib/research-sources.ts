@@ -1318,5 +1318,23 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "enabled": true,
     "priority": 2,
     "notes": "Official public research release RSS verified during upstream-source repair: twenty-five dated summaries. Original dated public pages can hydrate to substantial text, including the June2025 agent-project cancellation forecast. Feed and article initially returned HTTP403 and succeeded on a later probe; access can vary and failures must remain visible. Hydrate short excerpts before screening; public press-release evidence does not imply access to gated reports or unseen methods. Keep forecasts distinct from observed outcomes, retain sample/method limitations, and preserve original dates rather than later social discussion dates. Filter unrelated enterprise IT predictions against the actual ICP."
+  },
+  {
+    "id": "pew-ai-original-research",
+    "name": "Pew — primary AI use and search studies",
+    "url": "https://www.pewresearch.org/topic/internet-technology/emerging-technology/artificial-intelligence/",
+    "kind": "web",
+    "category": "research",
+    "enabled": true,
+    "priority": 1,
+    "articlePathPrefixes": [
+      "/short-reads/",
+      "/internet/",
+      "/data-labs/"
+    ],
+    "backfillUrls": [
+      "https://www.pewresearch.org/short-reads/2025/07/22/google-users-are-less-likely-to-click-on-links-when-an-ai-summary-appears-in-the-results/"
+    ],
+    "notes": "Original Pew AI/search-use and survey-method research only. Public topic index plus exact historical AI-summary study backfill locally collector-probed27October2026:13/13planned pages dated/readable; this is not Worker coverage. Preserve original article dates and studied population, period, denominators, selection and measurement limitations. The22July2025AI-overview study observes900U.S.adults duringMarch2025;1%is clicks on summary-source links per visits with a summary, not all search traffic. Do not infer causal SEO decline, business-buyer behavior, or AI accuracy from this consumer study. Retain only practical product/growth/customer-research implications; exclude partisan/election, geopolitical, labor and general AI-opinion news without specific ICP relevance. Public notes/abstracts are not full report evidence. Index-first-page discovery does not promise complete historical site enumeration."
   }
 ];

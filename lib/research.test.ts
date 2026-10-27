@@ -542,6 +542,82 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
     }
   }, 30_000);
+  it.each(['committed reply lost', 'checkpoint outage'])('persists writing once through storage failure without repeating paid requests: %s', async mode => {
+    const teamId = mode === 'committed reply lost' ? 'writing-storage-committed' : 'writing-storage-outage';
+    const runId = `${teamId}-run`;
+    const now = Date.now();
+    const quote = 'The team moved account setup after the first preview so users could inspect the output first.';
+    execute({ queries: [
+      { sql: 'INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)', params: [teamId, teamId, teamId] },
+      { sql: "INSERT INTO channels(id,team_id,name,platform,group_name,research_enabled,system_prompt,created_at) VALUES(?,?,'Personal','linkedin','personal',1,'Explain specific product decisions and useful practitioner tests.',0)", params: [`${teamId}-li`, teamId] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_ids) VALUES(?,?,'scan','drafting',1,1,?,'Product teams',?)", params: [runId, teamId, now, JSON.stringify(['writing-storage-source'])] },
+      { sql: 'INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,?)', params: [`${teamId}-item`, teamId, 'writing-storage-source', `https://example.com/${teamId}`, 'Inspect the first preview before setup', quote, now - 1000, now, quote.repeat(10), 'article'] },
+      { sql: 'INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', params: [`${teamId}-finding`, teamId, runId, `${teamId}-item`, 'writing-storage-source', 'Inspect the first preview before setup', `https://example.com/${teamId}`, now - 1000, 90, 'Preview precedes setup.', 'Commitment follows useful output.', 'Inspect the first-preview path before asking for setup.', quote, 'Reported workflow, no conversion result.', now, teamId] },
+    ] });
+    const priorKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'test-writing-storage';
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const input = JSON.parse(JSON.parse(String(init?.body)).input);
+      if (input.proposed) return editorialReviewFixture();
+      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify({ ready: true, reason: 'A bounded first-preview decision.', editorial: editorialFixture(quote), targets: [{ channelId: `${teamId}-li`, platform: 'linkedin', content: `Show users an inspectable output before asking for account setup. Audit whether the setup step needs information that the first preview has not yet given them. Source: ${input.source.url}`, thread: [], supportQuote: quote, redditTitle: null, subreddit: null }] }) }] }] });
+    });
+    const writes = new Map<string, unknown[][]>();
+    storageFault = (queries, phase) => {
+      let kind: string | undefined;
+      const cache = queries.find(query => query.sql.startsWith('insert into "research_cache"') && query.params.includes(teamId));
+      if (cache?.params.some(param => typeof param === 'string' && /^[a-f0-9]{64}$/.test(param))) kind = cache.params.some(param => typeof param === 'string' && param.includes('"verdict":"ready"')) ? 'editorial-cache' : 'draft-cache';
+      if (queries.some(query => query.sql.startsWith('insert into "research_drafts"'))) kind = 'draft-revision';
+      if (cache?.params.includes(`draft-progress:${runId}`) && cache.params.some(param => typeof param === 'string' && param.includes('"nextOffset":1'))) kind = 'checkpoint';
+      if (queries.some(query => query.sql.startsWith('update "research_runs"') && query.params.includes('completed'))) kind = 'completion';
+      if (!kind || phase !== (mode === 'checkpoint outage' && kind === 'checkpoint' ? 'before' : 'after')) return;
+      const attempts = writes.get(kind) || [];
+      attempts.push(queries.map(query => ({ sql: query.sql, params: [...query.params] })));
+      writes.set(kind, attempts);
+      if (mode === 'checkpoint outage' && kind === 'checkpoint') throw new Error('D1_ERROR: Network connection lost.');
+      if (mode === 'committed reply lost' && attempts.length === 1) throw new Error('Network connection lost.');
+    };
+    try {
+      if (mode === 'checkpoint outage') {
+        await expect(processResearchDraftJob(runId)).rejects.toThrow('Network connection lost');
+        expect(writes.get('checkpoint')).toHaveLength(3);
+        expect(execute({ queries: [{ sql: 'SELECT COUNT(*) count FROM research_cache WHERE team_id=? AND length(id)=64', params: [teamId] }] })[0].results[0].count).toBe(2);
+        const saved = execute({ queries: [{ sql: 'SELECT value FROM research_cache WHERE id=?', params: [`draft-progress:${runId}`] }] })[0].results[0];
+        expect(JSON.parse(saved.value).nextOffset).toBe(0);
+        storageFault = undefined;
+      }
+      expect(await processResearchDraftJob(runId)).toEqual({ drafted: 1 });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      const [draftCount, revisionCount, cacheCount, checkpoint, run, usage, reviewJobs] = execute({ queries: [
+        { sql: 'SELECT COUNT(*) count FROM research_drafts WHERE run_id=?', params: [runId] },
+        { sql: 'SELECT COUNT(*) count FROM research_draft_revisions WHERE team_id=?', params: [teamId] },
+        { sql: 'SELECT COUNT(*) count FROM research_cache WHERE team_id=? AND length(id)=64', params: [teamId] },
+        { sql: 'SELECT value FROM research_cache WHERE id=?', params: [`draft-progress:${runId}`] },
+        { sql: 'SELECT status,diagnostics,input_tokens,output_tokens FROM research_runs WHERE id=?', params: [runId] },
+        { sql: 'SELECT COUNT(*) count FROM research_usage WHERE run_id=?', params: [runId] },
+        { sql: "SELECT COUNT(*) count FROM slack_jobs WHERE team_id=? AND kind='review'", params: [teamId] },
+      ] }).map((result: { results: unknown[] }) => result.results[0]);
+      expect(draftCount.count).toBe(1);
+      expect(revisionCount.count).toBe(1);
+      expect(cacheCount.count).toBe(2);
+      expect(usage.count).toBe(2);
+      expect(reviewJobs.count).toBe(1);
+      expect(JSON.parse(checkpoint.value)).toMatchObject({ nextOffset: 1, deliveryOffset: 1 });
+      expect(JSON.parse(run.diagnostics)).toMatchObject({ draftCandidatesCount: 1, draftedCount: 1 });
+      expect(run).toMatchObject({ status: 'completed', input_tokens: 30, output_tokens: 15 });
+      for (const [kind, attempts] of writes) {
+        const retryCount = mode === 'checkpoint outage' && kind === 'checkpoint' ? 3 : mode === 'committed reply lost' ? 2 : 1;
+        expect(attempts.length).toBeGreaterThanOrEqual(retryCount);
+        expect(attempts.slice(0, retryCount).every(value => JSON.stringify(value) === JSON.stringify(attempts[0]))).toBe(true);
+      }
+      if (mode === 'committed reply lost') expect([...writes.keys()].sort()).toEqual(['checkpoint', 'completion', 'draft-cache', 'draft-revision', 'editorial-cache']);
+    } finally {
+      storageFault = undefined;
+      fetcher.mockRestore();
+      if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = priorKey;
+    }
+  }, 30_000);
+
   it('retrieves legacy and current-run novelty history across family aliases while excluding an edit from its own history', async () => {
     const teamId = 'novelty-history';
     const now = Date.now();

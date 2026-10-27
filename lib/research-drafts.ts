@@ -24,6 +24,7 @@ import { assertResearchIdentityTargets, groupResearchIdentities, ResearchIdentit
 import { SLACK_TEST_PROMPT } from "./slack-test-content";
 import type { ResearchDraftContent, ResearchRunDiagnostics } from "./research-types";
 import { researchNoveltyContext, type ResearchNoveltyContext } from "./research-novelty";
+import { retryResearchStorage } from "./research-storage";
 
 import {
   RESEARCH_WRITING_VERSION, RESEARCH_WRITING_MODEL, RESEARCH_DRAFT_INSTRUCTIONS,
@@ -408,8 +409,10 @@ async function generateDraft(
       { teamId: run.team_id, runId: run.id, stage: current ? "slack_revision" : "draft_generation", operation }, RESEARCH_WRITING_MODEL);
     inputTokens += response.inputTokens;
     outputTokens += response.outputTokens;
-    await db.insert(research_cache).values({ id: cacheId, team_id: run.team_id, value: JSON.stringify(response.value), created_at: Date.now() })
-      .onConflictDoUpdate({ target: research_cache.id, set: { value: JSON.stringify(response.value), created_at: Date.now() } });
+    const value = JSON.stringify(response.value);
+    const createdAt = Date.now();
+    await retryResearchStorage(async () => db.insert(research_cache).values({ id: cacheId, team_id: run.team_id, value, created_at: createdAt })
+      .onConflictDoUpdate({ target: research_cache.id, set: { value, created_at: createdAt } }));
     return response.value;
   });
   return { ...result, inputTokens, outputTokens };
@@ -636,12 +639,15 @@ export async function processResearchDraftJob(runId: string) {
   };
   const rejectedStories = progress.rejectedStories;
   async function checkpointDrafts() {
-    await db.insert(research_cache).values({
-      id: progressId, team_id: run!.team_id, value: JSON.stringify(progress), created_at: Date.now(),
-    }).onConflictDoUpdate({ target: research_cache.id, set: { value: JSON.stringify(progress) } });
-    await db.update(research_runs).set({
-      diagnostics: JSON.stringify({ ...diagnostics, draftCandidatesCount: progress!.candidateIds.length, draftedCount: drafted, rejectedStories }),
-    }).where(eq(research_runs.id, runId));
+    const value = JSON.stringify(progress);
+    const savedDiagnostics = JSON.stringify({ ...diagnostics, draftCandidatesCount: progress!.candidateIds.length, draftedCount: drafted, rejectedStories });
+    const createdAt = Date.now();
+    await retryResearchStorage(async () => db.batch([
+      db.insert(research_cache).values({
+        id: progressId, team_id: run!.team_id, value, created_at: createdAt,
+      }).onConflictDoUpdate({ target: research_cache.id, set: { value } }),
+      db.update(research_runs).set({ diagnostics: savedDiagnostics }).where(eq(research_runs.id, runId)),
+    ]));
   }
   await checkpointDrafts();
   const batchIds = progress.selectedIds.slice(progress.nextOffset, progress.nextOffset + RESEARCH_DRAFT_BATCH_SIZE);
@@ -683,7 +689,8 @@ export async function processResearchDraftJob(runId: string) {
       `research-draft:${run.team_id}:${finding.id}`,
     );
     const now = Date.now();
-    await db.batch([
+    const content = JSON.stringify(result.content);
+    await retryResearchStorage(async () => db.batch([
       db
         .insert(research_drafts)
         .values({
@@ -691,7 +698,7 @@ export async function processResearchDraftJob(runId: string) {
           team_id: run.team_id,
           run_id: run.id,
           finding_id: finding.id,
-          content: JSON.stringify(result.content),
+          content,
           revision: 1,
           status: "draft",
           input_tokens: result.inputTokens,
@@ -707,11 +714,11 @@ export async function processResearchDraftJob(runId: string) {
           team_id: run.team_id,
           draft_id: id,
           revision: 1,
-          content: JSON.stringify(result.content),
+          content,
           created_at: now,
         })
         .onConflictDoNothing(),
-    ]);
+    ]));
     families.add(finding.family_key);
     drafted++;
     progress.nextOffset++;
@@ -760,7 +767,7 @@ export async function processResearchDraftJob(runId: string) {
     await checkpointDrafts();
   }
   if (progress.nextOffset < progress.selectedIds.length || progress.deliveryOffset < progress.deliveryIds.length) {
-    await db.update(research_runs).set({ status: "drafting", completed_at: null }).where(eq(research_runs.id, runId));
+    await retryResearchStorage(async () => db.update(research_runs).set({ status: "drafting", completed_at: null }).where(eq(research_runs.id, runId)));
     return { drafted, pending: true };
   }
   const validationSkips = progress.validationSkips;
@@ -774,21 +781,17 @@ export async function processResearchDraftJob(runId: string) {
   } else if (validationSkips) {
     outcome = `${validationSkips} stor${validationSkips === 1 ? "y could" : "ies could"} not produce valid grounded drafts. See the per-story validation reasons.`;
   }
-  await db
+  const completedAt = Date.now();
+  const finalDiagnostics = JSON.stringify({ ...diagnostics, draftCandidatesCount: progress.candidateIds.length, draftedCount: drafted, rejectedStories, outcome });
+  const finalError = [run.error, configurationWarning, !drafted && validationSkips ? `${validationSkips} stories failed draft validation; no drafts were generated. See the per-story reasons.` : null].filter(Boolean).join(" ") || null;
+  await retryResearchStorage(async () => db
     .update(research_runs)
     .set({
       status: "completed",
-      completed_at: Date.now(),
-      diagnostics: JSON.stringify({
-        ...diagnostics,
-        draftCandidatesCount: progress.candidateIds.length,
-        draftedCount: drafted,
-        rejectedStories,
-        outcome,
-      }),
-      error:
-        [run.error, configurationWarning, !drafted && validationSkips ? `${validationSkips} stories failed draft validation; no drafts were generated. See the per-story reasons.` : null].filter(Boolean).join(" ") || null,
+      completed_at: completedAt,
+      diagnostics: finalDiagnostics,
+      error: finalError,
     })
-    .where(eq(research_runs.id, runId));
+    .where(eq(research_runs.id, runId)));
   return { drafted };
 }
