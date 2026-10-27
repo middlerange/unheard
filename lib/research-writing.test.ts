@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { runResearchDraftWriting, validateResearchDraftContent } from "./research-drafts";
+import type { ResearchPriorPost } from "./research-novelty";
 import {
   RESEARCH_DRAFT_INSTRUCTIONS, RESEARCH_EDITORIAL_REVIEW_INSTRUCTIONS,
   RESEARCH_WRITING_STYLES, researchEditorialReviewSchema, selectResearchWritingContracts,
@@ -25,6 +26,22 @@ const generated = () => ({
 const input = { source, destinations, current: null, identityGroups: [{ id: "personal", name: "Personal", channelIds: ["personal-li"] }] };
 const ready = { verdict: "ready", reason: "The actual copy explains a bounded decision from concrete evidence.", issues: [] };
 const weak = { verdict: "needs_revision", reason: "The draft's ending loses the specific decision supported by the case.", issues: [{ code: "missing_alpha", channelId: "personal-li", detail: "Replace the generic conclusion with a criterion for deciding when setup belongs." }] };
+const priorProto: ResearchPriorPost = {
+  draftId: "earlier-proto", runId: "earlier-run", createdAt: "2026-10-25T00:00:00Z", status: "draft",
+  familyKey: "reddit-ai-prototyping-real-data", title: "Reddit Proto uses realistic signed-in data",
+  sourceUrl: "https://original.example/proto", sourcePublishedAt: "2026-10-24T00:00:00Z",
+  identityGroupIds: ["group:personal"], channelIds: ["personal-li"],
+  sourceFact: "Reddit Proto uses realistic signed-in data and reviews a PRD before engineering handoff.",
+  alpha: null, readerDecision: null, findingContentAngle: "Inspect engineering readiness.",
+  copyExcerpt: "A realistic prototype is not a shipping plan. Review the PRD and engineering-readiness checkpoints before handing off the signed-in prototype.", legacyWithoutEditorial: true,
+};
+const protoSource = {
+  url: "https://another.example/chat-prd-proto",
+  content: "Reddit Proto uses realistic signed-in data. Review the PRD before engineering handoff. Lock navigation to one flow while testing a hypothesis; enable free exploration when collecting exploratory feedback. Each annotation includes the element, code location and intent so editing instructions remain tied to the interface.",
+};
+function protoDraft(point: string) {
+  return { ...generated(), editorial: { ...editorial, writingStyle: "b2b-practitioner-teardown", sourceFact: "The prototype supports separate hypothesis-test and exploratory-feedback modes.", evidenceQuote: "Review the PRD before engineering handoff.", alpha: point, readerDecision: point }, targets: [{ ...generated().targets[0], content: `${point} Source: ${protoSource.url}`, supportQuote: "Review the PRD before engineering handoff." }] };
+}
 
 describe("evidence-led B2B writing contracts", () => {
   it("retains seven distinct reasoning jobs and prevents invented single-source synthesis", () => {
@@ -130,5 +147,52 @@ describe("evidence-led B2B writing contracts", () => {
   it("refuses an editorial pass that still lists unresolved problems", () => {
     expect(researchEditorialReviewSchema.safeParse({ ...weak, verdict: "ready" }).success).toBe(false);
     expect(researchEditorialReviewSchema.safeParse({ ...ready, verdict: "needs_revision" }).success).toBe(false);
+  });
+  it("gives the existing writer and editor cross-family legacy history so a repackaged handoff decision can decline", async () => {
+    const calls: string[] = [];
+    const result = await runResearchDraftWriting({ ...input, source: protoSource, priorPosts: [priorProto] }, async (instructions, request, _schema, _tokens, operation) => {
+      calls.push(operation);
+      expect(request).toMatchObject({ priorPosts: [{ draftId: "earlier-proto", legacyWithoutEditorial: true, copyExcerpt: expect.stringContaining("Review the PRD") }] });
+      if (operation === "draft") {
+        expect(instructions).toContain("reader/problem, action or test, source-supported evidence or mechanism, scope");
+        return protoDraft("Review the specification before engineering ships the realistic prototype.");
+      }
+      expect(instructions).toContain("Reject repeated_decision");
+      return { verdict: "insufficient_evidence", reason: "The proposed specification-before-shipping point repeats earlier-proto's reviewed-PRD handoff decision.", issues: [{ code: "repeated_decision", channelId: "personal-li", detail: "earlier-proto already asks for a reviewed PRD and engineering-readiness checkpoint; a new source and hook add no different decision." }] };
+    });
+    expect(calls).toEqual(["draft", "editorial_review"]);
+    expect(result.content).toBeNull();
+    expect(result.skipReason).toContain("repeated_decision");
+  });
+  it.each([
+    "Lock one navigation flow when testing a hypothesis, then open exploration for feedback; choose the review mode before interpreting the prototype session.",
+    "Keep the selected element, code location and editing intent together in an annotation; choose this editing interface when a visual comment could otherwise lose its implementation target.",
+  ])("lets the existing editor accept a distinct source-supported decision about the same event: %s", async point => {
+    const calls: string[] = [];
+    const result = await runResearchDraftWriting({ ...input, source: protoSource, priorPosts: [priorProto] }, async (instructions, request, _schema, _tokens, operation) => {
+      calls.push(operation);
+      expect(request).toMatchObject({ priorPosts: [{ draftId: "earlier-proto" }] });
+      if (operation === "draft") return protoDraft(point);
+      expect(instructions).toContain("allow a materially different source-supported decision");
+      return ready;
+    });
+    expect(calls).toEqual(["draft", "editorial_review"]);
+    expect(result.content?.targets[0].content).toContain(point);
+  });
+  it("removes other-account comparisons from editorial review and a quality rewrite", async () => {
+    const companyHistory = { ...priorProto, draftId: "company-proto", identityGroupIds: ["group:company"], channelIds: ["company-li"] };
+    const calls: string[] = [];
+    const result = await runResearchDraftWriting({ ...input, source: protoSource, priorPosts: [companyHistory] }, async (instructions, request, _schema, _tokens, operation) => {
+      calls.push(operation);
+      if (operation === "draft") {
+        expect(request).toMatchObject({ priorPosts: [{ draftId: "company-proto" }] });
+        expect(instructions).toContain("Prior posts tagged only to another identity cannot veto this account");
+      } else expect(request).toMatchObject({ priorPosts: [] });
+      if (operation === "editorial_review") return weak;
+      if (operation === "editorial_review_after_rewrite") return ready;
+      return protoDraft("Use a reviewed PRD before the engineering handoff rather than treating visual fidelity as readiness.");
+    });
+    expect(calls).toEqual(["draft", "editorial_review", "editorial_quality_rewrite", "editorial_review_after_rewrite"]);
+    expect(result.content).not.toBeNull();
   });
 });

@@ -205,6 +205,15 @@ prompt version. Token usage records the requested/returned model; the current
 local rate card covers Haiku 5.5 and historical Luna usage. Sol costs remain explicitly
 unknown rather than being priced with another model’s rates or treated as free.
 
+Before each generation, the writer and existing editor receive relevant prior
+non-test drafts for the selected account, including legacy copy and drafts from
+the current run. Retrieval inspects all same-team history, then limits model
+context to eight relevant entries per identity; this is not a post quota. The
+copy must add a materially distinct supported insight or reader decision, rather
+than changing only its hook, source URL, style or family key. History retains its
+actual review status and is comparison material, not source evidence. The writing
+version changes independently of the research prompt/cache version.
+
 ## Recall replay
 
 Use `bun scripts/evaluate-research-recall.ts --benchmark /private/benchmark.json

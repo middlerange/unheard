@@ -542,6 +542,68 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
     }
   }, 30_000);
+  it('retrieves legacy and current-run novelty history across family aliases while excluding an edit from its own history', async () => {
+    const teamId = 'novelty-history';
+    const now = Date.now();
+    const quote = 'Lock navigation to one flow for a hypothesis test, then open exploration for feedback.';
+    const body = `${quote} Review the PRD before engineering handoff. Each annotation includes the element, code location and intent.`;
+    const legacyCopy = `Reddit Proto uses realistic signed-in data. ${'Implementation context matters. '.repeat(70)} Review the PRD and engineering-readiness checkpoints before handing off the realistic prototype.`;
+    const itemQueries = ['legacy', 'navigation', 'handoff'].flatMap((name, index) => [
+      { sql: 'INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,?)', params: [`novelty-${name}-item`, teamId, 'novelty-source', `https://example.com/novelty-${name}`, `Reddit Proto ${name}`, quote, now - 1000, now, body, 'article'] },
+      { sql: 'INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', params: [`novelty-${name}-finding`, teamId, name === 'legacy' ? 'novelty-earlier-run' : 'novelty-current-run', `novelty-${name}-item`, 'novelty-source', `Reddit Proto ${name}`, `https://example.com/novelty-${name}`, now - 1000, 99 - index, 'Realistic prototypes, reviewed PRDs and engineering-readiness checkpoints.', 'Choose a concrete prototype review procedure.', name === 'navigation' ? 'Lock navigation for a hypothesis test; open exploration for feedback.' : 'Review the specification before engineering handoff.', quote, 'Reported practitioner workflow, no measured outcomes.', now, `different-alias-${name}`] },
+    ]);
+    execute({ queries: [
+      { sql: 'INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)', params: [teamId, teamId, teamId] },
+      { sql: "INSERT INTO channels(id,team_id,name,platform,group_name,research_enabled,system_prompt,created_at) VALUES('novelty-li',?,'Personal','linkedin','personal',1,'Write concrete product research lessons for practitioners.',0)", params: [teamId] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_ids) VALUES('novelty-earlier-run',?,'scan','completed',1,1,?,'Product teams',?)", params: [teamId, now - 86400000, JSON.stringify(['novelty-source'])] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_ids) VALUES('novelty-current-run',?,'scan','drafting',1,1,?,'Product teams',?)", params: [teamId, now, JSON.stringify(['novelty-source'])] },
+      ...itemQueries,
+      { sql: "INSERT INTO research_drafts(id,team_id,run_id,finding_id,content,status,created_at,updated_at) VALUES('novelty-legacy-draft',?,'novelty-earlier-run','novelty-legacy-finding',?,'draft',?,?)", params: [teamId, JSON.stringify({ targets: [{ channelId: 'novelty-li', platform: 'linkedin', content: legacyCopy, thread: [] }] }), now - 86400000, now - 86400000] },
+    ] });
+    const priorKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'test-novelty';
+    let generationCalls = 0;
+    let reviewCalls = 0;
+    let observedCurrentRun = false;
+    let observedOwnEditExclusion = false;
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const input = JSON.parse(request.input);
+      const legacy = input.priorPosts.find((post: { draftId: string }) => post.draftId === 'novelty-legacy-draft');
+      expect(legacy).toMatchObject({ identityGroupIds: ['group:personal'], legacyWithoutEditorial: true, readerDecision: null, status: 'draft', copyExcerpt: expect.stringContaining('engineering-readiness checkpoints') });
+      if (input.proposed) {
+        reviewCalls++;
+        return editorialReviewFixture();
+      }
+      generationCalls++;
+      if (input.current) {
+        observedOwnEditExclusion = true;
+        expect(input.priorPosts.map((post: { draftId: string }) => post.draftId)).toEqual(['novelty-legacy-draft']);
+      } else if (input.source.title.endsWith('handoff')) {
+        observedCurrentRun = true;
+        expect(input.priorPosts).toEqual(expect.arrayContaining([expect.objectContaining({ runId: 'novelty-current-run', readerDecision: expect.stringContaining('Lock navigation') })]));
+        return modelResponseFixture({ status: 'completed', output: [{ content: [{ type: 'output_text', text: JSON.stringify({ ready: false, reason: 'The prior reviewed-PRD decision already covers this specification-before-handoff point; different family keys do not add a decision.', editorial: null, targets: [] }) }] }] });
+      } else expect(input.priorPostRetrieval).toMatchObject({ scannedCount: 1, includedCount: 1 });
+      const point = 'Lock navigation to one flow for a hypothesis test; open exploration for feedback so the review procedure matches the question.';
+      return modelResponseFixture({ status: 'completed', output: [{ content: [{ type: 'output_text', text: JSON.stringify({ ready: true, reason: 'A distinct review procedure is supported.', editorial: { ...editorialFixture(body), readerDecision: point }, targets: [{ channelId: 'novelty-li', platform: 'linkedin', content: `${point} Source: ${input.source.url}`, thread: [], supportQuote: quote, redditTitle: null, subreddit: null }] }) }] }] });
+    });
+    try {
+      expect(await finishResearchDraftJob('novelty-current-run')).toEqual({ drafted: 1 });
+      const drafts = execute({ queries: [{ sql: "SELECT id FROM research_drafts WHERE run_id='novelty-current-run'" }] })[0].results;
+      expect(drafts).toHaveLength(1);
+      expect(observedCurrentRun).toBe(true);
+      await rewriteResearchDraftContent(drafts[0].id, teamId, 'Clarify the review procedure while preserving its supported distinction.');
+      expect(observedOwnEditExclusion).toBe(true);
+      expect(generationCalls).toBe(3);
+      expect(reviewCalls).toBe(2);
+      expect(fetcher).toHaveBeenCalledTimes(5);
+    } finally {
+      fetcher.mockRestore();
+      if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = priorKey;
+    }
+  }, 30_000);
+
   it("chooses one complete configured identity and repairs a mixed model response", async () => {
     const now = Date.now();
     const quote = "Required consent is collected on every account-creation path.";

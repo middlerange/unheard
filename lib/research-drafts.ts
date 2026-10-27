@@ -23,6 +23,7 @@ import { countTwitterCharacters } from "./twitter-text";
 import { assertResearchIdentityTargets, groupResearchIdentities, ResearchIdentityValidationError } from "./research-identity";
 import { SLACK_TEST_PROMPT } from "./slack-test-content";
 import type { ResearchDraftContent, ResearchRunDiagnostics } from "./research-types";
+import { researchNoveltyContext, type ResearchNoveltyContext } from "./research-novelty";
 
 import {
   RESEARCH_WRITING_VERSION, RESEARCH_WRITING_MODEL, RESEARCH_DRAFT_INSTRUCTIONS,
@@ -214,6 +215,8 @@ export type ResearchDraftWritingInput = Record<string, unknown> & {
   source: ResearchDraftSourceEvidence & { [key: string]: unknown };
   destinations: Destination[];
   current: ResearchDraftContent | null;
+  priorPosts?: ResearchNoveltyContext["priorPosts"];
+  priorPostRetrieval?: ResearchNoveltyContext["priorPostRetrieval"];
 };
 export type ResearchDraftModelCall = (
   instructions: string, input: unknown, schema: Record<string, unknown>, maxTokens: number, operation: string,
@@ -255,8 +258,10 @@ export async function runResearchDraftWriting(input: ResearchDraftWritingInput, 
   let { value, content } = await generateValidated(RESEARCH_DRAFT_INSTRUCTIONS, request, current ? "rewrite" : "draft");
   if (!content) return { content: null, skipReason: declineReason(value) };
   for (let attempt = 0; attempt < 2; attempt++) {
+    const selectedIdentity = assertResearchIdentityTargets(content.targets, destinations);
+    const selectedRequest = { ...request, priorPosts: (request.priorPosts || []).filter(post => post.identityGroupIds.includes(selectedIdentity)) };
     const reviewValue = await invoke(
-      RESEARCH_EDITORIAL_REVIEW_INSTRUCTIONS, { ...request, proposed: content }, researchEditorialReviewOutputSchema, 1800,
+      RESEARCH_EDITORIAL_REVIEW_INSTRUCTIONS, { ...selectedRequest, proposed: content }, researchEditorialReviewOutputSchema, 1800,
       attempt === 0 ? "editorial_review" : "editorial_review_after_rewrite",
     );
     const parsed = researchEditorialReviewSchema.safeParse(reviewValue);
@@ -279,7 +284,7 @@ export async function runResearchDraftWriting(input: ResearchDraftWritingInput, 
     const selectedDestinations = destinations.filter(destination => content!.targets.some(target => target.channelId === destination.id));
     ({ value, content } = await generateValidated(
       `${RESEARCH_DRAFT_INSTRUCTIONS}\nAn independent editor found specific quality problems. Rewrite once using the SAME source evidence, original identity and destination IDs. The review is feedback, not new evidence. Address the issues in the published copy, strengthen the supported reader decision, and update the editorial ledger truthfully. Do not manufacture novelty or add a disclaimer to evade a weak argument. Return ready=false if the useful point cannot be supported.`,
-      { ...request, current: content, editorialReview: review }, "editorial_quality_rewrite", selectedDestinations, true,
+      { ...selectedRequest, current: content, editorialReview: review }, "editorial_quality_rewrite", selectedDestinations, true,
     ));
     if (!content) return { content: null, skipReason: declineReason(value) };
   }
@@ -294,7 +299,7 @@ async function generateDraft(
   editorialInstruction?: string,
 ) {
   const db = await getDb();
-  const [item, brand, sourceBundle] = await Promise.all([
+  const [item, brand, sourceBundle, priorDrafts, teamChannels] = await Promise.all([
     db
       .select()
       .from(research_items)
@@ -319,6 +324,16 @@ async function generateDraft(
       eq(research_cache.id, `research-family-sources:${run.id}:${finding.family_key}`),
       eq(research_cache.team_id, run.team_id),
     )).get(),
+    db.select({
+      id: research_drafts.id, runId: research_drafts.run_id, findingId: research_drafts.finding_id,
+      content: research_drafts.content, createdAt: research_drafts.created_at, status: research_drafts.status, isTest: research_drafts.is_test,
+      familyKey: research_findings.family_key, title: research_findings.title, url: research_findings.url,
+      publishedAt: research_findings.published_at, summary: research_findings.summary, contentAngle: research_findings.content_angle, evidence: research_findings.evidence,
+    }).from(research_drafts).innerJoin(research_findings, and(
+      eq(research_findings.id, research_drafts.finding_id), eq(research_findings.team_id, research_drafts.team_id),
+    )).where(eq(research_drafts.team_id, run.team_id)).all(),
+    db.select({ id: channels.id, platform: channels.platform, name: channels.name, groupName: channels.group_name })
+      .from(channels).where(eq(channels.team_id, run.team_id)).all(),
   ]);
   if (
     !item?.content ||
@@ -326,6 +341,10 @@ async function generateDraft(
   )
     throw new ResearchDraftValidationError("Full source evidence is unavailable for this draft");
   const sourceContent = item.content.slice(0, 14000);
+  const noveltyContext = researchNoveltyContext(priorDrafts, teamChannels, {
+    findingId: finding.id, familyKey: finding.family_key, title: finding.title, url: finding.url,
+    summary: finding.summary, contentAngle: finding.content_angle, evidence: finding.evidence, content: sourceContent,
+  }, destinations);
   const bundled = sourceBundle ? JSON.parse(sourceBundle.value) as { items: Array<{ itemId: string; evidence: string }> } : null;
   const relatedIds = bundled?.items.filter(member => member.itemId !== item.id).map(member => member.itemId) || [];
   const relatedItems = relatedIds.length ? await db.select().from(research_items).where(and(
@@ -342,6 +361,7 @@ async function generateDraft(
     content: supportingItem.content.slice(0, 14000), contentProvenance: supportingItem.content_provenance,
   }] : [];
   const input = {
+    ...noveltyContext,
     icp: run.icp,
     brand: brand
       ? {
