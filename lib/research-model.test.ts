@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  validateResearchEvidenceCoverage, matchResearchQuote, validateResearchScreening, validateResearchEvidence, researchScreeningSchema, screeningJsonSchema, screeningJsonSchemaForItems,
+  validateResearchEvidenceCoverage, matchResearchQuote, validateResearchScreening, validateResearchEvidence, researchScreeningSchema, screeningJsonSchema, screeningJsonSchemaForItems, researchEvidenceSchema,
   RESEARCH_SCREEN_BATCH_SIZE,
 } from "./research-model";
 
@@ -90,4 +90,10 @@ it("preserves original quote offsets after Unicode case expansion", () => {
   const quote = "Measured conversion improved after reducing setup fields.";
   expect(matchResearchQuote(`İ News. ${quote} More text.`, quote)).toBe(quote);
   expect(matchResearchQuote(`İ News. ${quote}`, quote)).toBe(quote);
+});
+
+it("allows explicit rejections without inventing a supporting quote, but cannot save an ungrounded positive", () => {
+  const output = researchEvidenceSchema.parse({ findings: [{ ...finding, score: 25, evidence: "" }, { ...finding, itemId: "unsupported-positive", evidence: "" }] });
+  expect(validateResearchEvidenceCoverage(output.findings, ["study", "unsupported-positive"])).toHaveLength(2);
+  expect(validateResearchEvidence(output.findings, [...items, { id: "unsupported-positive", content: quote }])).toEqual([]);
 });

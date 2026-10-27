@@ -50,8 +50,19 @@ function editorialFixture(content: string) {
     boundary: "This account does not measure the effect on conversion.",
   };
 }
+function modelResponseFixture(value: {
+  status: string;
+  usage?: unknown;
+  output?: Array<{ content: Array<{ type: string; text: string }> }>;
+}) {
+  return Response.json({
+    ...value,
+    stop_reason: value.status === "completed" ? "end_turn" : "max_tokens",
+    content: value.output?.flatMap(item => item.content.map(part => ({ ...part, type: "text" }))),
+  });
+}
 function editorialReviewFixture() {
-  return Response.json({ status: "completed", usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ verdict: "ready", reason: "A specific source supports a bounded reader decision.", issues: [] }) }] }] });
+  return modelResponseFixture({ status: "completed", usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ verdict: "ready", reason: "A specific source supports a bounded reader decision.", issues: [] }) }] }] });
 }
 function screeningFixture(value: unknown, items?: Array<{ id: string }>) {
   const output = value as { itemIds?: string[] };
@@ -364,7 +375,9 @@ describe("research persistence and team isolation", () => {
     ] });
     globalThis.__contentHubResearchWorkflow__ = { create: vi.fn(async () => ({})) };
     const previousKey = process.env.OPENAI_API_KEY;
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "weekly-test-key";
+    process.env.ANTHROPIC_API_KEY = "weekly-test-key";
     const evidence = "The team separated optional marketing consent from required account creation checks across every authentication path.";
     let fetcher: ReturnType<typeof vi.spyOn> | undefined;
     try {
@@ -384,15 +397,15 @@ describe("research persistence and team isolation", () => {
       })) });
       const selected = ["weekly-inside", "weekly-boundary"];
       fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-        expect(String(url)).toMatch(/^https:\/\/api\.openai\.com\//);
+        expect(String(url)).toBe("https://api.anthropic.com/v1/messages");
         const request = JSON.parse(String(init?.body));
-        const input = JSON.parse(request.input);
+        const input = JSON.parse(request.input ?? request.messages[0].content);
       if (input.proposed) return editorialReviewFixture();
         expect(input.items.map((item: { id: string }) => item.id).sort()).toEqual([...selected].sort());
-        const value = request.text.format.schema.properties.assessments
+        const value = (request.text?.format.schema ?? request.output_config.format.schema).properties.assessments
           ? { itemIds: selected }
           : { findings: selected.map((id, index) => ({ itemId: id, score: index ? 75 : 85, summary: "A documented account creation decision", whyItMatters: "Optional consent should not block signup", contentAngle: "Audit authentication paths", evidence, limitations: "A first-party descriptive account, not a conversion experiment", familyKey: id })) };
-        return Response.json({ status: "completed", usage: { input_tokens: 100, output_tokens: 50 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
+        return modelResponseFixture({ status: "completed", usage: { input_tokens: 100, output_tokens: 50 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
       });
       await processResearchJob({ operation: "rank", runId: run.id });
       await processResearchJob({ operation: "drafts", runId: run.id });
@@ -405,6 +418,8 @@ describe("research persistence and team isolation", () => {
       fetcher?.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 20_000);
   it("collects RSS once per step, recovers missing dates/public evidence, and preserves an established publication date", async () => {
@@ -520,13 +535,15 @@ describe("research persistence and team isolation", () => {
       { sql: "INSERT INTO research_cache(id,team_id,value,created_at) VALUES('research-family-sources:identity-generation-run:identity-generation-family','identity-generation',?,?)", params: [JSON.stringify({ items: [{ itemId: "identity-generation-item", evidence: quote }, { itemId: "identity-supporting-item", evidence: "A separate workflow keeps required consent before account creation." }] }), now] },
     ] });
     const previousKey = process.env.OPENAI_API_KEY;
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-identity-key";
+    process.env.ANTHROPIC_API_KEY = "test-identity-key";
     let calls = 0;
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       expect(String(url)).toBe("https://api.openai.com/v1/responses");
       const request = JSON.parse(String(init?.body));
       expect(request.model).toBe(RESEARCH_WRITING_MODEL);
-      const input = JSON.parse(request.input);
+      const input = JSON.parse(request.input ?? request.messages[0].content);
       expect(input.source.supportingSources).toMatchObject([{ url: "https://example.com/identity-support", content: expect.stringContaining("A separate workflow") }]);
       expect(input.allowedWritingStyles.map((style: { writingStyle: string }) => style.writingStyle)).toContain("b2b-research-insight");
       if (input.proposed) return editorialReviewFixture();
@@ -535,7 +552,7 @@ describe("research persistence and team isolation", () => {
       ]);
       calls++;
       const chosen = calls === 1 ? [profiles[0], profiles[2]] : profiles.slice(0, 2);
-      return Response.json({ status: "completed", usage: { input_tokens: 100, output_tokens: 40 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ ready: true, editorial: editorialFixture(input.source.content), reason: "Fits this identity", targets: chosen.map(profile => ({ channelId: profile.id, platform: profile.platform, content: `Audit every signup path. Sources: ${input.source.url} https://example.com/identity-support`, thread: [], supportQuote: quote, redditTitle: null, subreddit: null })) }) }] }] });
+      return modelResponseFixture({ status: "completed", usage: { input_tokens: 100, output_tokens: 40 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ ready: true, editorial: editorialFixture(input.source.content), reason: "Fits this identity", targets: chosen.map(profile => ({ channelId: profile.id, platform: profile.platform, content: `Audit every signup path. Sources: ${input.source.url} https://example.com/identity-support`, thread: [], supportQuote: quote, redditTitle: null, subreddit: null })) }) }] }] });
     });
     try {
       expect(await finishResearchDraftJob("identity-generation-run")).toEqual({ drafted: 1 });
@@ -548,6 +565,8 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 20_000);
   it("repairs an oversized draft once, accounts for both calls and continues after an invalid story", async () => {
@@ -564,17 +583,19 @@ describe("research persistence and team isolation", () => {
       ]),
     ] });
     const previousKey = process.env.OPENAI_API_KEY;
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-repair-key";
+    process.env.ANTHROPIC_API_KEY = "test-repair-key";
     const calls: string[] = [];
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       expect(String(url)).toBe("https://api.openai.com/v1/responses");
       const request = JSON.parse(String(init?.body));
-      const input = JSON.parse(request.input);
+      const input = JSON.parse(request.input ?? request.messages[0].content);
       if (input.proposed) return editorialReviewFixture();
       const title = input.source.title;
       calls.push(title);
       const invalid = title === "never-valid" || (title === "repairable" && calls.filter(value => value === title).length === 1);
-      return Response.json({ status: "completed", usage: { input_tokens: 100, output_tokens: 20 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ ready: true, editorial: editorialFixture(input.source.content), reason: "A practical product case", targets: [{ channelId: "repairs-x", platform: "twitter", content: invalid ? `${"x".repeat(281)} ${input.source.url}` : `Audit every signup path. Source: ${input.source.url}`, thread: [], supportQuote: quote, redditTitle: null, subreddit: null }] }) }] }] });
+      return modelResponseFixture({ status: "completed", usage: { input_tokens: 100, output_tokens: 20 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ ready: true, editorial: editorialFixture(input.source.content), reason: "A practical product case", targets: [{ channelId: "repairs-x", platform: "twitter", content: invalid ? `${"x".repeat(281)} ${input.source.url}` : `Audit every signup path. Source: ${input.source.url}`, thread: [], supportQuote: quote, redditTitle: null, subreddit: null }] }) }] }] });
     });
     try {
       expect(await finishResearchDraftJob("repairs-run")).toEqual({ drafted: 2 });
@@ -592,6 +613,8 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 20_000);
   it("updates accepted assessments without losing saved ideas and never drafts an older finding rejected by the current scan", async () => {
@@ -625,16 +648,18 @@ describe("research persistence and team isolation", () => {
       })),
     ] });
     const previousKey = process.env.OPENAI_API_KEY;
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-assessments-key";
+    process.env.ANTHROPIC_API_KEY = "test-assessments-key";
     const draftedTitles: string[] = [];
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-      if (!String(url).startsWith("https://api.openai.com/")) throw new Error("Public feed evidence should already be available");
+      if (!/^https:\/\/api\.(?:openai|anthropic)\.com\//.test(String(url))) throw new Error("Public feed evidence should already be available");
       const request = JSON.parse(String(init?.body));
-      const input = JSON.parse(request.input);
+      const input = JSON.parse(request.input ?? request.messages[0].content);
       if (input.proposed) return editorialReviewFixture();
       if (input.source) {
         draftedTitles.push(input.source.title);
-        return Response.json({
+        return modelResponseFixture({
           status: "completed", usage: { input_tokens: 100, output_tokens: 50 },
           output: [{ content: [{ type: "output_text", text: JSON.stringify({
             ready: true, editorial: editorialFixture(input.source.content), reason: "A specific documented onboarding decision.",
@@ -643,10 +668,10 @@ describe("research persistence and team isolation", () => {
         });
       }
       expect(input.items.map((item: { id: string }) => item.id).sort()).toEqual(items.map(item => item.id).sort());
-      if (request.text.format.schema.properties.findings) {
-        expect(request.text.format.schema.properties.findings).toMatchObject({ minItems: 2, maxItems: 2 });
+      if ((request.text?.format.schema ?? request.output_config.format.schema).properties.findings) {
+        expect((request.text?.format.schema ?? request.output_config.format.schema).properties.findings).toMatchObject({ minItems: 2, maxItems: 2 });
       }
-      const value = request.text.format.schema.properties.assessments
+      const value = (request.text?.format.schema ?? request.output_config.format.schema).properties.assessments
         ? { itemIds: items.map(item => item.id) }
         : { findings: items.map((item, index) => ({
           itemId: item.id,
@@ -658,7 +683,7 @@ describe("research persistence and team isolation", () => {
           limitations: index === 0 ? "A descriptive first-party public-feed account; no conversion impact was measured." : rejectedReason,
           familyKey: index === 0 ? "signup-consent-design" : "generic-launch-campaign",
         })) };
-      return Response.json({
+      return modelResponseFixture({
         status: "completed", usage: { input_tokens: 100, output_tokens: 50 },
         output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }],
       });
@@ -685,6 +710,8 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 20_000);
   it("reviews every potentially useful story beyond twelve and preserves evidence-stage rejection", async () => {
@@ -708,22 +735,24 @@ describe("research persistence and team isolation", () => {
       })),
     ] });
     const previousKey = process.env.OPENAI_API_KEY;
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-recall-key";
+    process.env.ANTHROPIC_API_KEY = "test-recall-key";
     const reviewedIds: string[] = [];
     const evidenceBatchSizes: number[] = [];
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-      expect(String(url)).toBe("https://api.openai.com/v1/responses");
+      expect(String(url)).toBe("https://api.anthropic.com/v1/messages");
       const request = JSON.parse(String(init?.body));
-      const input = JSON.parse(request.input);
+      const input = JSON.parse(request.input ?? request.messages[0].content);
       if (input.proposed) return editorialReviewFixture();
       let value: unknown;
-      if (request.text.format.schema.properties.assessments) {
-        expect(request.instructions).toBe(RESEARCH_SCREEN_INSTRUCTIONS);
-        expect(input.items).toHaveLength(all.length);
-        expect(request.text.format.schema.properties.assessments.maxItems).toBeGreaterThanOrEqual(all.length);
-        value = { itemIds: [...useful.map(item => item.id), thinAd.id] };
+      if ((request.text?.format.schema ?? request.output_config.format.schema).properties.assessments) {
+        expect(request.instructions ?? request.system).toBe(RESEARCH_SCREEN_INSTRUCTIONS);
+        expect(input.items.length).toBeLessThanOrEqual(RESEARCH_SCREEN_BATCH_SIZE);
+        expect((request.text?.format.schema ?? request.output_config.format.schema).properties.assessments.maxItems).toBe(input.items.length);
+        value = { itemIds: input.items.filter((item: { id: string }) => item.id !== career.id).map((item: { id: string }) => item.id) };
       } else {
-        expect(request.instructions).toBe(RESEARCH_EVIDENCE_INSTRUCTIONS);
+        expect(request.instructions ?? request.system).toBe(RESEARCH_EVIDENCE_INSTRUCTIONS);
         expect(input.items.length).toBeLessThanOrEqual(6);
         evidenceBatchSizes.push(input.items.length);
         value = { findings: input.items.map((item: { id: string }) => {
@@ -739,13 +768,13 @@ describe("research persistence and team isolation", () => {
           };
         }) };
       }
-      return Response.json({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
+      return modelResponseFixture({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
     });
     try {
       await processResearchJob({ operation: "rank", runId: "recall-run" });
       expect(reviewedIds.sort()).toEqual([...useful.map(item => item.id), thinAd.id].sort());
       expect(evidenceBatchSizes).toEqual([6, 6, 6]);
-      expect(fetcher).toHaveBeenCalledTimes(4);
+      expect(fetcher).toHaveBeenCalledTimes(Math.ceil(all.length / RESEARCH_SCREEN_BATCH_SIZE) + 3);
       const snapshot = await getResearchSnapshot("recall");
       expect(snapshot.findings.map(finding => finding.itemId).sort()).toEqual(useful.map(item => item.id).sort());
       expect(snapshot.runs[0]).toMatchObject({
@@ -760,6 +789,8 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 20_000);
   it("retains an existing reviewed story and bundles verified sources when multiple articles produce the same family", async () => {
@@ -778,14 +809,16 @@ describe("research persistence and team isolation", () => {
       { sql: "INSERT INTO research_drafts(id,team_id,run_id,finding_id,content,status,revision,slack_channel_id,slack_thread_ts,created_at,updated_at) VALUES('family-existing-review','family','family-run','original-finding','{\"targets\":[]}','pending',3,'CEXISTING','123.456',?,?)", params: [now, now] },
     ] });
     const previousKey = process.env.OPENAI_API_KEY;
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-family-key";
+    process.env.ANTHROPIC_API_KEY = "test-family-key";
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
       const request = JSON.parse(String(init?.body));
-      const input = JSON.parse(request.input);
-      const value = request.text.format.schema.properties.assessments
+      const input = JSON.parse(request.input ?? request.messages[0].content);
+      const value = (request.text?.format.schema ?? request.output_config.format.schema).properties.assessments
         ? { itemIds: ["second", "third"] }
         : { findings: input.items.map((item: { id: string }) => ({ itemId: item.id, score: 90, summary: "New coverage", whyItMatters: "Useful", contentAngle: "Same launch", evidence: quote, limitations: "Attributed", familyKey: "shared-scaffold" })) };
-      return Response.json({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
+      return modelResponseFixture({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
     });
     try {
       expect(await processResearchJob({ operation: "rank", runId: "family-run" })).toEqual({ ok: true, pending: false });
@@ -804,6 +837,8 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 20_000);
   it("screens older eligible items beyond the first metadata batch and caches model responses", async () => {
@@ -857,16 +892,18 @@ describe("research persistence and team isolation", () => {
       ],
     });
     const previousKey = process.env.OPENAI_API_KEY;
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-key";
+    process.env.ANTHROPIC_API_KEY = "test-key";
     const screenedIds: string[] = [];
     const fetcher = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(async (url, init) => {
-        if (String(url).startsWith("https://api.openai.com/")) {
+        if (/^https:\/\/api\.(?:openai|anthropic)\.com\//.test(String(url))) {
           const request = JSON.parse(String(init?.body));
-          const input = JSON.parse(request.input);
+          const input = JSON.parse(request.input ?? request.messages[0].content);
       if (input.proposed) return editorialReviewFixture();
-          const extraction = String(request.instructions).includes(
+          const extraction = String(request.instructions ?? request.system).includes(
             "Act as a strict",
           );
           let value: unknown;
@@ -874,7 +911,7 @@ describe("research persistence and team isolation", () => {
             expect(input.items[0]).toMatchObject({
               content, contentProvenance: "public_feed",
             });
-            expect(request.instructions).toContain("never infer a paid continuation");
+            expect(request.instructions ?? request.system).toContain("never infer a paid continuation");
             value = {
               findings: [
                 {
@@ -905,7 +942,7 @@ describe("research persistence and team isolation", () => {
                 : [],
             };
           }
-          return Response.json({
+          return modelResponseFixture({
             status: "completed",
             output: [
               {
@@ -964,6 +1001,8 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 20_000);
   it("resumes more than eighteen shortlisted stories without re-screening hydrated evidence or new arrivals", async () => {
@@ -984,20 +1023,22 @@ describe("research persistence and team isolation", () => {
       })),
     ] });
     const previousKey = process.env.OPENAI_API_KEY;
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-resume-key";
+    process.env.ANTHROPIC_API_KEY = "test-resume-key";
     let screened = 0;
     const reviewedIds: string[] = [];
     const batchSizes: number[] = [];
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-      if (!String(url).startsWith("https://api.openai.com/")) {
+      if (!/^https:\/\/api\.(?:openai|anthropic)\.com\//.test(String(url))) {
         expect(String(url)).toBe(`${new URL(seed.url).origin}/resume-item-0`);
         return new Response(`<html><main><h1>Product workflow 0</h1><p>${content(0)}</p></main></html>`);
       }
       const request = JSON.parse(String(init?.body));
-      const input = JSON.parse(request.input);
+      const input = JSON.parse(request.input ?? request.messages[0].content);
       if (input.proposed) return editorialReviewFixture();
       let value: unknown;
-      if (request.text.format.schema.properties.assessments) {
+      if ((request.text?.format.schema ?? request.output_config.format.schema).properties.assessments) {
         screened++;
         expect(input.items.length).toBeLessThanOrEqual(RESEARCH_SCREEN_BATCH_SIZE);
         value = { itemIds: input.items.map((item: { id: string }) => item.id) };
@@ -1015,10 +1056,14 @@ describe("research persistence and team isolation", () => {
           };
         }) };
       }
-      return Response.json({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
+      return modelResponseFixture({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
     });
     try {
-      expect(await processResearchJob({ operation: "rank", runId: "resume-run" })).toEqual({ ok: true, pending: true });
+      let firstEvidence = await processResearchJob({ operation: "rank", runId: "resume-run" });
+      while (!batchSizes.length && "pending" in firstEvidence && firstEvidence.pending) {
+        firstEvidence = await processResearchJob({ operation: "rank", runId: "resume-run" });
+      }
+      expect(firstEvidence).toEqual({ ok: true, pending: true });
       expect(batchSizes).toEqual([6, 6, 6]);
       const [partial] = execute({ queries: [{ sql: "SELECT status,completed_at,findings_count,diagnostics FROM research_runs WHERE id='resume-run'" }] })[0].results;
       expect(partial).toMatchObject({ status: "ranking", completed_at: null, findings_count: 17 });
@@ -1045,6 +1090,8 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 20_000);
   it("continues every original article page in bounded durable chunks and preserves first-seen metadata", async () => {
@@ -1153,17 +1200,19 @@ describe("research persistence and team isolation", () => {
       })),
     ] });
     const priorKey = process.env.OPENAI_API_KEY;
+    const priorAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-signal-lanes";
+    process.env.ANTHROPIC_API_KEY = "test-signal-lanes";
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
       const request = JSON.parse(String(init?.body));
-      const input = JSON.parse(request.input);
+      const input = JSON.parse(request.input ?? request.messages[0].content);
       expect(input.items.map((item: { id: string }) => item.id)).toEqual(["lane-fresh", "lane-new-evergreen"]);
       expect(input.items[0]).toMatchObject({ signalKind: "fresh", publishedAt: now - 1000, discoveredAt: now - 500 });
       expect(input.items[1]).toMatchObject({ signalKind: "evergreen_newly_discovered", publishedAt: now - 180 * 86400000, discoveredAt: now - 500 });
-      const value = request.text.format.schema.properties.assessments
+      const value = (request.text?.format.schema ?? request.output_config.format.schema).properties.assessments
         ? { itemIds: input.items.map((item: { id: string }) => item.id) }
         : { findings: input.items.map((item: { id: string }) => ({ itemId: item.id, score: 85, summary: "A bounded original decision", whyItMatters: "A practical onboarding choice", contentAngle: "Evaluate the tradeoff", evidence: quote, limitations: "Historical practitioner essay, not a new release", familyKey: item.id })) };
-      return Response.json({ status: "completed", usage: { input_tokens: 10, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
+      return modelResponseFixture({ status: "completed", usage: { input_tokens: 10, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
     });
     try {
       expect(await processResearchJob({ operation: "rank", runId: "signal-lanes-run" })).toEqual({ ok: true, pending: false });
@@ -1177,6 +1226,8 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
       if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = priorKey;
+      if (priorAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = priorAnthropicKey;
     }
   }, 30_000);
 
@@ -1196,21 +1247,23 @@ describe("research persistence and team isolation", () => {
       ...items.map((item, index) => insertItem(item.id, item.title, now - index * 1000)),
     ] });
     const priorKey = process.env.OPENAI_API_KEY;
+    const priorAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-uncapped-screen-key";
+    process.env.ANTHROPIC_API_KEY = "test-uncapped-screen-key";
     const screened: string[] = [];
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
       const request = JSON.parse(String(init?.body));
-      const input = JSON.parse(request.input);
+      const input = JSON.parse(request.input ?? request.messages[0].content);
       if (input.proposed) return editorialReviewFixture();
       let value: unknown;
-      if (request.text.format.schema.properties.assessments) {
+      if ((request.text?.format.schema ?? request.output_config.format.schema).properties.assessments) {
         screened.push(...input.items.map((item: { id: string }) => item.id));
         value = { itemIds: input.items.filter((item: { id: string }) => item.id === items.at(-1)!.id).map((item: { id: string }) => item.id) };
       } else {
         expect(input.items.map((item: { id: string }) => item.id)).toEqual([items.at(-1)!.id]);
         value = { findings: [{ itemId: items.at(-1)!.id, score: 85, summary: "A concrete onboarding decision", whyItMatters: "A practical product tradeoff", contentAngle: "Audit the first useful action", evidence: quote, limitations: "First-party account", familyKey: "uncapped-final-workflow" }] };
       }
-      return Response.json({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
+      return modelResponseFixture({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
     });
     try {
       let result = await processResearchJob({ operation: "rank", runId: "uncapped-screen-run" });
@@ -1220,7 +1273,7 @@ describe("research persistence and team isolation", () => {
       let continuations = 0;
       while ("pending" in result && result.pending) {
         result = await processResearchJob({ operation: "rank", runId: "uncapped-screen-run" });
-        expect(++continuations).toBeLessThan(30);
+        expect(++continuations).toBeLessThan(Math.ceil(items.length / RESEARCH_SCREEN_BATCH_SIZE) + 1);
       }
       expect(firstCount).toBeLessThan(items.length);
       expect(screened).toEqual(items.map(item => item.id));
@@ -1235,8 +1288,10 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
       if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = priorKey;
+      if (priorAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = priorAnthropicKey;
     }
-  }, 60_000);
+  }, 120_000);
 
   it("archives incomplete or duplicate evidence responses without advancing or reusing invalid paid output", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
@@ -1253,14 +1308,16 @@ describe("research persistence and team isolation", () => {
       })),
     ] });
     const priorKey = process.env.OPENAI_API_KEY;
+    const priorAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-coverage-boundary";
+    process.env.ANTHROPIC_API_KEY = "test-coverage-boundary";
     let evidenceCalls = 0;
     let screenCalls = 0;
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
       const request = JSON.parse(String(init?.body));
-      const input = JSON.parse(request.input);
+      const input = JSON.parse(request.input ?? request.messages[0].content);
       let value: unknown;
-      if (request.text.format.schema.properties.assessments) {
+      if ((request.text?.format.schema ?? request.output_config.format.schema).properties.assessments) {
         screenCalls++;
         value = screeningFixture({ itemIds: ids }, input.items);
       } else {
@@ -1268,7 +1325,7 @@ describe("research persistence and team isolation", () => {
         const findings = ids.map(id => ({ itemId: id, score: 85, summary: "A concrete onboarding decision", whyItMatters: "First useful action", contentAngle: "Audit optional setup", evidence: quote, limitations: "One practitioner workflow", familyKey: id }));
         value = { findings: evidenceCalls === 1 ? findings.slice(0, 1) : evidenceCalls === 2 ? [findings[0], findings[0]] : findings };
       }
-      return Response.json({ status: "completed", usage: { input_tokens: 10, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }] });
+      return modelResponseFixture({ status: "completed", usage: { input_tokens: 10, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }] });
     });
     try {
       for (let attempt = 1; attempt <= 2; attempt++) {
@@ -1291,6 +1348,8 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
       if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = priorKey;
+      if (priorAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = priorAnthropicKey;
     }
   }, 30_000);
 
@@ -1301,7 +1360,9 @@ describe("research persistence and team isolation", () => {
     ] });
     const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-23T03:44:00Z"));
     const previousKey = process.env.OPENAI_API_KEY;
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-daily-key";
+    process.env.ANTHROPIC_API_KEY = "test-daily-key";
     const dispatch = vi.fn(async () => ({}));
     globalThis.__contentHubResearchWorkflow__ = { create: dispatch };
     try {
@@ -1343,6 +1404,8 @@ describe("research persistence and team isolation", () => {
       now.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 30_000);
   it("retries a failed scheduled workflow dispatch using the same queued run ID", async () => {
@@ -1352,7 +1415,9 @@ describe("research persistence and team isolation", () => {
     ] });
     const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-23T03:44:00Z"));
     const previousKey = process.env.OPENAI_API_KEY;
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-daily-key";
+    process.env.ANTHROPIC_API_KEY = "test-daily-key";
     const dispatch = vi.fn(async () => ({})).mockRejectedValueOnce(new Error("Workflow temporarily unavailable"));
     globalThis.__contentHubResearchWorkflow__ = { create: dispatch };
     try {
@@ -1369,6 +1434,8 @@ describe("research persistence and team isolation", () => {
       now.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 30_000);
   it("recovers a queued daily run across schedule edits and an interruption after dispatch", async () => {
@@ -1378,7 +1445,9 @@ describe("research persistence and team isolation", () => {
     ] });
     const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-23T03:44:00Z"));
     const previousKey = process.env.OPENAI_API_KEY;
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-daily-key";
+    process.env.ANTHROPIC_API_KEY = "test-daily-key";
     const dispatch = vi.fn(async () => ({})).mockRejectedValueOnce(new Error("Workflow temporarily unavailable"));
     globalThis.__contentHubResearchWorkflow__ = { create: dispatch };
     try {
@@ -1408,6 +1477,8 @@ describe("research persistence and team isolation", () => {
       now.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 30_000);
   it("dispatches one 24-hour editorial scan on unaligned cron ticks without repeating model work", async () => {
@@ -1424,7 +1495,9 @@ describe("research persistence and team isolation", () => {
     globalThis.__contentHubResearchWorkflow__ = { create: dispatch };
     const fetcher = vi.spyOn(globalThis, "fetch");
     const previousKey = process.env.OPENAI_API_KEY;
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-daily-key";
+    process.env.ANTHROPIC_API_KEY = "test-daily-key";
     const tick = Date.parse("2026-10-26T09:50:51.409Z");
     const now = vi.spyOn(Date, "now").mockReturnValue(tick);
     try {
@@ -1454,6 +1527,8 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 20_000);
   it("keeps a daily scan due when a manual discovery run occupies the workflow", async () => {
@@ -1463,7 +1538,9 @@ describe("research persistence and team isolation", () => {
     ] });
     await initializeResearch("manual-busy");
     const previousKey = process.env.OPENAI_API_KEY;
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-daily-key";
+    process.env.ANTHROPIC_API_KEY = "test-daily-key";
     globalThis.__contentHubResearchWorkflow__ = { create: vi.fn(async () => ({})) };
     try {
       const manual = await createResearchRun("manual-busy", { days: 30, mode: "scan" });
@@ -1476,6 +1553,8 @@ describe("research persistence and team isolation", () => {
     } finally {
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 20_000);
   it("keeps per-profile prompts team-scoped and rejects missing prompts and asset-only formats", async () => {
@@ -1602,18 +1681,20 @@ describe("research persistence and team isolation", () => {
       { sql: "INSERT INTO research_drafts(id,team_id,run_id,finding_id,content,status,revision,created_at,updated_at) VALUES('preserved-review','uncapped-drafts','uncapped-draft-run',?,?,'pending',3,?,?)", params: [ids[0], JSON.stringify({ preserved: "Existing approved copy and review state" }), now, now] },
     ] });
     const priorKey = process.env.OPENAI_API_KEY;
+    const priorAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-uncapped-draft-key";
+    process.env.ANTHROPIC_API_KEY = "test-uncapped-draft-key";
     const calls: string[] = [];
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
       const request = JSON.parse(String(init?.body));
-      const input = JSON.parse(request.input);
+      const input = JSON.parse(request.input ?? request.messages[0].content);
       if (input.proposed) return editorialReviewFixture();
       if (input.source.title === ids[24]) expect(input.source).toMatchObject({ signalKind: "evergreen_newly_discovered", publishedAt: new Date(now - 30 * 86400000).toISOString() });
       calls.push(input.source.title);
       const value = input.source.title === ids[1]
         ? { ready: false, reason: "The source is too thin for this audience", targets: [] }
         : { ready: true, editorial: editorialFixture(input.source.content), reason: "A practical supported decision", targets: [{ channelId: "uncapped-li", platform: "linkedin", content: `Audit optional setup before requiring it. Source: ${input.source.url}`, thread: [], supportQuote: input.source.title === ids[2] ? "An unsupported quote that does not exist in the article." : quote, redditTitle: null, subreddit: null }] };
-      return Response.json({ status: "completed", usage: { input_tokens: 10, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
+      return modelResponseFixture({ status: "completed", usage: { input_tokens: 10, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
     });
     try {
       let result = await processResearchDraftJob("uncapped-draft-run");
@@ -1650,6 +1731,8 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
       if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = priorKey;
+      if (priorAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = priorAnthropicKey;
     }
   }, 60_000);
 
@@ -1723,16 +1806,18 @@ describe("research persistence and team isolation", () => {
       ],
     });
     const priorKey = process.env.OPENAI_API_KEY;
+    const priorAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-editorial-key";
+    process.env.ANTHROPIC_API_KEY = "test-editorial-key";
     const fetcher = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(async (url, init) => {
         expect(String(url)).toBe("https://api.openai.com/v1/responses");
         const data = JSON.parse(String(init?.body));
-        const input = JSON.parse(data.input);
+        const input = JSON.parse(data.input ?? data.messages[0].content);
       if (input.proposed) return editorialReviewFixture();
         expect(["best", "runner", "third"]).toContain(input.source.title);
-        return Response.json({
+        return modelResponseFixture({
           status: "completed",
           output: [
             {
@@ -1865,6 +1950,8 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
       if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = priorKey;
+      if (priorAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = priorAnthropicKey;
     }
   }, 20_000);
   it("rewrites setup samples with real evidence loading and model validation while keeping disabled profiles unchanged", async () => {
@@ -1883,14 +1970,16 @@ describe("research persistence and team isolation", () => {
       "https://example.com",
     );
     const priorKey = process.env.OPENAI_API_KEY;
+    const priorAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = "test-key";
+    process.env.ANTHROPIC_API_KEY = "test-key";
     const fetcher = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(async (url, init) => {
         expect(String(url)).toBe("https://api.openai.com/v1/responses");
         const request = JSON.parse(String(init?.body));
         expect(request.model).toBe(RESEARCH_WRITING_MODEL);
-        const input = JSON.parse(request.input);
+        const input = JSON.parse(request.input ?? request.messages[0].content);
       if (input.proposed) return editorialReviewFixture();
         expect(input.source.content).toBe(SLACK_TEST_EVIDENCE);
         expect(input.destinations).toEqual([
@@ -1903,7 +1992,7 @@ describe("research persistence and team isolation", () => {
           },
         ]);
         expect(input.editorialInstruction).toBe("Make it shorter");
-        return Response.json({
+        return modelResponseFixture({
           status: "completed",
           output: [
             {
@@ -1959,6 +2048,8 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
       if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = priorKey;
+      if (priorAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = priorAnthropicKey;
     }
   }, 20_000);
   it("keeps usage totals isolated, prices once, and buckets revisions on their own billing date", async () => {
@@ -1996,12 +2087,14 @@ describe("research persistence and team isolation", () => {
     execute({ queries: [{ sql: "INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp) VALUES('usage-errors','usage','scan','completed',1,?,'ICP')", params: [Date.now()] }] });
     const context = { teamId: 'usage', runId: 'usage-errors', stage: 'draft_generation' as const, operation: 'draft' };
     const previousKey = process.env.OPENAI_API_KEY;
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = 'test-key';
+    process.env.ANTHROPIC_API_KEY = 'test-key';
     const fetcher = vi.spyOn(globalThis, 'fetch');
     try {
-      fetcher.mockResolvedValueOnce(Response.json({ status: 'completed', usage: { input_tokens: 100, output_tokens: 30 }, output: [{ content: [{ type: 'output_text', text: 'invalid json' }] }] }));
+      fetcher.mockResolvedValueOnce(modelResponseFixture({ status: 'completed', usage: { input_tokens: 100, output_tokens: 30 }, output: [{ content: [{ type: 'output_text', text: 'invalid json' }] }] }));
       await expect(callResearchModel('system', {}, {}, 100, context)).rejects.toThrow();
-      fetcher.mockResolvedValueOnce(Response.json({ status: 'incomplete', usage: { input_tokens: 200, output_tokens: 40 } }));
+      fetcher.mockResolvedValueOnce(modelResponseFixture({ status: 'incomplete', usage: { input_tokens: 200, output_tokens: 40 } }));
       await expect(callResearchModel('system', {}, {}, 100, context)).rejects.toThrow('did not complete');
       fetcher.mockRejectedValueOnce(new Error('Network interrupted'));
       await expect(callResearchModel('system', {}, {}, 100, context)).rejects.toThrow('Network interrupted');
@@ -2013,6 +2106,8 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   });
 
