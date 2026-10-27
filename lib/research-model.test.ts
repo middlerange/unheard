@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   validateResearchEvidenceCoverage, matchResearchQuote, validateResearchScreening, validateResearchEvidence, researchScreeningSchema, screeningJsonSchema, screeningJsonSchemaForItems, researchEvidenceSchema,
-  RESEARCH_SCREEN_BATCH_SIZE,
+  RESEARCH_SCREEN_BATCH_SIZE, openAIResearchOutput, callResearchModel,
 } from "./research-model";
+
+vi.mock("./research-usage", () => ({
+  beginResearchUsage: vi.fn(async () => "test-usage"),
+  finishResearchUsage: vi.fn(async () => undefined),
+}));
 
 const quote = "Only 35% of projects have a formal policy permitting GenAI use";
 const finding = {
@@ -96,4 +101,46 @@ it("allows explicit rejections without inventing a supporting quote, but cannot 
   const output = researchEvidenceSchema.parse({ findings: [{ ...finding, score: 25, evidence: "" }, { ...finding, itemId: "unsupported-positive", evidence: "" }] });
   expect(validateResearchEvidenceCoverage(output.findings, ["study", "unsupported-positive"])).toHaveLength(2);
   expect(validateResearchEvidence(output.findings, [...items, { id: "unsupported-positive", content: quote }])).toEqual([]);
+});
+
+describe("OpenAI structured response phases", () => {
+  const content = (text: string) => [{ type: "output_text", text }];
+  it("selects the final answer without concatenating commentary or legacy text", () => {
+    expect(openAIResearchOutput({ output: [
+      { type: "message", phase: "commentary", content: content("{}") },
+      { type: "message", content: content('{"legacy":true}') },
+      { type: "message", phase: "final_answer", content: content('{"findings":[]}') },
+    ] })).toBe('{"findings":[]}');
+  });
+  it("retains legacy unphased messages while excluding commentary and non-message items", () => {
+    expect(openAIResearchOutput({ output: [
+      { type: "message", phase: "commentary", content: content("intermediate") },
+      { type: "reasoning", content: content("not an answer") },
+      { type: "message", phase: null, content: content('{"ok":') },
+      { content: content("true}") },
+    ] })).toBe('{"ok":true}');
+    expect(openAIResearchOutput({ output: [{ type: "message", phase: "commentary", content: content("{}") }] })).toBe("");
+  });
+  it("parses a completed final answer and still rejects commentary-only or incomplete responses", async () => {
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-openai-response-phases";
+    const context = { teamId: "phase-test", runId: "phase-run", stage: "research" as const, operation: "screen" };
+    const fetcher = vi.spyOn(globalThis, "fetch");
+    const output = [
+      { type: "message", phase: "commentary", content: content("{}") },
+      { type: "message", phase: "final_answer", content: content('{"findings":[]}') },
+    ];
+    try {
+      fetcher.mockResolvedValueOnce(Response.json({ status: "completed", output }));
+      expect((await callResearchModel("system", {}, {}, 100, context, "gpt-6-sol")).value).toEqual({ findings: [] });
+      fetcher.mockResolvedValueOnce(Response.json({ status: "completed", output: [output[0]] }));
+      await expect(callResearchModel("system", {}, {}, 100, context, "gpt-6-sol")).rejects.toThrow("no structured research response");
+      fetcher.mockResolvedValueOnce(Response.json({ status: "incomplete", output }));
+      await expect(callResearchModel("system", {}, {}, 100, context, "gpt-6-sol")).rejects.toThrow("did not complete");
+    } finally {
+      fetcher.mockRestore();
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+    }
+  });
 });

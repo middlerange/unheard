@@ -133,6 +133,20 @@ export function validateResearchEvidence(
   }
   return accepted;
 }
+type OpenAIResearchOutputMessage = {
+  type?: string;
+  phase?: "commentary" | "final_answer" | null;
+  content?: Array<{ type: string; text?: string }>;
+};
+export function openAIResearchOutput(result: { output?: OpenAIResearchOutputMessage[] }) {
+  const messages = (result.output || []).filter(item => item.type === "message" || item.type === undefined);
+  const final = messages.filter(item => item.phase === "final_answer");
+  const selected = final.length ? final : messages.filter(item => item.phase == null);
+  return selected.flatMap(item => item.content || [])
+    .filter(item => item.type === "output_text")
+    .map(item => item.text || "")
+    .join("");
+}
 export async function callResearchModel(
   system: string,
   data: unknown,
@@ -188,7 +202,7 @@ export async function callResearchModel(
       model?: string;
       service_tier?: string;
       status?: string;
-      output?: Array<{ content?: Array<{ type: string; text?: string }> }>;
+      output?: OpenAIResearchOutputMessage[];
       usage?: ModelUsage;
     };
     await finishResearchUsage(usageId, usageContext, {
@@ -197,11 +211,7 @@ export async function callResearchModel(
     });
     if (result.status !== "completed")
       throw new Error("OpenAI did not complete the research response within the output budget");
-    const output = result.output
-      ?.flatMap((item) => item.content || [])
-      .filter((item) => item.type === "output_text")
-      .map((item) => item.text || "")
-      .join("");
+    const output = openAIResearchOutput(result);
     if (!output) throw new Error("OpenAI returned no structured research response");
     return {
       value: JSON.parse(output),
