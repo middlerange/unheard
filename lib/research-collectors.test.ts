@@ -8,6 +8,7 @@ import {
   parseResearchFeed,
   plainResearchText,
   sourceHosts,
+  ResearchRateLimitError,
 } from "./research-collectors";
 import type { ResearchSourceSeed } from "./research-types";
 
@@ -21,6 +22,21 @@ const evidence = "A public research finding about customer adoption and product 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("public research evidence and publication dates", () => {
+  it("preserves HTTP 429 Retry-After without retrying inside the request", async () => {
+    const fetcher = vi.fn(async () => new Response("Slow down", { status: 429, headers: { "retry-after": "120" } }));
+    const error = await fetchResearchText("https://example.com/research", sourceHosts(source), fetcher).catch(error => error);
+    expect(error).toBeInstanceOf(ResearchRateLimitError);
+    expect(error).toMatchObject({ hostname: "example.com", retryAfter: "120", retryAfterMs: 120_000 });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const now = vi.spyOn(Date, "now").mockReturnValue(NOW);
+    try {
+      expect(new ResearchRateLimitError("example.com", "Fri, 23 Oct 2026 12:02:00 GMT").retryAfterMs).toBe(120_000);
+      expect(new ResearchRateLimitError("example.com", null).retryAfterMs).toBeNull();
+      expect(new ResearchRateLimitError("example.com", "invalid").retryAfterMs).toBeNull();
+    } finally {
+      now.mockRestore();
+    }
+  });
   it("reads the main article instead of embedded Hugging Face repository and DeepMind related cards", () => {
     for (const card of [
       '<article class="overview-card-wrapper"><h3>Repository card</h3><time class="published" datetime="2026-08-20">Paper published</time></article>',

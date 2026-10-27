@@ -51,6 +51,16 @@ export function sourceHosts(source: ResearchSourceSeed) {
   hosts.add(host.startsWith("www.") ? host.slice(4) : `www.${host}`);
   return hosts;
 }
+export class ResearchRateLimitError extends Error {
+  readonly retryAfterMs: number | null;
+  constructor(readonly hostname: string, readonly retryAfter: string | null) {
+    super("Source returned HTTP 429");
+    this.name = "ResearchRateLimitError";
+    const seconds = retryAfter?.trim() && /^\d+(?:\.\d+)?$/.test(retryAfter.trim()) ? Number(retryAfter) : NaN;
+    const date = retryAfter ? Date.parse(retryAfter) : NaN;
+    this.retryAfterMs = Number.isFinite(seconds) ? seconds * 1000 : Number.isFinite(date) ? Math.max(0, date - Date.now()) : null;
+  }
+}
 export async function fetchResearchText(
   raw: string,
   allowedHosts: Set<string>,
@@ -77,6 +87,7 @@ export async function fetchResearchText(
     }
     if (!response.ok) {
       await response.body?.cancel();
+      if (response.status === 429) throw new ResearchRateLimitError(url.hostname, response.headers.get("retry-after"));
       throw new Error(`Source returned HTTP ${response.status}`);
     }
     if (Number(response.headers.get("content-length") || 0) > MAX_BYTES) {

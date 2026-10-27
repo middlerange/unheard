@@ -36,6 +36,7 @@ import {
   fetchResearchText,
   sourceHosts,
   type CollectedItem,
+  ResearchRateLimitError,
 } from "./research-collectors";
 import {
   callResearchModel,
@@ -500,7 +501,13 @@ export function researchSourceErrorMessage(error: unknown): string {
 type ResearchCollectionProgress = {
   urls: string[]; nextOffset: number; count: number; warning: string | null;
   articles?: DiscoveryArticleTarget[]; articleOffset?: number; articleFailures?: string[];
+  rateLimits?: Record<string, { attempts: number; retryAt: number; exhausted?: boolean }>;
+  deferredArticles?: Array<DiscoveryArticleTarget & { retryAt: number; reason: string }>;
 };
+type ResearchSourceBackoff = { retryAtByHost: Record<string, number>; targets: DiscoveryArticleTarget[] };
+const MAX_COLLECTION_RATE_ATTEMPTS = 3;
+const MAX_COLLECTION_INLINE_WAIT_MS = 5 * 60_000;
+const collectionHost = (url: string) => new URL(url).hostname.replace(/^www\./, "");
 async function collectForRun(
   run: typeof research_runs.$inferSelect,
   sourceId: string,
@@ -526,6 +533,17 @@ async function collectForRun(
     eq(research_cache.id, progressId), eq(research_cache.team_id, run.team_id),
   )).get();
   let progress = saved ? JSON.parse(saved.value) as ResearchCollectionProgress : undefined;
+  const backoffId = `collection-backoff:${run.team_id}:${sourceId}`;
+  const savedBackoff = await db.select().from(research_cache).where(and(
+    eq(research_cache.id, backoffId), eq(research_cache.team_id, run.team_id),
+  )).get();
+  const backoff: ResearchSourceBackoff = savedBackoff ? JSON.parse(savedBackoff.value) : { retryAtByHost: {}, targets: [] };
+  const deferred = new Map(backoff.targets.map(target => [target.url, target]));
+  async function saveBackoff() {
+    await db.insert(research_cache).values({
+      id: backoffId, team_id: run.team_id, value: JSON.stringify({ ...backoff, targets: [...deferred.values()] }), created_at: Date.now(),
+    }).onConflictDoUpdate({ target: research_cache.id, set: { value: JSON.stringify({ ...backoff, targets: [...deferred.values()] }) } });
+  }
   async function saveCollectionProgress(value: ResearchCollectionProgress) {
     await db.insert(research_cache).values({
       id: progressId, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now(),
@@ -535,6 +553,15 @@ async function collectForRun(
   let error: string | null = null;
   let failed = false;
   try {
+    const sourceRetryAt = Math.max(...[source.url, source.feedUrl].filter(Boolean).map(url => backoff.retryAtByHost[collectionHost(url!)] || 0));
+    if (!progress && source.kind !== "search" && sourceRetryAt > Date.now()) {
+      const retryAfterMs = sourceRetryAt - Date.now();
+      if (retryAfterMs <= MAX_COLLECTION_INLINE_WAIT_MS) return { collected: count, pending: true, retryAfterMs };
+      progress = { urls: [], nextOffset: 0, count, articles: [...deferred.values()], articleOffset: 0,
+        warning: `Source index deferred after HTTP 429 until ${new Date(sourceRetryAt).toISOString()}; coverage is incomplete.`,
+      };
+      await saveCollectionProgress(progress);
+    }
     if (!progress) {
     const collection = await collectDiscoveredResearchSource(
       source, run.created_at - run.days * 86_400_000, run.created_at,
@@ -543,12 +570,14 @@ async function collectForRun(
     );
     error = collection.warning;
     const itemUrls = new Set(collection.items.map(item => item.url));
-    const items: CollectedItem[] = [...collection.items, ...(collection.pendingArticles || []).filter(target => !itemUrls.has(target.url)).map(target => ({
+    const pendingTargets = new Map([...(collection.pendingArticles || []), ...backoff.targets].map(target => [target.url, target]));
+    const items: CollectedItem[] = [...collection.items, ...[...pendingTargets.values()].filter(target => !itemUrls.has(target.url)).map(target => ({
       url: target.url, title: target.title || new URL(target.url).pathname || new URL(target.url).hostname,
       excerpt: "", publishedAt: null, contentType: "article" as const, transcriptStatus: "not_applicable" as const,
     }))];
     const available = await db
       .select({ url: research_items.canonical_url, collectedAt: research_items.collected_at, publishedAt: research_items.published_at, transcriptStatus: research_items.transcript_status,
+        title: research_items.title, excerpt: research_items.excerpt, contentHash: research_items.content_hash, contentProvenance: research_items.content_provenance,
         hasEvidence: sql<number>`${research_items.content} IS NOT NULL AND length(${research_items.content}) >= 500`,
       })
       .from(research_items)
@@ -572,6 +601,10 @@ async function collectForRun(
         articles.set(item.url, { url: item.url, title: item.title });
       }
     }
+    for (const target of backoff.targets) {
+      if (known.get(target.url)?.hasEvidence) deferred.delete(target.url);
+      else articles.set(target.url, target);
+    }
     const videos = items.filter(
       (item) =>
         item.contentType === "video" &&
@@ -593,6 +626,15 @@ async function collectForRun(
     );
     for (const item of items) {
       if (!itemUrls.has(item.url) && known.has(item.url)) continue;
+      const previous = known.get(item.url);
+      const contentHash = item.content ? await researchHash(item.content) : null;
+      const preserveKnownEvidence = (item.contentProvenance === "public_feed" || item.contentProvenance === "abstract") &&
+        (previous?.contentProvenance === "article" || previous?.contentProvenance === "transcript");
+      const bodyUnchanged = !item.content || preserveKnownEvidence ||
+        previous?.contentHash === contentHash && previous.contentProvenance === (item.contentProvenance || "unknown") &&
+        previous.transcriptStatus === item.transcriptStatus;
+      if (previous && previous.title === item.title && previous.excerpt === item.excerpt &&
+        (previous.publishedAt !== null || item.publishedAt === null) && bodyUnchanged) continue;
       const id = await researchHash(`${run.team_id}:${item.url}`);
       const inserted = await db
         .insert(research_items)
@@ -609,7 +651,7 @@ async function collectForRun(
           transcript_status: item.transcriptStatus,
           content: item.content || null,
           content_provenance: item.contentProvenance || "unknown",
-          content_hash: item.content ? await researchHash(item.content) : null,
+          content_hash: contentHash,
         })
         .onConflictDoNothing()
         .returning({ id: research_items.id })
@@ -626,8 +668,8 @@ async function collectForRun(
             ...(item.content ? {
               content: sql`CASE WHEN ${preserveEvidence} THEN ${research_items.content} ELSE ${item.content} END`,
               content_provenance: sql`CASE WHEN ${preserveEvidence} THEN ${research_items.content_provenance} ELSE ${item.contentProvenance || "unknown"} END`,
-              content_hash: sql`CASE WHEN ${preserveEvidence} THEN ${research_items.content_hash} ELSE ${await researchHash(item.content)} END`,
-              transcript_status: item.transcriptStatus,
+              content_hash: sql`CASE WHEN ${preserveEvidence} THEN ${research_items.content_hash} ELSE ${contentHash} END`,
+              transcript_status: sql`CASE WHEN ${preserveEvidence} THEN ${research_items.transcript_status} ELSE ${item.transcriptStatus} END`,
             } : {}),
           })
           .where(
@@ -645,9 +687,34 @@ async function collectForRun(
     }
     const articleQueue = progress.articles || [];
     const articleEnd = Math.min(articleQueue.length, (progress.articleOffset || 0) + 12);
-    while ((progress.articleOffset || 0) < articleEnd) {
-      const targets = articleQueue.slice(progress.articleOffset || 0, Math.min(articleEnd, (progress.articleOffset || 0) + 3));
-      await Promise.all(targets.map(async target => {
+    while ((progress.articleOffset || 0) < Math.min(articleEnd, articleQueue.length)) {
+      const head = articleQueue[progress.articleOffset || 0];
+      const host = collectionHost(head.url);
+      const limit = progress.rateLimits?.[host];
+      const retryAt = Math.max(limit?.retryAt || 0, backoff.retryAtByHost[host] || 0);
+      if (limit?.exhausted || retryAt - Date.now() > MAX_COLLECTION_INLINE_WAIT_MS) {
+        backoff.retryAtByHost[host] = retryAt;
+        const reason = `HTTP 429: deferred until ${new Date(retryAt).toISOString()}${limit?.exhausted ? " after the technical retry budget was exhausted" : ""}.`;
+        const pending = articleQueue.slice(progress.articleOffset || 0);
+        const postponed = pending.filter(target => collectionHost(target.url) === host);
+        progress.deferredArticles ||= [];
+        for (const target of postponed) {
+          if (!progress.deferredArticles.some(item => item.url === target.url)) progress.deferredArticles.push({ ...target, retryAt, reason });
+          deferred.set(target.url, target);
+        }
+        articleQueue.splice(progress.articleOffset || 0, pending.length, ...pending.filter(target => collectionHost(target.url) !== host));
+        await saveBackoff();
+        await saveCollectionProgress(progress);
+        continue;
+      }
+      if (retryAt > Date.now()) {
+        await saveCollectionProgress(progress);
+        return { collected: count, pending: true, retryAfterMs: retryAt - Date.now() };
+      }
+      const candidates = articleQueue.slice(progress.articleOffset || 0, Math.min(articleEnd, (progress.articleOffset || 0) + 3));
+      const nextHost = candidates.findIndex(target => collectionHost(target.url) !== host);
+      const targets = nextHost < 0 ? candidates : candidates.slice(0, nextHost);
+      const results = await Promise.all(targets.map(async target => {
         try {
           const item = await fetchDiscoveredResearchArticle(source, target, run.created_at);
           await db.update(research_items).set({
@@ -655,14 +722,38 @@ async function collectForRun(
             published_at: sql`COALESCE(${research_items.published_at}, ${item.publishedAt})`,
             ...(item.content ? { content: item.content, content_hash: await researchHash(item.content), content_provenance: item.contentProvenance || "article" } : {}),
           }).where(and(eq(research_items.team_id, run.team_id), eq(research_items.canonical_url, target.url)));
+          deferred.delete(target.url);
+          return { target, rateLimit: null };
         } catch (caught) {
+          if (caught instanceof ResearchRateLimitError) return { target, rateLimit: caught };
           (progress!.articleFailures ||= []).push(`${target.url}: ${researchSourceErrorMessage(caught)}`);
+          deferred.delete(target.url);
+          return { target, rateLimit: null };
         }
       }));
-      progress.articleOffset = (progress.articleOffset || 0) + targets.length;
+      const limited = results.filter(result => result.rateLimit !== null);
+      const finished = results.filter(result => result.rateLimit === null);
+      articleQueue.splice(progress.articleOffset || 0, targets.length, ...finished.map(result => result.target), ...limited.map(result => result.target));
+      progress.articleOffset = (progress.articleOffset || 0) + finished.length;
+      const limitedHosts = new Set(limited.map(result => collectionHost(result.target.url)));
+      for (const limitedHost of limitedHosts) {
+        const attempts = (progress.rateLimits?.[limitedHost]?.attempts || 0) + 1;
+        const delay = Math.max(1000, ...limited.filter(result => collectionHost(result.target.url) === limitedHost).map(result => result.rateLimit!.retryAfterMs ?? 60_000 * 2 ** (attempts - 1)));
+        const retryAt = Date.now() + delay;
+        (progress.rateLimits ||= {})[limitedHost] = { attempts, retryAt, exhausted: attempts >= MAX_COLLECTION_RATE_ATTEMPTS };
+        backoff.retryAtByHost[limitedHost] = retryAt;
+      }
+      for (const result of limited) deferred.set(result.target.url, result.target);
+      for (const target of articleQueue.slice(progress.articleOffset || 0)) {
+        if (limitedHosts.has(collectionHost(target.url))) deferred.set(target.url, target);
+      }
+      await saveBackoff();
       await saveCollectionProgress(progress);
     }
-    error = [progress.warning, progress.articleFailures?.length ? `${progress.articleFailures.length} original article page(s) could not be fetched; collection coverage is incomplete.` : null].filter(Boolean).join(" ") || null;
+    await saveBackoff();
+    error = [progress.warning, progress.articleFailures?.length ? `${progress.articleFailures.length} original article page(s) could not be fetched; collection coverage is incomplete.` : null,
+      progress.deferredArticles?.length ? `${progress.deferredArticles.length} original article page(s) deferred after HTTP 429; saved for a later collection after cooldown. Coverage is incomplete.` : null,
+    ].filter(Boolean).join(" ") || null;
     const transcriptEnd = Math.min(progress.urls.length, progress.nextOffset + 6);
     while (progress.nextOffset < transcriptEnd) {
       const urls = progress.urls.slice(progress.nextOffset, Math.min(transcriptEnd, progress.nextOffset + 2));
@@ -683,6 +774,12 @@ async function collectForRun(
   } catch (caught) {
     failed = true;
     error = researchSourceErrorMessage(caught);
+    if (caught instanceof ResearchRateLimitError) {
+      const retryAt = Date.now() + Math.max(1000, caught.retryAfterMs ?? 60_000);
+      backoff.retryAtByHost[caught.hostname.replace(/^www\./, "")] = retryAt;
+      await saveBackoff();
+      error = `${error}; source collection deferred until ${new Date(retryAt).toISOString()}. Coverage is incomplete.`;
+    }
   }
   await db
     .update(research_run_sources)

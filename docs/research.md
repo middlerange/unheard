@@ -82,6 +82,16 @@ article pages, three at a time, and continues until every queued page is attempt
 Newly discovered older dated feed articles use the same queue. Original dates,
 first-seen times and readable source bodies stay in the database rather than a
 large workflow payload; per-page failures remain visible as incomplete coverage.
+An HTTP 429 preserves the server's `Retry-After` delay and pauses further requests
+to that host. Short cooldowns use durable workflow sleeps, with at most three
+technical attempts per host in one run. Longer waits or exhausted retries defer
+every remaining URL for that host and record the count, URLs, deadline and reason;
+other hosts and sources continue. A later collection merges this saved backlog
+even when the original index no longer lists it. Readable successes are not
+requested again. Deferral remains incomplete coverage, not a successful fetch.
+Recovering a body preserves its original publication date and first-seen time;
+an old URL recovered after leaving the daily eligibility window is not silently
+redated or guaranteed editorial consideration in that day's scan.
 Search-relative dates
 are never used for eligibility. arXiv records use the first version's exact
 submission time; abstract-only evidence is labeled and cannot support claims

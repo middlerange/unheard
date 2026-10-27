@@ -307,7 +307,7 @@ function RunCard({ run, active = false }: { run: ResearchRun; active?: boolean }
   const running = isActive(run);
   const stage = { queued: 'Queued', collecting: 'Collecting sources', ranking: 'Ranking findings', drafting: 'Preparing post drafts', completed: 'Completed', failed: 'Failed' }[run.status];
   const diagnostics = run.diagnostics;
-  const rejectedStories = diagnostics?.rejectedStories?.slice(0, 8) ?? [];
+  const rejectedStories = diagnostics?.rejectedStories ?? [];
   return <div className={cn(panel, 'p-4 sm:p-5', active && 'border-[var(--color-accent)]/40')}>
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="flex items-center gap-3"><div className={cn('grid size-9 place-items-center rounded-xl', running ? 'bg-[var(--color-accent)]/10 text-[var(--color-brand)]' : run.status === 'failed' ? 'bg-amber-400/10 text-amber-300' : 'bg-[var(--color-bg-muted)] text-[var(--color-text-muted)]')}>{running ? <Loader2 className="size-4 animate-spin" /> : run.status === 'failed' ? <AlertCircle className="size-4" /> : <Check className="size-4" />}</div><div><p className="text-sm font-medium">{run.mode === 'test' ? 'Slack review test' : run.mode === 'scan' ? run.days === 1 ? '24-hour scan' : `${run.days}-day discovery` : 'Source collection'}<span className="mx-2 text-[var(--color-text-tertiary)]">·</span><span className={cn('font-normal', running ? 'text-[var(--color-brand)]' : muted)}>{stage}</span></p><p className={cn('mt-1 text-xs tabular-nums', muted)}>{date(run.createdAt, true)}{run.completedAt ? ` · Finished ${date(run.completedAt, true)}` : ''}</p></div></div>
@@ -315,7 +315,7 @@ function RunCard({ run, active = false }: { run: ResearchRun; active?: boolean }
     </div>
     {running && <p className={cn('mt-3 text-xs leading-5', muted)}>{run.status === 'queued' ? 'The background workflow will start shortly. You can leave this page.' : run.status === 'collecting' ? 'Checking enabled sources and collecting new items. Each source is processed independently.' : run.status === 'drafting' ? 'Writing post drafts from the strongest matches and sending them for review.' : 'Reviewing recent items against your audience and extracting source-backed findings.'}</p>}
     {diagnostics && (diagnostics.screenedCount !== undefined || rejectedStories.length > 0) && <div className="mt-3 space-y-2 rounded-lg bg-[var(--color-bg-subtle)] p-3">
-      {diagnostics.screenedCount !== undefined && <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-[var(--color-text-secondary)]"><span>{diagnostics.eligibleCount ?? 0} fresh candidates</span><span>{diagnostics.screenedCount} screened</span><span>{diagnostics.evidenceCount ?? 0} stories with public evidence</span>{diagnostics.draftedCount !== undefined && <span>{diagnostics.draftedCount} drafts</span>}</div>}
+      {diagnostics.screenedCount !== undefined && <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-[var(--color-text-secondary)]"><span>{diagnostics.eligibleCount ?? 0} eligible candidates</span>{diagnostics.freshCount !== undefined && <span>{diagnostics.freshCount} recently published</span>}{diagnostics.evergreenCount !== undefined && <span>{diagnostics.evergreenCount} newly discovered older items</span>}<span>{diagnostics.screenedCount} screened</span><span>{diagnostics.evidenceCount ?? 0} stories with public evidence</span>{diagnostics.draftedCount !== undefined && <span>{diagnostics.draftedCount} drafts</span>}</div>}
       {diagnostics.outcome && <p className={cn('text-xs leading-5', muted)}>{diagnostics.outcome}</p>}
       {Boolean(diagnostics.undatedCount || diagnostics.unavailableVideoCount) && <p className="text-[11px] leading-5 text-[var(--color-text-tertiary)]">Excluded: {diagnostics.undatedCount ?? 0} undated items in the source archive · {diagnostics.unavailableVideoCount ?? 0} recent videos without a transcript.</p>}
       {rejectedStories.length > 0 && <details className="border-t border-[var(--color-border)]">
@@ -324,7 +324,6 @@ function RunCard({ run, active = false }: { run: ResearchRun; active?: boolean }
           <div className="flex flex-col items-start gap-x-3 gap-y-1 sm:flex-row sm:justify-between"><p className="min-w-0 flex-1 text-xs font-medium leading-5 text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">{story.title}</p>{story.score !== null && <span className="shrink-0 rounded-md bg-[var(--color-bg-muted)] px-2 py-1 text-[11px] tabular-nums text-[var(--color-text-muted)]">{story.score}/100 relevance</span>}</div>
           <p className={cn('text-xs leading-5 [overflow-wrap:anywhere]', muted)}>{story.reason}</p>
         </li>)}</ul>
-        {(diagnostics.rejectedStories?.length ?? 0) > rejectedStories.length && <p className={cn('pb-3 text-[11px] leading-5 tabular-nums', muted)}>Showing the first {rejectedStories.length} skipped stories.</p>}
       </details>}
     </div>}
     {run.error && <p role="alert" className="mt-3 rounded-lg bg-amber-400/5 p-3 text-xs leading-5 text-amber-300">{run.error}</p>}

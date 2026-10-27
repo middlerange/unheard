@@ -1119,6 +1119,207 @@ describe("research persistence and team isolation", () => {
       else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 20_000);
+  it("skips item writes for unchanged feeds while preserving hydrated evidence and applying actual updates", async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
+    const now = Date.now();
+    const published = Math.floor((now - 10_000) / 1000) * 1000;
+    const origin = new URL(seed.url).origin;
+    const body = "A practitioner explains a concrete onboarding decision, implementation and limits. ".repeat(20).trim();
+    const changedBody = "The revised source describes a different setup tradeoff and the supporting details. ".repeat(20).trim();
+    const fullArticle = "The hydrated original article contains additional verified implementation evidence. ".repeat(25).trim();
+    const fullTranscript = `${fullArticle} Additional transcript-specific commentary.`;
+    let changed = false;
+    const feed = () => {
+      const rows = [
+        { id: "stable", title: "Stable original", excerpt: "Stable summary", at: changed ? published + 1000 : published, content: body },
+        { id: "metadata", title: changed ? "Updated title" : "Original title", excerpt: changed ? "Updated supporting quote" : "Original quote", at: published, content: changed ? changedBody : body },
+        { id: "undated", title: "Original date missing", excerpt: "Same summary", at: changed ? published : null, content: body },
+        { id: "hydrated", title: changed ? "Updated hydrated title" : "Hydrated title", excerpt: changed ? "New public excerpt" : "Public excerpt", at: published, content: changed ? changedBody : body },
+        { id: "transcript", title: changed ? "Updated transcript title" : "Transcript title", excerpt: changed ? "Updated caption quote" : "Caption summary", at: published, content: changed ? changedBody : body },
+        ...(changed ? [{ id: "new", title: "Newly published original", excerpt: "New publication", at: published + 2000, content: body }] : []),
+      ];
+      return `<rss><channel>${rows.map(row => `<item><title>${row.title}</title><link>${origin}/metadata-repeat-${row.id}</link><description>${row.excerpt}</description>${row.at === null ? "" : `<pubDate>${new Date(row.at).toUTCString()}</pubDate>`}<content:encoded><![CDATA[<p>${row.content}</p>]]></content:encoded></item>`).join("")}</channel></rss>`;
+    };
+    execute({ queries: [{ sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('metadata-repeat','Metadata repeat','metadata-repeat',0,0)" }] });
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      expect(String(input)).toBe(seed.feedUrl);
+      return new Response(feed());
+    });
+    const db = state.db as ReturnType<typeof drizzle>;
+    const insert = vi.spyOn(db, "insert"), update = vi.spyOn(db, "update");
+    async function collect(id: string, at: number) {
+      clock.mockReturnValue(at);
+      execute({ queries: [{ sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,'metadata-repeat','collect','collecting',1,0,?,'Product teams',1,?)", params: [id, at, JSON.stringify([seed.id])] }] });
+      const result = await processResearchJob({ operation: "collect", runId: id, sourceId: seed.id });
+      await processResearchJob({ operation: "rank", runId: id });
+      return result;
+    }
+    try {
+      expect(await collect("metadata-repeat-first", now)).toEqual({ collected: 5, error: null });
+      const hydratedHash = await researchHash(fullArticle);
+      const transcriptHash = await researchHash(fullTranscript);
+      execute({ queries: [
+        { sql: "UPDATE research_items SET content=?,content_hash=?,content_provenance='article' WHERE team_id='metadata-repeat' AND canonical_url=?", params: [fullArticle, hydratedHash, `${origin}/metadata-repeat-hydrated`] },
+        { sql: "UPDATE research_items SET content=?,content_hash=?,content_provenance='transcript',content_type='video',transcript_status='available' WHERE team_id='metadata-repeat' AND canonical_url=?", params: [fullTranscript, transcriptHash, `${origin}/metadata-repeat-transcript`] },
+      ] });
+      insert.mockClear(); update.mockClear();
+      expect(await collect("metadata-repeat-second", now + 1000)).toEqual({ collected: 0, error: null });
+      expect(insert.mock.calls.filter(([table]) => table === schema.research_items)).toHaveLength(0);
+      expect(update.mock.calls.filter(([table]) => table === schema.research_items)).toHaveLength(0);
+      changed = true;
+      expect(await collect("metadata-repeat-third", now + 2000)).toEqual({ collected: 1, error: null });
+      const rows = execute({ queries: [{ sql: "SELECT canonical_url,title,excerpt,published_at,collected_at,content,content_hash,content_provenance,transcript_status FROM research_items WHERE team_id='metadata-repeat'" }] })[0].results;
+      const item = (id: string) => rows.find((row: { canonical_url: string }) => row.canonical_url === `${origin}/metadata-repeat-${id}`);
+      expect(item("stable")).toMatchObject({ title: "Stable original", published_at: published, collected_at: now, content: body });
+      expect(item("metadata")).toMatchObject({ title: "Updated title", excerpt: "Updated supporting quote", content: changedBody, content_hash: await researchHash(changedBody), collected_at: now });
+      expect(item("undated")).toMatchObject({ published_at: published, collected_at: now });
+      expect(item("hydrated")).toMatchObject({ title: "Updated hydrated title", excerpt: "New public excerpt", content: fullArticle, content_hash: hydratedHash, content_provenance: "article", published_at: published, collected_at: now });
+      expect(item("transcript")).toMatchObject({ title: "Updated transcript title", excerpt: "Updated caption quote", content: fullTranscript, content_hash: transcriptHash, content_provenance: "transcript", transcript_status: "available", published_at: published, collected_at: now });
+      expect(item("new")).toMatchObject({ published_at: published + 2000, collected_at: now + 2000 });
+      expect(fetcher).toHaveBeenCalledTimes(3);
+    } finally {
+      insert.mockRestore(); update.mockRestore(); fetcher.mockRestore(); clock.mockRestore();
+    }
+  }, 30_000);
+
+  function savedArticleQueue(team: string, source: ResearchSourceSeed, urls: string[], now: number, rateLimits = {}) {
+    const runId = `${team}-run`;
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)", params: [team, team, team] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'collect','collecting',1,0,?,'Product teams',1,?)", params: [runId, team, now, JSON.stringify([source.id])] },
+      ...urls.map((url, index) => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at) VALUES(?,?,?,?,?,'',?,?)",
+        params: [`${team}-${index}`, team, source.id, url, `Article ${index}`, now - 180 * 86400000, now - 2 * 86400000],
+      })),
+      { sql: "INSERT INTO research_cache(id,team_id,value,created_at) VALUES(?,?,?,?)", params: [`collection-progress:${runId}:${source.id}`, team, JSON.stringify({ urls: [], nextOffset: 0, count: urls.length, warning: null, articles: urls.map(url => ({ url })), articleOffset: 0, rateLimits }), now] },
+    ] });
+    return runId;
+  }
+  const recoveredArticle = "The original practitioner describes a concrete onboarding decision and the implementation tradeoff. ".repeat(20);
+  it("retains a throttled target, stops the host queue, and resumes after its saved cooldown", async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
+    const now = Date.now();
+    const urls = Array.from({ length: 6 }, (_, index) => `${new URL(seed.url).origin}/cooldown-${index}`);
+    const runId = savedArticleQueue("cooldown-resume", seed, urls, now);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    let limited = true;
+    const calls: string[] = [];
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      const url = String(input);
+      calls.push(url);
+      if (url === urls[0] && limited) return new Response("Slow down", { status: 429, headers: { "retry-after": "120" } });
+      return new Response(`<article><h1>Original workflow</h1><p>${recoveredArticle}</p></article>`);
+    });
+    try {
+      expect(await processResearchJob({ operation: "collect", runId, sourceId: seed.id })).toEqual({ collected: 6, pending: true, retryAfterMs: 120_000 });
+      expect(calls).toEqual(urls.slice(0, 3));
+      const [saved] = execute({ queries: [{ sql: "SELECT value FROM research_cache WHERE id=?", params: [`collection-progress:${runId}:${seed.id}`] }] })[0].results;
+      expect(JSON.parse(saved.value).articleOffset).toBe(2);
+      expect(JSON.parse(saved.value).articles.slice(0, 3)).toEqual([{ url: urls[1] }, { url: urls[2] }, { url: urls[0] }]);
+      await processResearchJob({ operation: "collect", runId, sourceId: seed.id });
+      expect(calls).toHaveLength(3);
+      limited = false;
+      clock.mockReturnValue(now + 120_001);
+      expect(await processResearchJob({ operation: "collect", runId, sourceId: seed.id })).toEqual({ collected: 6, error: null });
+      expect(calls.filter(url => url === urls[0])).toHaveLength(2);
+      expect(calls.filter(url => url === urls[1])).toHaveLength(1);
+      expect(calls.filter(url => url === urls[2])).toHaveLength(1);
+      const [backlog, stored] = execute({ queries: [
+        { sql: "SELECT value FROM research_cache WHERE id=?", params: [`collection-backoff:cooldown-resume:${seed.id}`] },
+        { sql: "SELECT COUNT(*) count,MIN(collected_at) first_seen FROM research_items WHERE team_id='cooldown-resume' AND content IS NOT NULL" },
+      ] }).map((result: { results: unknown[] }) => result.results[0]);
+      expect(JSON.parse(backlog.value).targets).toEqual([]);
+      expect(stored).toEqual({ count: 6, first_seen: now - 2 * 86400000 });
+    } finally {
+      fetcher.mockRestore(); clock.mockRestore();
+    }
+  }, 30_000);
+
+  it("defers every same-host target after a long Retry-After and rehydrates the saved backlog on a later run", async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
+    const now = Date.now();
+    const urls = Array.from({ length: 6 }, (_, index) => `${new URL(seed.url).origin}/long-cooldown-${index}`);
+    const runId = savedArticleQueue("cooldown-later", seed, urls, now);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    let limited = true;
+    const calls: string[] = [];
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      const url = String(input); calls.push(url);
+      if (url === seed.feedUrl) return new Response("<rss><channel></channel></rss>");
+      if (limited) return new Response("Slow down", { status: 429, headers: { "retry-after": "3600" } });
+      return new Response(`<article><h1>Recovered original workflow</h1><p>${recoveredArticle}</p></article>`);
+    });
+    try {
+      const result = await processResearchJob({ operation: "collect", runId, sourceId: seed.id });
+      expect(result).toMatchObject({ collected: 6, error: expect.stringContaining("6 original article page(s) deferred") });
+      expect(result).not.toHaveProperty("pending");
+      expect(calls).toHaveLength(3);
+      const [saved] = execute({ queries: [{ sql: "SELECT value FROM research_cache WHERE id=?", params: [`collection-backoff:cooldown-later:${seed.id}`] }] })[0].results;
+      expect(JSON.parse(saved.value).targets.map((target: { url: string }) => target.url).sort()).toEqual([...urls].sort());
+      await processResearchJob({ operation: "rank", runId });
+      const later = now + 2 * 86400000;
+      clock.mockReturnValue(later); limited = false;
+      execute({ queries: [{ sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES('cooldown-later-next','cooldown-later','collect','collecting',1,0,?,'Product teams',1,?)", params: [later, JSON.stringify([seed.id])] }] });
+      expect(await processResearchJob({ operation: "collect", runId: "cooldown-later-next", sourceId: seed.id })).toEqual({ collected: 0, error: null });
+      expect(calls).toHaveLength(10);
+      const [backlog, stored] = execute({ queries: [
+        { sql: "SELECT value FROM research_cache WHERE id=?", params: [`collection-backoff:cooldown-later:${seed.id}`] },
+        { sql: "SELECT COUNT(*) count,MIN(collected_at) first_seen,MAX(published_at) published_at FROM research_items WHERE team_id='cooldown-later' AND content IS NOT NULL" },
+      ] }).map((result: { results: unknown[] }) => result.results[0]);
+      expect(JSON.parse(backlog.value).targets).toEqual([]);
+      expect(stored).toEqual({ count: 6, first_seen: now - 2 * 86400000, published_at: now - 180 * 86400000 });
+    } finally {
+      fetcher.mockRestore(); clock.mockRestore();
+    }
+  }, 30_000);
+
+  it("exhausts only technical rate-limit retries and explicitly defers the remaining host queue", async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
+    const now = Date.now();
+    const urls = [0, 1].map(index => `${new URL(seed.url).origin}/retry-budget-${index}`);
+    const runId = savedArticleQueue("cooldown-budget", seed, urls, now);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("Slow down", { status: 429, headers: { "retry-after": "1" } }));
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        clock.mockReturnValue(now + attempt * 1001);
+        expect(await processResearchJob({ operation: "collect", runId, sourceId: seed.id })).toMatchObject({ pending: true, retryAfterMs: 1000 });
+      }
+      clock.mockReturnValue(now + 2002);
+      const result = await processResearchJob({ operation: "collect", runId, sourceId: seed.id });
+      expect(result).toMatchObject({ error: expect.stringContaining("2 original article page(s) deferred") });
+      expect(result).not.toHaveProperty("pending");
+      expect(fetcher).toHaveBeenCalledTimes(6);
+      const [saved] = execute({ queries: [{ sql: "SELECT value FROM research_cache WHERE id=?", params: [`collection-progress:${runId}:${seed.id}`] }] })[0].results;
+      expect(JSON.parse(saved.value).deferredArticles).toHaveLength(2);
+      expect(Object.values(JSON.parse(saved.value).rateLimits)).toEqual([{ attempts: 3, retryAt: now + 3002, exhausted: true }]);
+    } finally {
+      fetcher.mockRestore(); clock.mockRestore();
+    }
+  }, 30_000);
+
+  it("continues other hosts without requesting a cooled-down host later in a batch", async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "search")!;
+    const now = Date.now();
+    const urls = ["https://other.example.com/first", "https://limited.example.com/deferred", "https://other.example.com/last"];
+    const runId = savedArticleQueue("cooldown-mixed", seed, urls, now, { "limited.example.com": { attempts: 1, retryAt: now + 3600_000 } });
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    const fetched: string[] = [];
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      fetched.push(String(input));
+      return new Response(`<article><h1>Original workflow</h1><p>${recoveredArticle}</p></article>`);
+    });
+    try {
+      const result = await processResearchJob({ operation: "collect", runId, sourceId: seed.id });
+      expect(result).toMatchObject({ error: expect.stringContaining("1 original article page(s) deferred") });
+      expect(result).not.toHaveProperty("pending");
+      expect(fetched).toEqual([urls[0], urls[2]]);
+    } finally {
+      fetcher.mockRestore(); clock.mockRestore();
+    }
+  }, 30_000);
+
   it("continues every original article page in bounded durable chunks and preserves first-seen metadata", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
     const now = Date.now();

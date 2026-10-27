@@ -44,6 +44,9 @@ export async function runResearchWorkflow(runId, step, invoke) {
       let batch = 1;
       let collection = await step.do(`Collect ${sourceId}`, collectionOptions, () => invoke({ operation: 'collect', runId, sourceId }));
       while (collection?.pending === true) {
+        if (Number.isFinite(collection.retryAfterMs) && collection.retryAfterMs > 0) {
+          await step.sleep(`Wait for ${sourceId} batch ${batch}`, `${Math.ceil(collection.retryAfterMs / 1000)} seconds`);
+        }
         batch++;
         collection = await step.do(`Collect ${sourceId} batch ${batch}`, collectionOptions, () => invoke({ operation: 'collect', runId, sourceId }));
       }

@@ -47,6 +47,22 @@ describe('durable research execution', () => {
     expect(doStep.mock.calls.map(([name]) => name)).toContain('Collect public-video-source batch 3');
   });
 
+  it('sleeps durably for a saved source cooldown before resuming the same collection', async () => {
+    const events: string[] = [];
+    let calls = 0;
+    const invoke = vi.fn(async (payload: { operation: string; sourceId?: string }) => {
+      events.push(payload.sourceId || payload.operation);
+      if (payload.operation === 'plan') return { sourceIds: ['limited', 'next-source'] };
+      if (payload.sourceId === 'limited' && ++calls === 1) return { collected: 8, pending: true, retryAfterMs: 120_001 };
+      return { pending: false };
+    });
+    const sleep = vi.fn(async (name: string, duration: string) => { events.push(`sleep:${name}:${duration}`); });
+    const step = { do: async (_name: string, _options: unknown, work: () => Promise<unknown>) => work(), sleep };
+    await runResearchWorkflow('cooldown-run', step, invoke);
+    expect(sleep).toHaveBeenCalledWith('Wait for limited batch 1', '121 seconds');
+    expect(events).toEqual(['plan', 'limited', 'sleep:Wait for limited batch 1:121 seconds', 'limited', 'next-source', 'rank', 'drafts']);
+  });
+
   it('bounds failure dispatch before validation and preserves the original exception', async () => {
     const original = new Error(`Database unavailable: ${'x'.repeat(6000)}`);
     const invoke = vi.fn(async (payload: { operation: string; error?: string }) => {
