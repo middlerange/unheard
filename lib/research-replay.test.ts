@@ -47,7 +47,12 @@ describe('configured replay persistence and paid cache boundary', () => {
     try { const r = spawnSync('python3', ['-c', python], { stdio:[input,'pipe','pipe'], encoding:'utf8', timeout:30000,maxBuffer:32*1024*1024 }); if(r.status!==0)throw r.error||new Error(r.stderr);return JSON.parse(r.stdout); } finally {closeSync(input);}
   }
   function query(sql:string,params:unknown[]=[]) { return execute({queries:[{sql,params}]})[0].results; }
-  function storage(queries:Array<{sql:string;params:unknown[]}>) {fault?.(queries,'before');const out=execute({queries});fault?.(queries,'after');return out;}
+  function storage(queries:Array<{sql:string;params:unknown[]}>) {
+    for (const query of queries) if (/\blike\b/i.test(query.sql) && query.params.some(value => typeof value === 'string' && value.length > 50)) throw Error('LIKE or GLOB pattern too complex: SQLITE_ERROR');
+    fault?.(queries,'before');const out=execute({queries});
+    if (out.some((result:any) => Buffer.byteLength(JSON.stringify(result.results)) > 1_000_000)) throw Error('D1 simulated aggregate query result limit exceeded');
+    fault?.(queries,'after');return out;
+  }
   class Statement { constructor(public sql:string,public params:unknown[]=[]){ } bind(...params:unknown[]){return new Statement(this.sql,params);}async all(){return storage([this])[0];}async raw(){return(await this.all()).results.map((r:object)=>Object.values(r));}async run(){return this.all();}}
   let paidCalls = 0;
   const requests: any[] = [];
@@ -67,6 +72,16 @@ describe('configured replay persistence and paid cache boundary', () => {
     }));
   });
   afterAll(()=>{fault=undefined;vi.unstubAllGlobals();globalThis.__contentHubResearchWorkflow__=undefined;rmSync(folder,{recursive:true,force:true});});
+  it('starts a corpus over1MB through D1-safe pages and status excludes uploaded bodies in SQL', async () => {
+    const id='55555555-5555-4555-8555-555555555555',items=Array.from({length:80},(_,n)=>({...item('large-'+n),content:body.repeat(20).slice(0,14000)}));
+    expect(Buffer.byteLength(JSON.stringify(items))).toBeGreaterThan(1_000_000);
+    await researchReplayAction('team',prepare(id,80));
+    for(let n=0;n<80;n+=20)await researchReplayAction('team',{operation:'upload',runId:id,chunkIndex:n/20,items:items.slice(n,n+20)});
+    await researchReplayAction('team',{operation:'start',runId:id});
+    const result=await researchReplayStatus('team',id);
+    expect(result.records.some(row=>row.id.includes(':upload:'))).toBe(false);
+    expect(result.records.find(row=>row.id.endsWith(':plan'))?.value.eligibleIds).toHaveLength(80);
+  },60000);
   it('prepares/uploads idempotently, freezes exact audience/corpus and resumes cached paid evidence after a lost checkpoint',async()=>{
     const id=runIds[0];await researchReplayAction('team',prepare(id,2));await researchReplayAction('team',prepare(id,2));
     await expect(researchReplayAction('team',{...prepare(id,2),windowEnd:2001})).rejects.toThrow('differs');

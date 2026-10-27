@@ -1,4 +1,4 @@
-import { and, eq, like } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { getDb } from './db/client';
 import { research_cache, research_runs, research_sources } from './schema';
@@ -101,9 +101,21 @@ async function loadConfig(run: Run): Promise<Config> {
   await getFrozenResearchAudience(run);
   return config;
 }
+async function replayCacheRows(run: Run, suffix: string, excludeUploads = false) {
+  const db = await getDb(), wanted = prefix(run.id) + suffix, uploadPrefix = prefix(run.id) + 'upload:';
+  const rows: Array<typeof research_cache.$inferSelect> = [];
+  // D1 restricts LIKE pattern complexity and aggregate result size; read bounded value pages.
+  for (let offset = 0; ; offset += 3) {
+    const page = await db.select().from(research_cache).where(and(
+      eq(research_cache.team_id, run.team_id), sql`substr(${research_cache.id},1,${wanted.length})=${wanted}`,
+      excludeUploads ? sql`substr(${research_cache.id},1,${uploadPrefix.length})<>${uploadPrefix}` : undefined,
+    )).orderBy(research_cache.id).limit(3).offset(offset).all();
+    rows.push(...page);
+    if (page.length < 3) return rows;
+  }
+}
 async function chunks(run: Run) {
-  const db = await getDb();
-  const rows = await db.select().from(research_cache).where(and(eq(research_cache.team_id, run.team_id), like(research_cache.id, prefix(run.id) + 'upload:%'))).all();
+  const rows = await replayCacheRows(run, 'upload:');
   return rows.map(row => JSON.parse(row.value) as { chunkIndex: number; items: ResearchReplayItem[] }).sort((a, b) => a.chunkIndex - b.chunkIndex);
 }
 export async function researchReplayAction(teamId: string, input: unknown) {
@@ -158,9 +170,9 @@ export async function researchReplayAction(teamId: string, input: unknown) {
 }
 export async function researchReplayStatus(teamId: string, runId: string) {
   z.uuid().parse(runId);
-  const run = await loadRun(teamId, runId), db = await getDb();
-  const rows = await db.select().from(research_cache).where(and(eq(research_cache.team_id, teamId), like(research_cache.id, prefix(runId) + '%'))).all();
-  return { run, records: rows.filter(row => !row.id.includes(':upload:')).map(row => ({ id: row.id, value: JSON.parse(row.value) })) };
+  const run = await loadRun(teamId, runId);
+  const rows = await replayCacheRows(run, '', true);
+  return { run, records: rows.map(row => ({ id: row.id, value: JSON.parse(row.value) })) };
 }
 
 function screenInput(item: ResearchReplayItem) {
