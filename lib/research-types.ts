@@ -45,7 +45,7 @@ export type ResearchRunDiagnostics = {
 };
 export type ResearchRun = {
   id: string;
-  mode: "scan" | "collect" | "test";
+  mode: "scan" | "collect" | "test" | "replay";
   status:
     "queued" | "collecting" | "ranking" | "drafting" | "completed" | "failed";
   days: number;

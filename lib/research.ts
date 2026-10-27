@@ -399,6 +399,7 @@ export async function createResearchRun(
     .where(
       and(
         eq(research_runs.team_id, teamId),
+        ne(research_runs.mode, "replay"),
         inArray(research_runs.status, [
           "queued",
           "collecting",
@@ -481,6 +482,7 @@ export async function createResearchRun(
       .where(
         and(
           eq(research_runs.team_id, teamId),
+          ne(research_runs.mode, "replay"),
           inArray(research_runs.status, [
             "queued",
             "collecting",
@@ -897,7 +899,7 @@ async function cachedModel(
     { ...audience, items: input },
     stage === "evidence" ? evidenceJsonSchemaForItems((input as Array<{ id: string }>).map(item => item.id), enabledProfileIds) : schema,
     outputTokens,
-    { teamId: run.team_id, runId: run.id, stage: "research", operation: stage },
+    { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? `replay_${stage}` : stage },
   );
   await validateReusable(result.value);
   const cacheValue = JSON.stringify(result.value);
@@ -913,6 +915,7 @@ async function cachedModel(
     .onConflictDoNothing());
   return result.value as unknown;
 }
+export { cachedModel as cachedResearchModel };
 type ResearchRankDiagnostics = ResearchRunDiagnostics & Required<Pick<ResearchRunDiagnostics, "evidenceCount" | "rejectedStories" | "screenedCount">>;
 type ResearchRankProgress = {
   candidateIds?: string[];
@@ -1330,6 +1333,7 @@ export async function processResearchJob(job: ResearchJob) {
         if (!scheduledRunId) {
           const queued = await db.select().from(research_runs).where(and(
             eq(research_runs.team_id, settings.team_id),
+            ne(research_runs.mode, "replay"),
             eq(research_runs.status, "queued"),
           )).get();
           scheduledRunId = queued?.id.startsWith("daily-")
@@ -1396,6 +1400,10 @@ export async function processResearchJob(job: ResearchJob) {
     .where(eq(research_runs.id, job.runId))
     .get();
   if (!run) throw new Error("Run not found");
+  if (run.mode === "replay" && job.operation !== "fail") {
+    const { processResearchReplay } = await import("./research-replay");
+    return processResearchReplay(run, job.operation);
+  }
   if (job.operation === "drafts") {
     const { processResearchDraftJob } = await import("./research-drafts");
     return processResearchDraftJob(run.id);

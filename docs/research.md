@@ -420,3 +420,79 @@ re-import combined counters. Costs are USD estimates, not invoices, and exclude
 taxes, Cloudflare/hosting/storage, social-provider fees and unrelated AI features.
 Reconcile with the provider billing dashboard for final charges. Migration
 `0028_research_schedule.sql` adds the per-team schedule and dispatch lease.
+
+## Historical recall replays
+
+`POST /api/research/replays` is an authenticated, team-scoped audit path using
+this Worker's configured research provider. It never collects live sources,
+updates source items or shared findings, generates drafts, or sends Slack reviews.
+Its separate `research_runs` row has `mode: "replay"`, `editorial: false`, actual
+execution timestamps, and an explicit historical publication window in its saved
+configuration. The UI calls it **Recall replay**. Normal daily research and replay
+progress are independent. Apply `0031_research_replay_isolation.sql` before using
+this path: it replaces only the unique active-run index so its existing constraint
+continues to apply to normal research while excluding replay rows.
+
+The strict request protocol is:
+
+- `prepare`: `{ operation, runId, audienceRunId, windowStart, windowEnd,
+  inventorySha256, inventoryCount, sourceIds }`. `runId` is a client-generated
+  UUID for idempotent preparation. Window timestamps are epoch milliseconds,
+  start inclusive and end exclusive. `audienceRunId` must identify a saved run
+  belonging to the same team; its captured profile instructions are preserved
+  verbatim. Sources must be registered for the team, but may now be disabled when
+  reproducing a historical source roster. Preparation is bounded to 100,000
+  uploaded records; this administrative request bound is unrelated to daily
+  research or publishing throughput.
+- `upload`: `{ operation, runId, chunkIndex, items }`. Numbered chunks start at
+  zero, contain at most 20 records each, and are immutable. Each
+  public-source record has `id`, `sourceId`, `url`, `title`, `excerpt`,
+  `publishedAt`, `discoveredAt`, `content`, `contentProvenance`, `contentType`, and
+  `transcriptStatus`. Dates are epoch milliseconds or null; content is text or
+  null. Optional `bodyCapturedAt` records an epoch timestamp and `bodyOrigin` is
+  `inventory` or `saved_public_hydration`. Content and excerpts retain at most
+  14,000 characters. URLs must be public HTTPS. Unknown fields, including winner
+  labels, impressions and expected outcomes, are rejected. Request bodies are
+  streamed with an overall 1.8 MB bound.
+- `start`: `{ operation, runId }`. The complete unique uploaded inventory, source
+  roster, dates, profile context, routing decisions and scoring contract are
+  frozen before dispatch. A changed upload or scoring contract refuses resume.
+  `GET /api/research/replays?runId=...` exports the team's saved manifest,
+  progress, requests and results without exposing a provider key.
+
+`inventorySha256` identifies the operator's full reference inventory. It is a
+historical reference supplied by the operator, not a server assertion that every
+reference record was uploaded. `inventoryCount` counts the uploaded corpus;
+`uploadedSha256` separately hashes its canonical validated records. A replay may
+upload all public eligible records from a larger reference inventory, with the
+full identity/exclusion proof retained alongside the report. Omitting an internal
+test record or using a complete publication-window subset must be explicit in
+that proof. Neither hash establishes historical discoverability or collection
+completeness.
+
+Readable public bodies follow the production 500-character/Pew usability routing
+rule directly to evidence. Only incomplete records are packed into screening
+batches of eight; all selected IDs retain frozen publication order before evidence
+batches of six. Each durable step makes at most one model request. A selected
+record without a captured usable body is recorded as unavailable, with no live
+hydration or fabricated continuation. Exact profile selection, score floor 70,
+coverage, positive-family and verified-quote gates match production. Raw invalid
+outputs and usage receipts remain visible through the existing model transport.
+No paid request is automatically retried.
+
+Replay request snapshots precede paid calls. The normal semantic model cache key
+is unchanged and can reuse an exact same-version/audience/stage/input result;
+usage operations are tagged `replay_screen` and `replay_evidence`. Older semantic
+versions are never relabeled or seeded into the current cache. The research and
+writing prompt versions, writing model and daily schedule are unchanged by the
+replay feature. Results and absolute progress counters use replay-only cache
+namespaces and storage-only retries, so a lost checkpoint can recover a completed
+response without rebilling it.
+
+These audits measure qualification conditional on the supplied public sources.
+A successful replay, more qualified articles, or good generated copy does not
+establish 80–90% exact winner recovery. Join frozen winner identities only after
+scoring, distinguish exact originals from precursors and topic proxies, and report
+missing, blocked, undated and out-of-window sources separately. Older originals
+can underpin recent social posts; never redate them into a publication window or
+claim a related article is the same recovered idea.

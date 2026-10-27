@@ -86,10 +86,11 @@ function ResearchPage() {
     return () => { alive.current = false; controller.current?.abort(); };
   }, [refresh]);
 
-  const hasActiveRun = data?.runs.some(isActive) ?? false;
+  const hasActiveRun = data?.runs.some(run => run.mode !== 'replay' && isActive(run)) ?? false;
+  const hasReplayRun = data?.runs.some(run => run.mode === 'replay' && isActive(run)) ?? false;
   const hasDraftWork = data?.drafts?.some(draft => ['delivering', 'editing', 'publishing'].includes(draft.status)) ?? false;
   useEffect(() => {
-    if ((!hasActiveRun && !hasDraftWork) || pending) return;
+    if ((!hasActiveRun && !hasReplayRun && !hasDraftWork) || pending) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
@@ -98,7 +99,7 @@ function ResearchPage() {
     }
     timer = setTimeout(poll, 4000);
     return () => { stopped = true; clearTimeout(timer); controller.current?.abort(); };
-  }, [hasActiveRun, hasDraftWork, pending, refresh]);
+  }, [hasActiveRun, hasReplayRun, hasDraftWork, pending, refresh]);
 
   async function mutate(key: string, work: () => Promise<void>) {
     if (pending) return;
@@ -166,10 +167,10 @@ function ResearchPage() {
   );
 
   const enabledCount = data.sources.filter(source => source.enabled).length;
-  const activeRun = data.runs.find(isActive);
+  const activeRun = data.runs.find(run => run.mode !== 'replay' && isActive(run));
   const latestRun = data.runs[0];
   const ready = data.configured && data.workflowConfigured;
-  const canRun = ready && enabledCount > 0 && !hasActiveRun && !pending;
+  const canRun = ready && enabledCount > 0 && !activeRun && !pending;
   const newCount = data.findings.filter(finding => finding.status === 'new').length;
   const draftCount = (data.drafts ?? []).filter(draft => ['draft', 'pending', 'failed'].includes(draft.status)).length;
   const tabs: { id: Tab; label: string; count?: number }[] = [
@@ -254,7 +255,7 @@ function ResearchPage() {
           {data.runs.length ? <div className="space-y-3">{data.runs.map(run => <RunCard key={run.id} run={run} />)}</div> : <EmptyState icon={Clock} title="No research runs yet" description="Your first scan will appear here, with its progress and token usage." />}
         </>}
 
-        {tab === 'costs' && <ResearchUsage timezone={data.settings.dailyTimezone} active={hasActiveRun || hasDraftWork} />}
+        {tab === 'costs' && <ResearchUsage timezone={data.settings.dailyTimezone} active={hasActiveRun || hasReplayRun || hasDraftWork} />}
 
         {tab === 'audience' && <form className={cn(panel, 'max-w-3xl p-5 sm:p-6')} onSubmit={event => { event.preventDefault(); void mutate('icp', async () => { await request('/api/research', jsonRequest('PATCH', { icp: (icpDraft ?? data.settings.icp).trim() })); setIcpDraft(null); toast.success('Audience updated. Your next scan will use this context.'); }); }}>
           <div className="flex items-start gap-3"><Settings className="mt-0.5 size-5 text-[var(--color-brand)]" /><div><h2 className="text-base font-medium">What is worth your audience’s time?</h2><p className={cn('mt-2 text-sm leading-6', muted)}>Describe your ideal customer, their responsibilities, and the problems they care about. This guides source relevance and suggested content angles. Give each posting profile its own audience and writing instructions in Research profiles.</p></div></div>
@@ -310,10 +311,10 @@ function RunCard({ run, active = false }: { run: ResearchRun; active?: boolean }
   const rejectedStories = diagnostics?.rejectedStories ?? [];
   return <div className={cn(panel, 'p-4 sm:p-5', active && 'border-[var(--color-accent)]/40')}>
     <div className="flex flex-wrap items-center justify-between gap-3">
-      <div className="flex items-center gap-3"><div className={cn('grid size-9 place-items-center rounded-xl', running ? 'bg-[var(--color-accent)]/10 text-[var(--color-brand)]' : run.status === 'failed' ? 'bg-amber-400/10 text-amber-300' : 'bg-[var(--color-bg-muted)] text-[var(--color-text-muted)]')}>{running ? <Loader2 className="size-4 animate-spin" /> : run.status === 'failed' ? <AlertCircle className="size-4" /> : <Check className="size-4" />}</div><div><p className="text-sm font-medium">{run.mode === 'test' ? 'Slack review test' : run.mode === 'scan' ? run.days === 1 ? '24-hour scan' : `${run.days}-day discovery` : 'Source collection'}<span className="mx-2 text-[var(--color-text-tertiary)]">·</span><span className={cn('font-normal', running ? 'text-[var(--color-brand)]' : muted)}>{stage}</span></p><p className={cn('mt-1 text-xs tabular-nums', muted)}>{date(run.createdAt, true)}{run.completedAt ? ` · Finished ${date(run.completedAt, true)}` : ''}</p></div></div>
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-[var(--color-text-muted)]"><span>{run.sourceCount} sources</span><span>{run.collectedCount} new items</span><span>{run.findingsCount} findings</span></div>
+      <div className="flex items-center gap-3"><div className={cn('grid size-9 place-items-center rounded-xl', running ? 'bg-[var(--color-accent)]/10 text-[var(--color-brand)]' : run.status === 'failed' ? 'bg-amber-400/10 text-amber-300' : 'bg-[var(--color-bg-muted)] text-[var(--color-text-muted)]')}>{running ? <Loader2 className="size-4 animate-spin" /> : run.status === 'failed' ? <AlertCircle className="size-4" /> : <Check className="size-4" />}</div><div><p className="text-sm font-medium">{run.mode === 'replay' ? 'Recall replay' : run.mode === 'test' ? 'Slack review test' : run.mode === 'scan' ? run.days === 1 ? '24-hour scan' : `${run.days}-day discovery` : 'Source collection'}<span className="mx-2 text-[var(--color-text-tertiary)]">·</span><span className={cn('font-normal', running ? 'text-[var(--color-brand)]' : muted)}>{stage}</span></p><p className={cn('mt-1 text-xs tabular-nums', muted)}>{date(run.createdAt, true)}{run.completedAt ? ` · Finished ${date(run.completedAt, true)}` : ''}</p></div></div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-[var(--color-text-muted)]">{run.mode === 'replay' ? <><span>{run.collectedCount} frozen candidates</span><span>{run.findingsCount} qualified findings</span></> : <><span>{run.sourceCount} sources</span><span>{run.collectedCount} new items</span><span>{run.findingsCount} findings</span></>}</div>
     </div>
-    {running && <p className={cn('mt-3 text-xs leading-5', muted)}>{run.status === 'queued' ? 'The background workflow will start shortly. You can leave this page.' : run.status === 'collecting' ? 'Checking enabled sources and collecting new items. Each source is processed independently.' : run.status === 'drafting' ? 'Writing post drafts from the strongest matches and sending them for review.' : 'Reviewing recent items against your audience and extracting source-backed findings.'}</p>}
+    {running && <p className={cn('mt-3 text-xs leading-5', muted)}>{run.mode === 'replay' ? 'Scoring a frozen historical source corpus. No live collection, post drafting or Slack delivery.' : run.status === 'queued' ? 'The background workflow will start shortly. You can leave this page.' : run.status === 'collecting' ? 'Checking enabled sources and collecting new items. Each source is processed independently.' : run.status === 'drafting' ? 'Writing post drafts from the strongest matches and sending them for review.' : 'Reviewing recent items against your audience and extracting source-backed findings.'}</p>}
     {diagnostics && (diagnostics.routedCount !== undefined || diagnostics.screenedCount !== undefined || rejectedStories.length > 0) && <div className="mt-3 space-y-2 rounded-lg bg-[var(--color-bg-subtle)] p-3">
       {(diagnostics.routedCount !== undefined || diagnostics.screenedCount !== undefined) && <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-[var(--color-text-secondary)]"><span>{diagnostics.eligibleCount ?? 0} eligible candidates</span>{diagnostics.freshCount !== undefined && <span>{diagnostics.freshCount} recently published</span>}{diagnostics.evergreenCount !== undefined && <span>{diagnostics.evergreenCount} newly discovered older items</span>}<span>{diagnostics.routedCount ?? diagnostics.screenedCount} sources checked</span>{diagnostics.directEvidenceCount !== undefined && <span>{diagnostics.directEvidenceCount} source bodies ready</span>}<span>{diagnostics.evidenceCount ?? 0} stories assessed</span>{diagnostics.draftedCount !== undefined && <span>{diagnostics.draftedCount} drafts</span>}</div>}
       {diagnostics.outcome && <p className={cn('text-xs leading-5', muted)}>{diagnostics.outcome}</p>}
