@@ -19,9 +19,37 @@ export class ResearchModelRateLimitError extends Error {
   }
 }
 
+export async function readResearchProviderResponse(response: Response) {
+  const mime = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase();
+  const contentType = !mime ? 'missing' : ['application/json', 'text/html', 'text/plain'].includes(mime) ? mime : 'other';
+  const candidateId = response.headers.get('x-request-id') || response.headers.get('request-id');
+  const requestId = candidateId && /^req[_-][a-zA-Z0-9_-]{5,100}$/.test(candidateId) && !/sk-|bearer/i.test(candidateId) ? candidateId : null;
+  const result = (bodyKind: 'json' | 'invalid_json' | 'html' | 'text' | 'empty' | 'oversized' | 'unreadable', body: unknown = null) => ({ contentType, bodyKind, requestId, body });
+  const reader = response.body?.getReader();
+  if (!reader) return result('empty');
+  const decoder = new TextDecoder();
+  let text = '', bytes = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > 65_536) return result('oversized');
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+    text += decoder.decode();
+    if (!text.trim()) return result('empty');
+    try { return result('json', JSON.parse(text)); } catch {
+      return result(contentType === 'application/json' ? 'invalid_json' : contentType === 'text/html' || /^\s*<(?:!doctype\s+html|html)\b/i.test(text) ? 'html' : 'text');
+    }
+  } catch { return result('unreadable'); }
+  finally { await reader.cancel().catch(() => undefined); }
+}
+
 /** Retain useful rejection diagnostics without response messages, prompts or credentials. */
 export async function researchProviderRejection(response: Response, provider: string, now = Date.now()) {
-  const body = await response.json().catch(() => null) as { error?: { code?: unknown; type?: unknown } } | null;
+  const inspected = await readResearchProviderResponse(response);
+  const body = inspected.body as { error?: { code?: unknown; type?: unknown } } | null;
   const safeCode = (value: unknown) => typeof value === 'string' && knownCodes.has(value) ? value : null;
   const code = safeCode(body?.error?.code), type = safeCode(body?.error?.type);
   const quota = [code, type].some(value => value === 'insufficient_quota' || value === 'billing_hard_limit_reached');
@@ -35,13 +63,13 @@ export async function researchProviderRejection(response: Response, provider: st
   const resets = [retryMs, duration(response.headers.get('x-ratelimit-reset-tokens')), duration(response.headers.get('x-ratelimit-reset-requests'))]
     .filter((value): value is number => value !== null && Number.isFinite(value) && value >= 0);
   const retryAfterMs = temporary ? Math.max(1000, resets.length ? Math.ceil(Math.max(...resets)) + 1000 : 60000) : null;
-  const candidateId = response.headers.get('x-request-id') || response.headers.get('request-id');
-  const requestId = candidateId && /^req[_-][a-zA-Z0-9_-]{5,100}$/.test(candidateId) && !/sk-|bearer/i.test(candidateId) ? candidateId : null;
+  const requestId = inspected.requestId;
   const limits = Object.fromEntries(['x-ratelimit-limit-tokens', 'x-ratelimit-remaining-tokens', 'x-ratelimit-limit-requests', 'x-ratelimit-remaining-requests'].flatMap(name => {
     const value = response.headers.get(name);
     return value && /^\d+$/.test(value) ? [[name, Number(value)]] : [];
   }));
-  const diagnostic = { provider, httpStatus: response.status, code, type, requestId, temporary, retryAfterMs, limits };
+  const diagnostic = { provider, httpStatus: response.status, code, type, requestId, temporary, retryAfterMs, limits,
+    contentType: inspected.contentType, bodyKind: inspected.bodyKind };
   const suffix = temporary ? ` Wait ${Math.ceil(retryAfterMs! / 1000)} seconds before continuing the rejected request.`
     : quota ? ' Check provider billing or account quota.' : ' Check model access and account limits.';
   const message = `${provider} request rejected (HTTP ${response.status}${code || type ? `; ${code || type}` : ''}).${suffix}`;

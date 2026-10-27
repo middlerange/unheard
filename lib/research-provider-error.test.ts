@@ -41,3 +41,21 @@ it('supports Anthropic rate-limit types and HTTP-date retry headers without retr
   expect(overloaded.error).not.toBeInstanceOf(ResearchModelRateLimitError);
   expect(overloaded.diagnostic.temporary).toBe(false);
 });
+
+it('classifies rejection bodies safely and cancels oversized bodies', async () => {
+  const secret = 'sk-private-header-and-body';
+  for (const [content, mime, expected] of [
+    [`<html>${secret}</html>`, 'text/html; charset=utf-8', { contentType: 'text/html', bodyKind: 'html' }],
+    [secret, 'application/json', { contentType: 'application/json', bodyKind: 'invalid_json' }],
+    [secret, secret, { contentType: 'other', bodyKind: 'text' }],
+  ] as const) {
+    const result = await researchProviderRejection(new Response(content, { status: 403, headers: { 'content-type': mime, 'request-id': `req_${secret}` } }), 'Anthropic');
+    expect(result.diagnostic).toMatchObject({ ...expected, requestId: null });
+    expect(JSON.stringify(result.diagnostic)).not.toContain(secret);
+  }
+  let cancelled = false;
+  const body = new ReadableStream({ pull(controller) { controller.enqueue(new Uint8Array(70_000)); }, cancel() { cancelled = true; } });
+  const result = await researchProviderRejection(new Response(body, { status: 403 }), 'Anthropic');
+  expect(result.diagnostic).toMatchObject({ bodyKind: 'oversized', code: null, type: null });
+  expect(cancelled).toBe(true);
+});

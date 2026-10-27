@@ -72,6 +72,7 @@ import { Route as ApiPostsScheduleRouteImport } from './routes/api/posts/schedul
 import { Route as ApiResearchFindingsRouteImport } from './routes/api/research/findings'
 import { Route as ApiResearchProcessRouteImport } from './routes/api/research/process'
 import { Route as ApiResearchProfilesRouteImport } from './routes/api/research/profiles'
+import { Route as ApiResearchProvidersRouteImport } from './routes/api/research/providers'
 import { Route as ApiResearchRunsRouteImport } from './routes/api/research/runs'
 import { Route as ApiResearchSourcesRouteImport } from './routes/api/research/sources'
 import { Route as ApiResearchUsageRouteImport } from './routes/api/research/usage'
@@ -404,6 +405,11 @@ const ApiResearchProfilesRoute = ApiResearchProfilesRouteImport.update({
   path: '/profiles',
   getParentRoute: () => ApiResearchRoute,
 } as any)
+const ApiResearchProvidersRoute = ApiResearchProvidersRouteImport.update({
+  id: '/providers',
+  path: '/providers',
+  getParentRoute: () => ApiResearchRoute,
+} as any)
 const ApiResearchRunsRoute = ApiResearchRunsRouteImport.update({
   id: '/runs',
   path: '/runs',
@@ -524,6 +530,7 @@ export interface FileRoutesByFullPath {
   '/api/research/findings': typeof ApiResearchFindingsRoute
   '/api/research/process': typeof ApiResearchProcessRoute
   '/api/research/profiles': typeof ApiResearchProfilesRoute
+  '/api/research/providers': typeof ApiResearchProvidersRoute
   '/api/research/runs': typeof ApiResearchRunsRoute
   '/api/research/sources': typeof ApiResearchSourcesRoute
   '/api/research/usage': typeof ApiResearchUsageRoute
@@ -600,6 +607,7 @@ export interface FileRoutesByTo {
   '/api/research/findings': typeof ApiResearchFindingsRoute
   '/api/research/process': typeof ApiResearchProcessRoute
   '/api/research/profiles': typeof ApiResearchProfilesRoute
+  '/api/research/providers': typeof ApiResearchProvidersRoute
   '/api/research/runs': typeof ApiResearchRunsRoute
   '/api/research/sources': typeof ApiResearchSourcesRoute
   '/api/research/usage': typeof ApiResearchUsageRoute
@@ -677,6 +685,7 @@ export interface FileRoutesById {
   '/api/research/findings': typeof ApiResearchFindingsRoute
   '/api/research/process': typeof ApiResearchProcessRoute
   '/api/research/profiles': typeof ApiResearchProfilesRoute
+  '/api/research/providers': typeof ApiResearchProvidersRoute
   '/api/research/runs': typeof ApiResearchRunsRoute
   '/api/research/sources': typeof ApiResearchSourcesRoute
   '/api/research/usage': typeof ApiResearchUsageRoute
@@ -755,6 +764,7 @@ export interface FileRouteTypes {
     | '/api/research/findings'
     | '/api/research/process'
     | '/api/research/profiles'
+    | '/api/research/providers'
     | '/api/research/runs'
     | '/api/research/sources'
     | '/api/research/usage'
@@ -831,6 +841,7 @@ export interface FileRouteTypes {
     | '/api/research/findings'
     | '/api/research/process'
     | '/api/research/profiles'
+    | '/api/research/providers'
     | '/api/research/runs'
     | '/api/research/sources'
     | '/api/research/usage'
@@ -907,6 +918,7 @@ export interface FileRouteTypes {
     | '/api/research/findings'
     | '/api/research/process'
     | '/api/research/profiles'
+    | '/api/research/providers'
     | '/api/research/runs'
     | '/api/research/sources'
     | '/api/research/usage'
@@ -1424,6 +1436,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiResearchProfilesRouteImport
       parentRoute: typeof ApiResearchRoute
     }
+    '/api/research/providers': {
+      id: '/api/research/providers'
+      path: '/providers'
+      fullPath: '/api/research/providers'
+      preLoaderRoute: typeof ApiResearchProvidersRouteImport
+      parentRoute: typeof ApiResearchRoute
+    }
     '/api/research/runs': {
       id: '/api/research/runs'
       path: '/runs'
@@ -1547,6 +1566,7 @@ interface ApiResearchRouteChildren {
   ApiResearchFindingsRoute: typeof ApiResearchFindingsRoute
   ApiResearchProcessRoute: typeof ApiResearchProcessRoute
   ApiResearchProfilesRoute: typeof ApiResearchProfilesRoute
+  ApiResearchProvidersRoute: typeof ApiResearchProvidersRoute
   ApiResearchRunsRoute: typeof ApiResearchRunsRoute
   ApiResearchSourcesRoute: typeof ApiResearchSourcesRoute
   ApiResearchUsageRoute: typeof ApiResearchUsageRoute
@@ -1556,6 +1576,7 @@ const ApiResearchRouteChildren: ApiResearchRouteChildren = {
   ApiResearchFindingsRoute: ApiResearchFindingsRoute,
   ApiResearchProcessRoute: ApiResearchProcessRoute,
   ApiResearchProfilesRoute: ApiResearchProfilesRoute,
+  ApiResearchProvidersRoute: ApiResearchProvidersRoute,
   ApiResearchRunsRoute: ApiResearchRunsRoute,
   ApiResearchSourcesRoute: ApiResearchSourcesRoute,
   ApiResearchUsageRoute: ApiResearchUsageRoute,

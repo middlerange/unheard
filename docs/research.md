@@ -270,7 +270,9 @@ original; the current global row cannot reconstruct their former reasoning.
 
 Daily post generation, repairs, editorial reviews and Slack-requested rewrites use
 `gpt-6-sol` with reasoning disabled. Research screening and evidence scoring stay
-on `claude-haiku-5-5`. The writer chooses an evidence-fit B2B reasoning contract and
+on `claude-haiku-5-5`. These stages use separate provider accounts and API balances;
+adding the Anthropic key does not switch the writer or resolve an OpenAI quota
+rejection. The writer chooses an evidence-fit B2B reasoning contract and
 records the supported observation, added insight and reader decision separately
 from published copy. Automatic single-source drafting can choose data argument,
 practitioner teardown, discovery lesson, growth mechanism, grounded opinion or
@@ -332,6 +334,17 @@ folders fail before calling a model. Historical baseline behavior remains separa
 Keep research evidence and benchmark files out of this public repository.
 
 ## Deployment
+
+Authenticated `POST /api/research/providers` checks the configured Claude research
+model through the provider's model-metadata endpoint. It makes one bounded GET
+request using the deployed secret, with no generation, source scan, state changes
+or automatic retry. The result reports the current research/writing split and safe
+response classification; it never returns a key, raw provider message or body.
+Metadata access does not verify generation permission, available credit or post
+quality. Writing-provider access is not tested by this check. Known rejections
+retain only allowlisted diagnostics, including finite content-type/body-kind
+labels, so an unknown HTTP403 is not automatically described as a quota failure.
+See the [Claude model metadata API](https://platform.claude.com/docs/en/api/models/retrieve).
 
 Apply D1 migrations `0025_research.sql` and `0026_daily_research_slack.sql` before deploying. Keep the existing
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and a `SESSION_SECRET` of at least 32 characters in Worker secrets.
