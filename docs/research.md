@@ -445,7 +445,7 @@ The strict request protocol is:
   uploaded records; this administrative request bound is unrelated to daily
   research or publishing throughput.
 - `upload`: `{ operation, runId, chunkIndex, items }`. Numbered chunks start at
-  zero, contain at most 20 records each, and are immutable. Each
+  zero, contain 20 records each except the final chunk, and are immutable. Each
   public-source record has `id`, `sourceId`, `url`, `title`, `excerpt`,
   `publishedAt`, `discoveredAt`, `content`, `contentProvenance`, `contentType`, and
   `transcriptStatus`. Dates are epoch milliseconds or null; content is text or
