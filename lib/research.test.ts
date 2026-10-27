@@ -337,6 +337,25 @@ describe("research persistence and team isolation", () => {
     rmSync(folder, { recursive: true, force: true });
     globalThis.__contentHubResearchWorkflow__ = undefined;
   });
+  it("requires both provider keys before starting an editorial scan", async () => {
+    const previousWorkflow = globalThis.__contentHubResearchWorkflow__;
+    const dispatch = vi.fn(async () => ({}));
+    globalThis.__contentHubResearchWorkflow__ = { create: dispatch };
+    const runsBefore = execute({ queries: [{ sql: "SELECT id FROM research_runs WHERE team_id='a'" }] })[0].results;
+    try {
+      vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
+      vi.stubEnv("OPENAI_API_KEY", "");
+      await expect(createResearchRun("a", { days: 1, mode: "scan" }, true)).rejects.toThrow("OPENAI_API_KEY");
+      vi.stubEnv("ANTHROPIC_API_KEY", "");
+      vi.stubEnv("OPENAI_API_KEY", "test-key");
+      await expect(createResearchRun("a", { days: 1, mode: "scan" }, true)).rejects.toThrow("ANTHROPIC_API_KEY");
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(execute({ queries: [{ sql: "SELECT id FROM research_runs WHERE team_id='a'" }] })[0].results).toEqual(runsBefore);
+    } finally {
+      vi.unstubAllEnvs();
+      globalThis.__contentHubResearchWorkflow__ = previousWorkflow;
+    }
+  });
   it("keeps source preferences and runs inside their team", async () => {
     const a = await getResearchSnapshot("a");
     const seedId = a.sources[0].id;
@@ -669,7 +688,13 @@ describe("research persistence and team isolation", () => {
       }
       expect(input.items.map((item: { id: string }) => item.id).sort()).toEqual(items.map(item => item.id).sort());
       if ((request.text?.format.schema ?? request.output_config.format.schema).properties.findings) {
-        expect((request.text?.format.schema ?? request.output_config.format.schema).properties.findings).toMatchObject({ minItems: 2, maxItems: 2 });
+        const findingsSchema = (request.text?.format.schema ?? request.output_config.format.schema).properties.findings;
+        if (request.output_config) {
+          expect(findingsSchema.description).toContain("minItems: 2");
+          expect(findingsSchema.description).toContain("maxItems: 2");
+        } else {
+          expect(findingsSchema).toMatchObject({ minItems: 2, maxItems: 2 });
+        }
       }
       const value = (request.text?.format.schema ?? request.output_config.format.schema).properties.assessments
         ? { itemIds: items.map(item => item.id) }
@@ -749,7 +774,7 @@ describe("research persistence and team isolation", () => {
       if ((request.text?.format.schema ?? request.output_config.format.schema).properties.assessments) {
         expect(request.instructions ?? request.system).toBe(RESEARCH_SCREEN_INSTRUCTIONS);
         expect(input.items.length).toBeLessThanOrEqual(RESEARCH_SCREEN_BATCH_SIZE);
-        expect((request.text?.format.schema ?? request.output_config.format.schema).properties.assessments.maxItems).toBe(input.items.length);
+        expect(request.output_config.format.schema.properties.assessments.description).toContain(`maxItems: ${input.items.length}`);
         value = { itemIds: input.items.filter((item: { id: string }) => item.id !== career.id).map((item: { id: string }) => item.id) };
       } else {
         expect(request.instructions ?? request.system).toBe(RESEARCH_EVIDENCE_INSTRUCTIONS);

@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { getSetupEnvironmentStatus } from './setup';
 
 describe('setup environment checks', () => {
+  it('reports independent research and writing provider readiness without exposing keys', () => {
+    expect(getSetupEnvironmentStatus({ ANTHROPIC_API_KEY: 'private-anthropic' })).toMatchObject({ research: true, ai: false });
+    expect(getSetupEnvironmentStatus({ OPENAI_API_KEY: 'private-openai' })).toMatchObject({ research: false, ai: true });
+  });
   it('returns booleans only and rejects invalid security settings', () => {
     const status = getSetupEnvironmentStatus({
       SESSION_SECRET: 'dev-secret-change-me-in-production!!',

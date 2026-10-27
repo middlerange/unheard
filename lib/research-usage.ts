@@ -2,7 +2,7 @@ import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { getDb } from './db/client';
 import { research_runs, research_settings, research_usage } from './schema';
-import { priceResearchUsage, RESEARCH_PRICING_DATE, RESEARCH_PRICING_URL, type ModelUsage } from './research-pricing';
+import { priceResearchUsage, ANTHROPIC_RESEARCH_PRICING_DATE, ANTHROPIC_RESEARCH_PRICING_URL, type ModelUsage } from './research-pricing';
 import type { ResearchRunUsage, ResearchStageUsage, ResearchUsageStage, ResearchUsageSummary, ResearchUsageTotals } from './research-usage-types';
 import { isResearchTimezone } from './research-schedule';
 
@@ -105,7 +105,7 @@ export async function getResearchUsage(teamId: string, requestedTimezone?: strin
     timezone, currency: 'USD', today, month, allTime, stages: grouped,
     daily: [...daily].reverse().slice(0, 90).map(([date, totals]) => ({ date, ...totals })),
     monthly: [...monthly].reverse().map(([month, totals]) => ({ month, ...totals })),
-    runs: [...runUsage.values()], pricingUrl: RESEARCH_PRICING_URL, pricingAsOf: RESEARCH_PRICING_DATE,
+    runs: [...runUsage.values()], pricingUrl: ANTHROPIC_RESEARCH_PRICING_URL, pricingAsOf: ANTHROPIC_RESEARCH_PRICING_DATE,
     trackingStartedAt: entries.find(entry => entry.stage !== 'legacy')?.created_at ?? null,
     historyNote: 'Older runs are historical estimates dated by run creation, with no reliable stage or cache breakdown. New calls are recorded by stage, including model responses later rejected. Unknown or interrupted usage is flagged and excluded from dollar totals. Costs are estimates in USD, excluding tax, Cloudflare hosting, social-provider fees and other AI features. Historical rows count runs, not individual requests.',
   };

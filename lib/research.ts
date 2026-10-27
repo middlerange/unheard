@@ -187,7 +187,7 @@ export async function getResearchSnapshot(
       .get(),
   ]);
   return {
-    configured: Boolean(process.env.OPENAI_API_KEY),
+    configured: Boolean(process.env.ANTHROPIC_API_KEY),
     workflowConfigured: Boolean(globalThis.__contentHubResearchWorkflow__),
     model: RESEARCH_MODEL,
     settings: {
@@ -367,8 +367,10 @@ export async function createResearchRun(
     throw new Error(
       "Research Workflow is unavailable. Deploy the Cloudflare ResearchWorkflow binding.",
     );
-  if (data.mode === "scan" && !process.env.OPENAI_API_KEY)
-    throw new Error("Set OPENAI_API_KEY in Cloudflare secrets to run research");
+  if (data.mode === "scan" && !process.env.ANTHROPIC_API_KEY)
+    throw new Error("Set ANTHROPIC_API_KEY in Cloudflare secrets to run research");
+  if (data.mode === "scan" && data.days === 1 && editorial && !process.env.OPENAI_API_KEY)
+    throw new Error("Set OPENAI_API_KEY in Cloudflare secrets to generate research drafts");
   await initializeResearch(teamId);
   const db = await getDb();
   const active = await db

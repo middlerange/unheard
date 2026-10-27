@@ -126,7 +126,7 @@ team-specific. **Collect new items** only collects and makes no model calls. See
 
 **7-day discovery** and **30-day discovery** collect enabled sources, then screen
 eligible items using
-`gpt-6-luna` with reasoning disabled. It screens every eligible collected item,
+`claude-haiku-5-5` with reasoning disabled. It screens every eligible collected item,
 without a total item or shortlist quota, and sends every potentially useful item
 to evidence review in batches of six. Ranking freezes candidate membership before
 screening and checkpoints every screening batch, selection and evidence offset.
@@ -166,7 +166,7 @@ return the same idea. Saving does not create or publish a social post.
 
 Daily post generation, repairs, editorial reviews and Slack-requested rewrites use
 `gpt-6-sol` with reasoning disabled. Research screening and evidence scoring stay
-on `gpt-6-luna`. The writer chooses an evidence-fit B2B reasoning contract and
+on `claude-haiku-5-5`. The writer chooses an evidence-fit B2B reasoning contract and
 records the supported observation, added insight and reader decision separately
 from published copy. Automatic single-source drafting can choose data argument,
 practitioner teardown, discovery lesson, growth mechanism, grounded opinion or
@@ -183,8 +183,8 @@ Every generation attempt can receive one structural repair for grounding,
 identity or platform-length failures. These bounded repairs do not limit how many
 qualified stories can be drafted. Writing caches include the writing model and
 prompt version. Token usage records the requested/returned model; the current
-local rate card covers Luna only, so Sol costs remain explicitly unknown rather
-than being priced with Luna rates or treated as free.
+local rate card covers Haiku 5.5 and historical Luna usage. Sol costs remain explicitly
+unknown rather than being priced with another model’s rates or treated as free.
 
 ## Recall replay
 
@@ -203,7 +203,7 @@ Keep research evidence and benchmark files out of this public repository.
 ## Deployment
 
 Apply D1 migrations `0025_research.sql` and `0026_daily_research_slack.sql` before deploying. Keep the existing
-`OPENAI_API_KEY` and a `SESSION_SECRET` of at least 32 characters in Worker secrets.
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and a `SESSION_SECRET` of at least 32 characters in Worker secrets.
 `wrangler.toml` declares the `RESEARCH_WORKFLOW` binding and `ResearchWorkflow`
 entrypoint. The normal build generates the Worker wrapper and shared runtime.
 Cloudflare Workflows persist collection steps independently of browser requests.
@@ -233,12 +233,12 @@ independently in durable steps; other app work can continue alongside the scan.
 
 Every model request gets a durable usage record before the API call. Response
 usage is saved before output parsing or editorial validation, including rejected
-or incomplete output. Costs use input/output tokens, provider cache reads and
-30-minute/12-hour cache writes, returned processing tier and snapshotted model
-rates. Unknown/interrupted usage is flagged and excluded from dollar totals,
+or incomplete output. Haiku costs use input/output tokens, cache reads and
+5-minute/1-hour cache writes, standard processing and snapshotted model rates.
+Historical Luna calls retain their 30-minute/12-hour cache rates. Unknown/interrupted usage is flagged and excluded from dollar totals,
 not reported as free. Application result-cache hits make no model call and add
 no model cost. Tokens remain visible in run history; do not sum draft counters
-on top of the request ledger. The latest rate card is dated 23 October 2026;
+on top of the request ledger. The Haiku rate card is dated 27 October 2026;
 rates must be updated deliberately when provider pricing changes. The request
 explicitly selects standard processing.
 

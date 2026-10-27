@@ -2,7 +2,8 @@
 
 Research's daily switch runs a scan of the preceding 24 hours. Collection, ICP
 ranking, evidence checks and draft generation run in Cloudflare Workflows, using
-`OPENAI_API_KEY` and `gpt-6-luna`. Daily ranking and drafting consume API tokens;
+`ANTHROPIC_API_KEY` with `claude-haiku-5-5` for screening/evidence, and
+`OPENAI_API_KEY` with `gpt-6-sol` for writing/revisions. Daily ranking and drafting consume API tokens;
 collection alone remains free of model calls. The manual 30-day scan remains
 available for broader discovery.
 
@@ -120,7 +121,7 @@ and [token rotation](https://docs.slack.dev/authentication/using-token-rotation/
 Apply `0026_daily_research_slack.sql` and `0027_slack_review_tests.sql` before deploying the updated Worker. It adds
 research drafts, Slack review jobs, profile settings, and OAuth state records.
 Keep `SESSION_SECRET`,
-`CREDENTIALS_ENCRYPTION_KEY`, and `OPENAI_API_KEY`. `wrangler.toml` includes
+`CREDENTIALS_ENCRYPTION_KEY`, `ANTHROPIC_API_KEY`, and `OPENAI_API_KEY`. `wrangler.toml` includes
 `SLACK_WORKFLOW` / `SlackWorkflow` alongside the research workflow. The minute
 publisher cron continues dispatching review jobs. Research daily start time and
 timezone are configurable under **Settings → Research schedule**. **Research →

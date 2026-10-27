@@ -153,6 +153,17 @@ function SetupPage() {
               <Status ready={status.ai} pendingLabel="Optional" />
             </dd>
           </div>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <dt>
+              Research screening and evidence review{' '}
+              <code className="text-xs text-muted-foreground">
+                ANTHROPIC_API_KEY
+              </code>
+            </dt>
+            <dd>
+              <Status ready={status.research} pendingLabel="Optional" />
+            </dd>
+          </div>
         </dl>
         <p className="text-xs text-muted-foreground">
           Use a random session secret of at least 32 characters and a separate

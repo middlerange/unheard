@@ -1,9 +1,17 @@
 export const RESEARCH_PRICING_DATE = '2026-10-23';
 export const RESEARCH_PRICING_URL = 'https://developers.openai.com/api/docs/pricing';
+export const ANTHROPIC_RESEARCH_PRICING_DATE = '2026-10-27';
+export const ANTHROPIC_RESEARCH_PRICING_URL = 'https://platform.claude.com/docs/en/about-claude/pricing';
 
 export type ModelUsage = {
   input_tokens?: number;
   output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_creation?: {
+    ephemeral_5m_input_tokens?: number;
+    ephemeral_1h_input_tokens?: number;
+  };
   input_tokens_details?: {
     cached_tokens?: number;
     cache_write_tokens?: number;
@@ -16,6 +24,7 @@ export function tokenCount(value: unknown): number | null {
 }
 
 export function priceResearchUsage(model: string, tier: string, usage?: ModelUsage) {
+  if (/^claude-haiku-5-5(?:-|$)/.test(model)) return priceAnthropicResearchUsage(tier, usage);
   const input = tokenCount(usage?.input_tokens);
   const output = tokenCount(usage?.output_tokens);
   const cached = tokenCount(usage?.input_tokens_details?.cached_tokens);
@@ -51,5 +60,37 @@ export function priceResearchUsage(model: string, tier: string, usage?: ModelUsa
   }
   const ordinary = input - cachedTokens - writes30 - writes12;
   const usd = (ordinary * rates.input + cachedTokens * rates.cachedInput + writes30 * rates.write30m + writes12 * rates.write12h + output * rates.output) * multiplier / 1_000_000;
+  return { input, output, cached, writes, costNanoUsd: Math.round(usd * 1_000_000_000), costStatus, rateCard: JSON.stringify(rates) };
+}
+
+function priceAnthropicResearchUsage(tier: string, usage?: ModelUsage) {
+  const ordinary = tokenCount(usage?.input_tokens);
+  const output = tokenCount(usage?.output_tokens);
+  const cached = tokenCount(usage?.cache_read_input_tokens ?? 0);
+  const writes = tokenCount(usage?.cache_creation_input_tokens ?? 0);
+  const input = ordinary === null || cached === null || writes === null ? null : tokenCount(ordinary + cached + writes);
+  const unknown = { input, output, cached, writes, costNanoUsd: null, costStatus: 'unknown', rateCard: null };
+  if (input === null || ordinary === null || output === null || cached === null || writes === null
+    || !['default', 'standard'].includes(tier)) return unknown;
+  let writes5m = writes;
+  let writes1h = 0;
+  let costStatus = 'calculated';
+  if (usage?.cache_creation) {
+    const shortWrites = tokenCount(usage.cache_creation.ephemeral_5m_input_tokens);
+    const longWrites = tokenCount(usage.cache_creation.ephemeral_1h_input_tokens);
+    if (shortWrites === null || longWrites === null || shortWrites + longWrites !== writes) return unknown;
+    writes5m = shortWrites;
+    writes1h = longWrites;
+  } else if (writes > 0) {
+    costStatus = 'estimated';
+  }
+  const long = input > 100_000;
+  const rates = {
+    asOf: ANTHROPIC_RESEARCH_PRICING_DATE, source: ANTHROPIC_RESEARCH_PRICING_URL,
+    input: long ? 0.5 : 0.1, output: long ? 2.5 : 0.5,
+    cachedInput: long ? 0.05 : 0.01, write5m: long ? 0.625 : 0.125, write1h: long ? 1 : 0.2,
+  };
+  const usd = (ordinary * rates.input + cached * rates.cachedInput + writes5m * rates.write5m
+    + writes1h * rates.write1h + output * rates.output) / 1_000_000;
   return { input, output, cached, writes, costNanoUsd: Math.round(usd * 1_000_000_000), costStatus, rateCard: JSON.stringify(rates) };
 }

@@ -115,8 +115,9 @@ in Settings → Slack and choose a review channel and reviewers. Set
 runtime settings. Users authorize through Slack; application configuration stays
 outside the product UI. Thread replies request revisions, and only the latest
 **Approve & publish** action can publish.
-Collection alone does not call a model. Ranking and drafts use `OPENAI_API_KEY`
-with `gpt-6-luna`, cached analysis and evidence checks. Videos without readable
+Collection alone does not call a model. Screening and evidence review use `ANTHROPIC_API_KEY`
+with `claude-haiku-5-5`. Draft writing, editorial review and Slack revisions use
+`OPENAI_API_KEY` with `gpt-6-sol`, cached analysis and evidence checks. Videos without readable
 transcripts are excluded. See [research coverage](docs/research.md) and
 [Slack review setup](docs/slack-reviews.md).
 

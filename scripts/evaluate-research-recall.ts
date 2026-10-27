@@ -1,10 +1,10 @@
+import { anthropicResearchRequest, anthropicResearchOutput, type AnthropicResearchResponse } from '../lib/research-anthropic';
 import { RESEARCH_POST_MIN_SCORE } from '../lib/research-policy';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { RESEARCH_MODEL, RESEARCH_SCREEN_BATCH_SIZE, researchScreeningSchema, validateResearchScreening, validateResearchEvidenceCoverage, RESEARCH_PROMPT_VERSION, RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS, screeningJsonSchema, screeningJsonSchemaForItems, evidenceJsonSchema, researchEvidenceSchema, matchResearchQuote, researchHash, type ResearchEvidence } from '../lib/research-model';
 
 type ModelValue = { assessments?: Array<{ itemId: string; selected: boolean; reason: string }>; itemIds?: string[]; findings?: ResearchEvidence[] };
-type ModelResponse = { id?: string; status: string; model?: string; usage?: { input_tokens?: number; output_tokens?: number }; output?: Array<{ content?: Array<{ type: string; text?: string }> }> };
 type Assessment = ResearchEvidence & { grounded: boolean };
 type Case = { id: string; label: 'positive' | 'negative'; title: string; source_text: string; split: string; family_id: string; content_provenance?: string; source_urls?: string[]; source_id?: string; date?: string; source_date?: string };
 const args = process.argv.slice(2);
@@ -25,24 +25,24 @@ const evidenceInstructions = legacy?.evidence ?? RESEARCH_EVIDENCE_INSTRUCTIONS;
 const version = legacy?.version ?? RESEARCH_PROMPT_VERSION;
 await mkdir(join(output, 'calls'), { recursive: true });
 const calls: Array<{ stage: string; cache: boolean; usage: unknown; file: string }> = [];
-async function model(stage: string, instructions: string, items: unknown[], schema: unknown, maxOutputTokens: number): Promise<ModelValue> {
+async function model(stage: string, instructions: string, items: unknown[], schema: Record<string, unknown>, maxOutputTokens: number): Promise<ModelValue> {
   const input = JSON.stringify({ icp: context.icp, items });
   const hash = await researchHash(JSON.stringify({ model: RESEARCH_MODEL, instructions, input, schema, maxOutputTokens }));
   const file = join(output, 'calls', `${hash}.json`);
   if (await Bun.file(file).exists()) { const saved = await Bun.file(file).json(); if (saved.status === 'completed') { calls.push({ stage, cache: true, usage: saved.usage, file }); return saved.value as ModelValue; } if (saved.status === 'parse_error' && args.includes('--retry-invalid-output') && !await Bun.file(file + '.failed.json').exists()) { await Bun.write(file + '.failed.json', JSON.stringify(saved, null, 2)); } else throw new Error(`Previous call has unresolved outcome: ${file}`); }
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) throw new Error('OPENAI_API_KEY unavailable');
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) throw new Error('ANTHROPIC_API_KEY unavailable');
   await Bun.write(file, JSON.stringify({ stage, status: 'pending', started_at: new Date().toISOString(), request_hash: hash }, null, 2));
-  const response = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST', signal: AbortSignal.timeout(90_000), headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: RESEARCH_MODEL, service_tier: 'default', store: false, reasoning: { effort: 'none' }, instructions, input, max_output_tokens: maxOutputTokens, text: { format: { type: 'json_schema', name: 'research', strict: true, schema } } }),
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST', signal: AbortSignal.timeout(90_000), headers: { 'x-api-key': key, 'anthropic-version': '2026-10-21', 'Content-Type': 'application/json' },
+    body: JSON.stringify(anthropicResearchRequest(RESEARCH_MODEL, instructions, { icp: context.icp, items }, schema, maxOutputTokens)),
   });
   if (!response.ok) { await Bun.write(file, JSON.stringify({ stage, status: 'http_error', http_status: response.status }, null, 2)); throw new Error(`Evaluation model request failed: HTTP ${response.status}`); }
-  const result = await response.json() as ModelResponse;
-  const text = result.output?.flatMap(item => item.content ?? []).filter(item => item.type === 'output_text').map(item => item.text).join('');
-  const saved = { stage, status: result.status, response_id: result.id, model: result.model, usage: result.usage, raw_output: text, value: null as ModelValue | null };
+  const result = await response.json() as AnthropicResearchResponse;
+  const text = anthropicResearchOutput(result);
+  const saved = { stage, status: result.stop_reason === 'end_turn' ? 'completed' : result.stop_reason, response_id: result.id, model: result.model, usage: result.usage, raw_output: text, value: null as ModelValue | null };
   await Bun.write(file, JSON.stringify(saved, null, 2));
-  if (result.status === 'completed' && text) {
+  if (result.stop_reason === 'end_turn' && text) {
     try { saved.value = JSON.parse(text) as ModelValue; } catch { saved.status = 'parse_error'; }
     await Bun.write(file, JSON.stringify(saved, null, 2));
   }

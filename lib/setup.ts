@@ -21,6 +21,7 @@ export function getSetupEnvironmentStatus(
         env.R2_PUBLIC_URL,
       ),
     ai: Boolean(env.OPENAI_API_KEY),
+    research: Boolean(env.ANTHROPIC_API_KEY),
     linkedin: Boolean(env.LINKEDIN_CLIENT_ID && env.LINKEDIN_CLIENT_SECRET),
     meta: Boolean(
       (env.META_APP_ID || env.FACEBOOK_APP_ID) &&

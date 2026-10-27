@@ -1,0 +1,80 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { anthropicResearchRequest, anthropicResearchSchema } from './research-anthropic';
+import { callResearchModel, RESEARCH_MODEL, evidenceJsonSchema } from './research-model';
+import { beginResearchUsage, finishResearchUsage } from './research-usage';
+
+vi.mock('./research-usage', () => ({
+  beginResearchUsage: vi.fn(async () => 'usage-id'),
+  finishResearchUsage: vi.fn(async () => {}),
+}));
+const context = { teamId: 'team', runId: 'run', stage: 'research' as const, operation: 'screen' };
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); vi.clearAllMocks(); });
+
+function mockMessage(overrides: Record<string, unknown> = {}) {
+  return vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+    id: 'msg-test', model: RESEARCH_MODEL, stop_reason: 'end_turn',
+    content: [{ type: 'text', text: '{"findings":[]}' }],
+    usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 30, cache_creation_input_tokens: 10 },
+    ...overrides,
+  }));
+}
+
+describe('Claude research transport', () => {
+  it('sends native Messages requests and retains cache-inclusive usage', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'anthropic-test-key');
+    const fetcher = mockMessage();
+    const result = await callResearchModel('Evidence instructions', [{ id: 'a' }], evidenceJsonSchema, 4000, context);
+    expect(result).toEqual({ value: { findings: [] }, inputTokens: 140, outputTokens: 20 });
+    const [url, init] = fetcher.mock.calls[0];
+    expect(url).toBe('https://api.anthropic.com/v1/messages');
+    expect(init?.headers).toEqual({ 'x-api-key': 'anthropic-test-key', 'anthropic-version': '2026-10-21', 'Content-Type': 'application/json' });
+    const body = JSON.parse(String(init?.body));
+    expect(body).toMatchObject({ model: 'claude-haiku-5-5', max_tokens: 4000, system: 'Evidence instructions', service_tier: 'standard_only', thinking: { type: 'disabled' }, messages: [{ role: 'user', content: '[{"id":"a"}]' }] });
+    expect(body).not.toHaveProperty('reasoning');
+    expect(body.output_config.format.schema.properties.findings).not.toHaveProperty('maxItems');
+    expect(body.output_config.format.schema.properties.findings.items.properties.score.description).toContain('maximum: 100');
+    expect(evidenceJsonSchema.properties.findings.maxItems).toBe(12);
+    expect(finishResearchUsage).toHaveBeenCalledWith('usage-id', context, expect.objectContaining({ model: RESEARCH_MODEL, responseId: 'msg-test', tier: 'standard', status: 'completed' }));
+  });
+
+  it('requires the Anthropic secret even when an OpenAI key is present', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', ''); vi.stubEnv('OPENAI_API_KEY', 'existing-openai-key');
+    const fetcher = vi.spyOn(globalThis, 'fetch');
+    await expect(callResearchModel('system', {}, {}, 100, context)).rejects.toThrow('ANTHROPIC_API_KEY');
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(beginResearchUsage).not.toHaveBeenCalled();
+  });
+
+  it.each(['max_tokens', 'refusal', 'pause_turn'])('records usage but rejects %s responses', async stop_reason => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test'); mockMessage({ stop_reason });
+    await expect(callResearchModel('system', {}, {}, 100, context)).rejects.toThrow('did not complete');
+    expect(finishResearchUsage).toHaveBeenNthCalledWith(1, 'usage-id', context, expect.objectContaining({ status: stop_reason, usage: expect.objectContaining({ input_tokens: 100 }) }));
+  });
+
+  it.each([{ content: [] }, { content: [{ type: 'text', text: 'invalid JSON' }] }])('rejects empty or malformed output after recording billed tokens', async response => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test'); mockMessage(response);
+    await expect(callResearchModel('system', {}, {}, 100, context)).rejects.toThrow();
+    expect(finishResearchUsage).toHaveBeenNthCalledWith(1, 'usage-id', context, expect.objectContaining({ status: 'completed', usage: expect.objectContaining({ output_tokens: 20 }) }));
+  });
+
+  it('redacts provider errors and never exposes the response body', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('private provider details', { status: 401 }));
+    await expect(callResearchModel('system', {}, {}, 100, context)).rejects.toThrow('Anthropic request failed (HTTP 401)');
+    expect(finishResearchUsage).toHaveBeenCalledWith('usage-id', context, { model: RESEARCH_MODEL, tier: 'default', status: 'unknown' });
+  });
+
+  it('keeps explicit Sol writing on the OpenAI transport', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'openai-test');
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ status: 'completed', output: [{ content: [{ type: 'output_text', text: '{}' }] }] }));
+    await callResearchModel('writer', {}, {}, 100, context, 'gpt-6-sol');
+    expect(fetcher.mock.calls[0][0]).toBe('https://api.openai.com/v1/responses');
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ model: 'gpt-6-sol', reasoning: { effort: 'none' } });
+  });
+
+  it('preserves schema property names and enums while translating constraints', () => {
+    const schema = { type: 'object', properties: { maxItems: { type: 'array', minItems: 3, items: { type: 'string', minLength: 20, enum: ['minimum', 'maxItems'] } } } };
+    expect(anthropicResearchSchema(schema)).toEqual({ type: 'object', properties: { maxItems: { type: 'array', description: 'minItems: 3', items: { type: 'string', description: 'minLength: 20', enum: ['minimum', 'maxItems'] } } } });
+    expect(anthropicResearchRequest(RESEARCH_MODEL, 'system', {}, {}, 100).max_tokens).toBe(100);
+  });
+});
