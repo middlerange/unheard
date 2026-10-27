@@ -8,7 +8,7 @@ and customer communication.
 ## Sources and coverage
 
 The catalog in `lib/research-sources.ts` preserves all 43 original entries and adds
-66 sources: 109 entries with 69 enabled defaults. These combine individual
+71 sources: 114 entries with 74 enabled defaults. These combine individual
 practitioners, original research, primary industry announcements, product
 interviews, and three optional discovery lanes. All 23 competitor sources remain
 disabled by default. Each team's existing source preferences are preserved.
@@ -18,8 +18,24 @@ product/research inputs, including How I AI, Product Experience, Parlance, Lovab
 Cursor, Shopify, Paywall Index, SaaStr, Wynter, MeasuringU, Linear, Fyxer, Every,
 PostHog, Lyssna and ProductLed podcast notes. Each registry entry records its scope, access and cadence.
 Original publisher bylines are supported for Wynter, MeasuringU and PostHog;
-Lyssna archive/category links are excluded before applying its discovery cap.
+Lyssna archive/category links are excluded from article discovery.
 RSS is used where it preserves publication metadata better than a web index.
+Further upstream tracing added Jeff Gothelf's original practitioner RSS, AWS's
+original DevOps methods feed, Rehearsals' research/product updates, and Swan's
+scoped agent-workflow changelog, plus Gartner's original public research RSS
+after a successful retry. Their original dates and first-party claim
+limitations remain explicit. A matching dated article in a JSON-LD graph is used
+even when an earlier matching WebPage entry lacks a publication date. Gartner's
+initial HTTP403 failures remain a coverage warning; only public release text is
+evidence, with short summaries hydrated before screening. Undated living
+artifacts were not enabled as fresh sources.
+Known original articles that have aged out of a current index or RSS response
+can be supplied through a source's explicit `backfillUrls`. AWS's original AI-DLC
+definition, Gartner's original agent-project forecast, and Swan's Brain release
+are connected this way. Backfill URLs enter the same durable public-page queue,
+retain their own publication dates, and qualify only under the separately labeled
+newly discovered evergreen policy when historical. Their discovery date never
+replaces their publication date; already collected source evidence is reused.
 A known publisher or enabled feed does not establish that every historical source
 URL is collected. Public precursors and topic-monitor proxies are different from
 verified origins. Static Product School transcript/index access remains a gap.
@@ -34,14 +50,23 @@ Three credentialed search sources contain eight targeted queries:
   onboarding, activation, or customer-feedback case studies.
 
 An additional public Hacker News discovery source uses the unauthenticated
-Algolia HN Search API with three bounded queries. It fetches linked original
+Algolia HN Search API with its configured queries. It follows every result page
+reported by the first response, using 100 hits as a page size rather than a total
+story quota, then fetches every valid unique linked original. Missing or malformed
+pagination, provider-limited results, changed page counts, and later-page failures
+produce explicit coverage warnings. Earlier readable results survive a later-page
+failure. It fetches linked original
 articles; HN submission time and popularity are never publication dates or proof
 of editorial quality. A recently submitted old article remains historical.
 
 Credentialed search collection uses `collectDiscoveredResearchSource` with a free-only
 provider and no paid fallback. Three queries use the news vertical and five use
-web discovery. The eight searches inspect at most 40 original pages per run,
-including arXiv submission-date lookups. Its optional `TREG_TOKEN` and `TREG_ORG`
+web discovery. Every configured query and every valid returned hit is processed,
+including arXiv submission-date lookups; there is no local query, hit or
+candidate-page quota. Further provider pagination is unverified, so coverage is
+explicitly limited to the returned response rather than the full web. The search
+provider's 30-day recency parameter bound remains an API contract, not a story
+quota. Its optional `TREG_TOKEN` and `TREG_ORG`
 configuration stays in the server environment; it is never sent to the browser.
 An unavailable credential or provider is a coverage limitation, not evidence of
 no updates. Search snippets and result dates are discovery leads only: original
@@ -51,22 +76,29 @@ Latent Space includes both original interviews and secondary AINews curation;
 follow primary links and deduplicate the underlying stories.
 
 Fresh feed articles without substantial text are fetched before the first
-editorial screen (at most 24 per source, three at a time). Search-relative dates
+editorial screen. Collection stores discovered metadata first, then checkpoints
+an original-page URL queue. Each durable collection step fetches at most 12
+article pages, three at a time, and continues until every queued page is attempted.
+Newly discovered older dated feed articles use the same queue. Original dates,
+first-seen times and readable source bodies stay in the database rather than a
+large workflow payload; per-page failures remain visible as incomplete coverage.
+Search-relative dates
 are never used for eligibility. arXiv records use the first version's exact
 submission time; abstract-only evidence is labeled and cannot support claims
 about unseen methods or results. Search discovery excludes configured competitor
 domains, social platforms and job listings before fetching.
 
-Collection uses RSS/Atom feeds and bounded article discovery from approved public
+Collection uses RSS/Atom feeds and scoped article discovery from approved public
 sites. It records verified publication dates; undated items are excluded from
-24-hour, seven-day and 30-day ranking. Feeds return at most their first 60 entries; web
-discovery reads one index and a bounded set of at most 40 article links, without
-archive pagination. Feed history varies, and a first scan cannot guarantee
+24-hour, seven-day and 30-day ranking. All returned feed entries and matching links on the fetched web index are
+processed, without a story-count quota. Web indexes currently have no archive
+pagination. Feed history varies, and a first scan cannot guarantee
 complete coverage of the preceding month. Date-only values do not establish an
 exact publication time. Daily collection builds the team's own history; some
 sources publish weekly or irregularly rather than every day.
 YouTube Atom feeds usually expose only recent uploads. Public caption tracks are
-attempted for up to six new or previously unavailable videos per channel per run,
+attempted for every eligible new or previously unavailable video, six per durable
+collection step with continuation until the queue is exhausted,
 with long-form interviews prioritized. A description is never treated as a
 transcript. Videos without readable captions stay outside ranking. Private,
 blocked, paywalled, or inaccessible pages can fail; source errors appear in the UI.
@@ -83,23 +115,39 @@ once per local day, move a nonexistent daylight-saving time to the first valid
 minute, and use the first occurrence when a clock time repeats. A manual scan
 does not reset the automatic schedule. If another scan is active, the scheduled
 occurrence waits for it to finish. It
-ranks fresh evidence and proposes up to two strong post drafts for Slack review.
+ranks fresh evidence and proposes every worthwhile, nonduplicate post draft for Slack review.
+Draft candidates have no daily count quota. A durable step processes one story
+and queues at most six reviews, then continues from saved offsets until the frozen
+candidate queue is exhausted. Declined and invalid stories retain their reasons;
+existing drafts and review states are preserved rather than generated again.
 Daily ranking and drafting consume OpenAI API tokens. The daily switch is
 team-specific. **Collect new items** only collects and makes no model calls. See
 [Slack reviews](slack-reviews.md) for setup, thread edits and approval controls.
 
 **7-day discovery** and **30-day discovery** collect enabled sources, then screen
 eligible items using
-`gpt-6-luna` with reasoning disabled. It screens up to 1,000 items in batches of
-80, sends every potentially useful item to evidence review in batches of six,
-and reports when the 1,000-item coverage cap is reached. No top-12 quota applies.
-Ranking checkpoints its frozen selection and progress; durable steps review at
-most 18 selected items each and continue until all selected evidence is assessed.
+`gpt-6-luna` with reasoning disabled. It screens every eligible collected item,
+without a total item or shortlist quota, and sends every potentially useful item
+to evidence review in batches of six. Ranking freezes candidate membership before
+screening and checkpoints every screening batch, selection and evidence offset.
+Durable steps process at most three screening batches and 18 selected evidence
+items each, then continue until all eligible material is assessed. These batch
+sizes limit work per step; they do not truncate the run. New arrivals wait for a
+subsequent run, and hydrated source text does not restart completed screening.
+Eligibility has two explicit lanes: a source originally published inside the
+run's window, or an older dated source first discovered since the window start
+and before the ranking snapshot (including the current collection).
+The latter is labeled `evergreen_newly_discovered` in model inputs, with its
+original publication date and separate discovery time. Run diagnostics report
+fresh and newly discovered evergreen counts separately. Undated and future-dated
+sources remain excluded. Recollecting a known old article preserves its first-seen
+time, so it cannot become newly discovered every day.
 Paid steps have no automatic retries. Model-result caching and persisted offsets
 prevent completed assessments from being billed or stored twice. Model results are cached by team, ICP, model, prompt version, and
 input. These discovery scans rank findings without drafting posts or sending
 Slack reviews. The seven-day window is a rolling 168 hours anchored at the saved
-run start, using the original source publication time. Run history reports actual
+run start, using original publication time for fresh signals and first-seen time
+for explicitly labeled evergreen discoveries. Run history reports actual
 token usage and cache hits. Changing the ICP or
 source set affects subsequent scans. The OpenAI API is billed separately from a
 Codex subscription; no subscription credentials are used.
@@ -115,6 +163,28 @@ readable text, not automatic source coverage or future engagement.
 Canonical URLs and story families prevent duplicate findings. **Save as idea**
 copies the finding and evidence into the existing ideas queue; repeated saves
 return the same idea. Saving does not create or publish a social post.
+
+Daily post generation, repairs, editorial reviews and Slack-requested rewrites use
+`gpt-6-sol` with reasoning disabled. Research screening and evidence scoring stay
+on `gpt-6-luna`. The writer chooses an evidence-fit B2B reasoning contract and
+records the supported observation, added insight and reader decision separately
+from published copy. Automatic single-source drafting can choose data argument,
+practitioner teardown, discovery lesson, growth mechanism, grounded opinion or
+release value. The shared writer also supports a seventh, research synthesis,
+when supplied with distinct inspected supporting sources. Ranking saves a bundle
+of accepted sources sharing the same normalized story family, including their
+verified evidence excerpts. Daily drafting may add one other article from that
+current-run bundle only when its body and URL are distinct and its evidence quote
+can still be verified. Both sources must be credited. It must not select synthesis
+from a lone article or pair unrelated topics to enable that format.
+An independent editorial call checks the actual platform
+variants; a supported but weak draft gets one quality rewrite and another review.
+Every generation attempt can receive one structural repair for grounding,
+identity or platform-length failures. These bounded repairs do not limit how many
+qualified stories can be drafted. Writing caches include the writing model and
+prompt version. Token usage records the requested/returned model; the current
+local rate card covers Luna only, so Sol costs remain explicitly unknown rather
+than being priced with Luna rates or treated as free.
 
 ## Recall replay
 

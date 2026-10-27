@@ -1,12 +1,77 @@
 import {
   articleResearchDate, articleResearchText, articleResearchTitle, assertPublicResearchUrl,
   canonicalResearchUrl, collectResearchSource, fetchResearchText,
-  parseResearchDate, plainResearchText, sourceHosts, type CollectedItem,
+  discoverResearchLinks, parseResearchDate, plainResearchText, sourceHosts, type CollectedItem,
 } from "./research-collectors";
 import type { ResearchSourceSeed } from "./research-types";
 
 type SearchHit = { url: string; title: string; snippet?: string };
-export type DiscoveryCollection = { items: CollectedItem[]; warning: string | null };
+type SearchResults = { hits: SearchHit[]; warnings: string[]; pages: number; exhaustive: boolean };
+export type DiscoveryArticleTarget = { url: string; title?: string };
+export type DiscoveryCollection = {
+  items: CollectedItem[];
+  warning: string | null;
+  pendingArticles?: DiscoveryArticleTarget[];
+  coverage?: { queries: number; resultPages: number; receivedHits: number; candidatePages: number; exhaustive: boolean };
+};
+
+export async function fetchDiscoveredResearchArticle(
+  source: ResearchSourceSeed,
+  target: DiscoveryArticleTarget,
+  windowEnd: number,
+): Promise<CollectedItem> {
+  const candidateSource = { ...source, url: target.url, feedUrl: undefined };
+  const html = await fetchResearchText(target.url, sourceHosts(source.kind === "search" ? candidateSource : source));
+  const url = new URL(target.url);
+  const arxivId = url.hostname === "arxiv.org"
+    ? url.pathname.match(/^\/(abs|html)\/(\d{4}\.\d{4,5})(?:v\d+)?\/?$/) : null;
+  const publicationHtml = arxivId?.[1] === "html"
+    ? await fetchResearchText(`https://arxiv.org/abs/${arxivId[2]}`, new Set(["arxiv.org", "www.arxiv.org"])) : html;
+  const publishedAt = arxivId ? firstArxivSubmission(publicationHtml, windowEnd) : articleResearchDate(html, target.url, windowEnd);
+  const abstractOnly = arxivId?.[1] === "abs";
+  const content = (abstractOnly ? researchAbstractText(html) : articleResearchText(html)).slice(0, 14_000);
+  const heading = arxivId
+    ? html.match(/<h1\b[^>]*class=["'][^"']*\b(?:title|ltx_title_document)\b[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i)?.[1]
+    : articleResearchTitle(html);
+  const pageTitle = plainResearchText(heading || "").replace(/^Title:\s*/i, "");
+  return {
+    url: target.url,
+    title: (pageTitle || plainResearchText(target.title || "")).slice(0, 300),
+    excerpt: content.slice(0, 1600),
+    publishedAt,
+    contentProvenance: abstractOnly ? "abstract" : "article",
+    ...(content.length >= 500 ? { content } : {}),
+    contentType: "article",
+    transcriptStatus: "not_applicable",
+  };
+}
+
+async function includeResearchBackfills(
+  source: ResearchSourceSeed,
+  collection: DiscoveryCollection,
+  deferArticleFetch: boolean,
+  windowEnd: number,
+): Promise<DiscoveryCollection> {
+  if (!source.backfillUrls?.length) return collection;
+  const existing = new Set(collection.items.map(item => canonicalResearchUrl(item.url)));
+  const pending = new Map((collection.pendingArticles || []).map(target => [canonicalResearchUrl(target.url), target]));
+  const warnings = collection.warning ? [collection.warning] : [];
+  for (const raw of source.backfillUrls) {
+    try {
+      const url = canonicalResearchUrl(assertPublicResearchUrl(raw, source.kind === "search" ? undefined : sourceHosts(source)).href);
+      if (!existing.has(url) && !pending.has(url)) pending.set(url, { url });
+    } catch {
+      warnings.push("A configured original-source backfill URL was rejected as nonpublic or outside the approved publisher.");
+    }
+  }
+  if (deferArticleFetch) return { ...collection, pendingArticles: [...pending.values()], warning: [...new Set(warnings)].join(" ") || null };
+  const items = [...collection.items];
+  for (const target of pending.values()) {
+    try { items.push(await fetchDiscoveredResearchArticle(source, target, windowEnd)); }
+    catch { warnings.push(`Original-source backfill could not be read: ${target.url}`); }
+  }
+  return { ...collection, items, pendingArticles: undefined, warning: [...new Set(warnings)].join(" ") || null };
+}
 
 export function researchAbstractText(html: string) {
   return plainResearchText(html.match(/<blockquote\b[^>]*class=["'][^"']*\babstract\b[^"']*["'][^>]*>([\s\S]*?)<\/blockquote>/i)?.[1] || "");
@@ -30,7 +95,7 @@ function excludedPublisher(url: URL, blockedHosts: Set<string>) {
     || /\/(careers?|jobs?|job-detail|offer|pricing|contact|login|signup|tags?|categor(?:y|ies)|solutions|industries)(\/|$)/i.test(url.pathname);
 }
 
-async function searchPublicResearch(query: string, windowStart: number, news: boolean): Promise<SearchHit[]> {
+async function searchPublicResearch(query: string, windowStart: number, news: boolean): Promise<SearchResults> {
   const token = process.env.TREG_TOKEN;
   if (!token) throw new Error("Topic discovery is unavailable: configure the server search connection.");
   const url = new URL(news ? "https://treg.to/call/tinyfish.web.search.news" : "https://treg.to/call/tinyfish.web.search");
@@ -52,19 +117,65 @@ async function searchPublicResearch(query: string, windowStart: number, news: bo
   const payload = await response.json() as { results?: SearchHit[]; result?: { results?: SearchHit[] } };
   const results = payload.results ?? payload.result?.results;
   if (!Array.isArray(results)) throw new Error("Topic search returned no result list");
-  return results.filter(hit => typeof hit.url === "string" && typeof hit.title === "string").slice(0, 10);
+  return {
+    hits: results.filter(hit => typeof hit?.url === "string" && typeof hit?.title === "string"),
+    warnings: ["Search coverage includes every returned valid hit; further provider pagination is unverified and this is not full-web coverage."],
+    pages: 1,
+    exhaustive: false,
+  };
 }
 
-async function searchHackerNewsSignals(query: string, windowStart: number, windowEnd: number): Promise<SearchHit[]> {
+async function searchHackerNewsSignals(query: string, windowStart: number, windowEnd: number): Promise<SearchResults> {
   const url = new URL("https://hn.algolia.com/api/v1/search_by_date");
   url.searchParams.set("query", query);
   url.searchParams.set("tags", "story");
   url.searchParams.set("numericFilters", `created_at_i>=${Math.floor(windowStart / 1000)},created_at_i<=${Math.floor(windowEnd / 1000)}`);
-  url.searchParams.set("hitsPerPage", "10");
-  const text = await fetchResearchText(url.href, new Set(["hn.algolia.com"]));
-  const payload = JSON.parse(text) as { hits?: Array<{ url?: unknown; title?: unknown }> };
-  if (!Array.isArray(payload.hits)) throw new Error("Hacker News discovery returned no result list");
-  return payload.hits.flatMap(hit => typeof hit.url === "string" && typeof hit.title === "string" ? [{ url: hit.url, title: hit.title }] : []).slice(0, 10);
+  url.searchParams.set("hitsPerPage", "100");
+  const hits: SearchHit[] = [];
+  const warnings: string[] = [];
+  let pageCount = 1, pages = 0, received = 0, totalHits: number | null = null;
+  let exhaustive = true;
+  for (let page = 0; page < pageCount; page++) {
+    url.searchParams.set("page", String(page));
+    try {
+      const text = await fetchResearchText(url.href, new Set(["hn.algolia.com"]));
+      const payload = JSON.parse(text) as {
+        hits?: Array<{ url?: unknown; title?: unknown }>;
+        nbPages?: number; page?: number; nbHits?: number; exhaustiveNbHits?: boolean;
+      };
+      if (!Array.isArray(payload.hits)) throw new Error("Hacker News discovery returned no result list");
+      if (payload.page !== undefined && payload.page !== page) throw new Error("Hacker News returned an unexpected result page");
+      pages++;
+      received += payload.hits.length;
+      hits.push(...payload.hits.flatMap(hit => typeof hit?.url === "string" && typeof hit?.title === "string" ? [{ url: hit.url, title: hit.title }] : []));
+      if (page === 0) {
+        const validPages = Number.isSafeInteger(payload.nbPages) && payload.nbPages! >= 0;
+        if (validPages && (payload.nbPages !== 0 || payload.hits.length === 0)) pageCount = Math.max(1, payload.nbPages!);
+        else {
+          exhaustive = false;
+          warnings.push("Hacker News pagination metadata is missing or invalid; only the first returned page could be verified.");
+        }
+        totalHits = Number.isSafeInteger(payload.nbHits) && payload.nbHits! >= 0 ? payload.nbHits! : null;
+      } else if (payload.nbPages !== pageCount) {
+        exhaustive = false;
+        warnings.push("Hacker News page count changed during collection; coverage uses the initial page count.");
+      }
+      if (payload.exhaustiveNbHits !== true) exhaustive = false;
+      if (payload.hits.length === 0 && page + 1 < pageCount) {
+        exhaustive = false;
+        warnings.push("Hacker News returned an empty page before its reported end; pagination stopped and earlier results were retained.");
+        break;
+      }
+    } catch (error) {
+      if (page === 0) throw error;
+      exhaustive = false;
+      warnings.push(`Hacker News result page ${page + 1}/${pageCount} failed; earlier results were retained (${error instanceof Error ? error.message : "unreadable response"}).`);
+      break;
+    }
+  }
+  if (totalHits === null || received < totalHits) exhaustive = false;
+  if (!exhaustive) warnings.push(`Hacker News returned ${received}${totalHits === null ? "" : `/${totalHits}`} hits across ${pages} result pages; provider-limited or incomplete coverage is not exhaustive.`);
+  return { hits, warnings, pages, exhaustive };
 }
 
 export async function collectDiscoveredResearchSource(
@@ -72,20 +183,38 @@ export async function collectDiscoveredResearchSource(
   windowStart: number,
   windowEnd: number,
   blockedHosts: Set<string>,
+  options: { deferArticleFetch?: boolean } = {},
 ): Promise<DiscoveryCollection> {
-  if (source.kind !== "search") return { items: await collectResearchSource(source), warning: null };
-  const queries = source.discoveryQueries?.slice(0, 3) ?? [];
+  if (source.kind !== "search") {
+    let collection: DiscoveryCollection;
+    try {
+      if (!options.deferArticleFetch || source.feedUrl || source.kind !== "web") collection = { items: await collectResearchSource(source), warning: null };
+      else {
+        const html = await fetchResearchText(source.url, sourceHosts(source));
+        const urls = discoverResearchLinks(html, source);
+        if (!urls.length && !source.backfillUrls?.length) throw new Error("No public article links found in the source content region");
+        collection = { items: [], pendingArticles: urls.map(url => ({ url })), warning: null };
+      }
+    } catch (error) {
+      if (!source.backfillUrls?.length) throw error;
+      collection = { items: [], warning: `Source entry point failed (${error instanceof Error ? error.message : "unreadable response"}); explicitly configured original URLs remain available for collection.` };
+    }
+    return includeResearchBackfills(source, collection, Boolean(options.deferArticleFetch), windowEnd);
+  }
+  const queries = source.discoveryQueries ?? [];
   if (!queries.length) throw new Error("Topic discovery needs at least one query");
   const searched = await Promise.allSettled(queries.map(query => source.discoveryProvider === "hackernews"
     ? searchHackerNewsSignals(query, windowStart, windowEnd)
     : searchPublicResearch(query, windowStart, source.discoverySearchType === "news")));
   const lists = searched.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
-  if (!lists.length) throw (searched[0] as PromiseRejectedResult).reason;
+  if (!lists.length) {
+    if (source.backfillUrls?.length) return includeResearchBackfills(source, { items: [], warning: `${queries.length}/${queries.length} topic searches failed; explicitly configured original URLs remain available for collection.` }, Boolean(options.deferArticleFetch), windowEnd);
+    throw (searched[0] as PromiseRejectedResult).reason;
+  }
   const urls = new Map<string, SearchHit>();
-  // Round-robin search positions so one query cannot consume the whole page budget.
-  for (let position = 0; position < 10; position++) {
+  for (let position = 0; position < Math.max(...lists.map(list => list.hits.length)); position++) {
     for (const list of lists) {
-      const hit = list[position];
+      const hit = list.hits[position];
       if (!hit) continue;
       try {
         const url = assertPublicResearchUrl(hit.url);
@@ -95,50 +224,33 @@ export async function collectDiscoveredResearchSource(
       } catch { /* Search results can include invalid or nonpublic links. */ }
     }
   }
-  const pageBudget = queries.length >= 3 ? 14 : 12;
-  let plannedPages = 0;
-  const candidates = [...urls.values()].filter(hit => {
-    const url = new URL(hit.url);
-    const pages = url.hostname === "arxiv.org" && url.pathname.startsWith("/html/") ? 2 : 1;
-    if (plannedPages + pages > pageBudget) return false;
-    plannedPages += pages;
-    return true;
-  });
+  const candidates = [...urls.values()];
+  const failedQueries = searched.length - lists.length;
+  const warnings = [...new Set(lists.flatMap(list => list.warnings))];
+  const coverage = {
+    queries: queries.length,
+    resultPages: lists.reduce((total, list) => total + list.pages, 0),
+    receivedHits: lists.reduce((total, list) => total + list.hits.length, 0),
+    candidatePages: candidates.length,
+    exhaustive: failedQueries === 0 && lists.every(list => list.exhaustive),
+  };
+  if (options.deferArticleFetch) {
+    if (failedQueries) warnings.push(`${failedQueries}/${queries.length} topic searches failed; remaining discovery results were retained.`);
+    return includeResearchBackfills(source, { items: [], pendingArticles: candidates.map(({ url, title }) => ({ url, title })), warning: warnings.join(" ") || null, coverage }, true, windowEnd);
+  }
   const items: CollectedItem[] = [];
   let unreadable = 0;
   for (let start = 0; start < candidates.length; start += 4) {
     await Promise.all(candidates.slice(start, start + 4).map(async hit => {
       try {
-        const candidateSource = { ...source, url: hit.url, feedUrl: undefined };
-        const html = await fetchResearchText(hit.url, sourceHosts(candidateSource));
-        const url = new URL(hit.url);
-        const arxivId = url.hostname === "arxiv.org"
-          ? url.pathname.match(/^\/(abs|html)\/(\d{4}\.\d{4,5})(?:v\d+)?\/?$/) : null;
-        const publicationHtml = arxivId?.[1] === "html"
-          ? await fetchResearchText(`https://arxiv.org/abs/${arxivId[2]}`, new Set(["arxiv.org", "www.arxiv.org"])) : html;
-        // Search timestamps and snippets are hints, never publication or evidence.
-        const publishedAt = arxivId ? firstArxivSubmission(publicationHtml, windowEnd) : articleResearchDate(html, hit.url, windowEnd);
-        const abstractOnly = arxivId?.[1] === "abs";
-        const content = (abstractOnly
-          ? researchAbstractText(html)
-          : articleResearchText(html)).slice(0, 14_000);
-        const heading = arxivId
-          ? html.match(/<h1\b[^>]*class=["'][^"']*\b(?:title|ltx_title_document)\b[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i)?.[1]
-          : articleResearchTitle(html);
-        const pageTitle = plainResearchText(heading || "").replace(/^Title:\s*/i, "");
-        const title = (pageTitle || plainResearchText(hit.title)).slice(0, 300);
-        items.push({
-          url: hit.url, title, excerpt: content.slice(0, 1600), publishedAt,
-          contentProvenance: abstractOnly ? "abstract" : "article",
-          ...(content.length >= 500 ? { content } : {}),
-          contentType: "article", transcriptStatus: "not_applicable",
-        });
+        items.push(await fetchDiscoveredResearchArticle(source, hit, windowEnd));
       } catch { unreadable++; }
     }));
   }
-  const failedQueries = searched.length - lists.length;
-  const warning = failedQueries || unreadable
-    ? `${failedQueries}/${queries.length} topic searches failed; ${unreadable}/${candidates.length} candidate pages could not be read. Returned ${items.length} original-page records; only verified publication dates qualify.`
-    : null;
-  return { items, warning };
+  if (failedQueries || unreadable) warnings.push(`${failedQueries}/${queries.length} topic searches failed; ${unreadable}/${candidates.length} candidate pages could not be read. Returned ${items.length} original-page records; only verified publication dates qualify.`);
+  return includeResearchBackfills(source, {
+    items,
+    warning: warnings.join(" ") || null,
+    coverage: { ...coverage, exhaustive: unreadable === 0 && coverage.exhaustive },
+  }, false, windowEnd);
 }

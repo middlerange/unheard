@@ -37,11 +37,16 @@ export async function invokeResearchProcess(handler, env, payload, path = '/api/
 }
 
 export async function runResearchWorkflow(runId, step, invoke) {
-  const collectionOptions = { retries: { limit: 2, delay: '5 seconds', backoff: 'exponential' }, timeout: '3 minutes' };
+  const collectionOptions = { retries: { limit: 2, delay: '5 seconds', backoff: 'exponential' }, timeout: '10 minutes' };
   try {
     const plan = await step.do('Plan research collection', collectionOptions, () => invoke({ operation: 'plan', runId }));
     for (const sourceId of plan.sourceIds) {
-      await step.do(`Collect ${sourceId}`, collectionOptions, () => invoke({ operation: 'collect', runId, sourceId }));
+      let batch = 1;
+      let collection = await step.do(`Collect ${sourceId}`, collectionOptions, () => invoke({ operation: 'collect', runId, sourceId }));
+      while (collection?.pending === true) {
+        batch++;
+        collection = await step.do(`Collect ${sourceId} batch ${batch}`, collectionOptions, () => invoke({ operation: 'collect', runId, sourceId }));
+      }
     }
     // A model request can be billed even if its response is interrupted. Resume via
     // persisted analysis records rather than automatically repeating a paid step.
@@ -52,7 +57,13 @@ export async function runResearchWorkflow(runId, step, invoke) {
       batch++;
       ranking = await step.do(`Rank findings batch ${batch}`, paidOptions, () => invoke({ operation: 'rank', runId }));
     }
-    return await step.do('Draft daily posts', paidOptions, () => invoke({ operation: 'drafts', runId }));
+    batch = 1;
+    let drafts = await step.do('Draft daily posts', paidOptions, () => invoke({ operation: 'drafts', runId }));
+    while (drafts?.pending === true) {
+      batch++;
+      drafts = await step.do(`Draft daily posts batch ${batch}`, paidOptions, () => invoke({ operation: 'drafts', runId }));
+    }
+    return drafts;
   } catch (error) {
     try {
       await step.do('Record research failure', collectionOptions, () => invoke({

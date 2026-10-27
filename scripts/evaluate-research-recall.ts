@@ -1,9 +1,9 @@
 import { RESEARCH_POST_MIN_SCORE } from '../lib/research-policy';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { RESEARCH_MODEL, RESEARCH_PROMPT_VERSION, RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS, screeningJsonSchema, evidenceJsonSchema, researchEvidenceSchema, matchResearchQuote, researchHash, type ResearchEvidence } from '../lib/research-model';
+import { RESEARCH_MODEL, RESEARCH_SCREEN_BATCH_SIZE, researchScreeningSchema, validateResearchScreening, validateResearchEvidenceCoverage, RESEARCH_PROMPT_VERSION, RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS, screeningJsonSchema, screeningJsonSchemaForItems, evidenceJsonSchema, researchEvidenceSchema, matchResearchQuote, researchHash, type ResearchEvidence } from '../lib/research-model';
 
-type ModelValue = { itemIds?: string[]; findings?: ResearchEvidence[] };
+type ModelValue = { assessments?: Array<{ itemId: string; selected: boolean; reason: string }>; itemIds?: string[]; findings?: ResearchEvidence[] };
 type ModelResponse = { id?: string; status: string; model?: string; usage?: { input_tokens?: number; output_tokens?: number }; output?: Array<{ content?: Array<{ type: string; text?: string }> }> };
 type Assessment = ResearchEvidence & { grounded: boolean };
 type Case = { id: string; label: 'positive' | 'negative'; title: string; source_text: string; split: string; family_id: string; content_provenance?: string; source_urls?: string[]; source_id?: string; date?: string; source_date?: string };
@@ -15,7 +15,7 @@ const threshold = Number(argument('threshold', variant === 'baseline' ? '80' : S
 if (!Number.isInteger(threshold) || threshold < 70 || threshold > 100) throw new Error('Threshold must be 70–100');
 const benchmark = await Bun.file(benchmarkPath).json();
 const cases: Case[] = (Array.isArray(benchmark) ? benchmark : benchmark.cases).filter((item: Case) => split === 'all' || item.split === split);
-if (!cases.length || cases.length > 256 || new Set(cases.map(item => item.id)).size !== cases.length) throw new Error('Benchmark must have 1–256 unique cases in the selected split');
+if (!cases.length || new Set(cases.map(item => item.id)).size !== cases.length) throw new Error('Benchmark must have unique cases in the selected split');
 for (const item of cases) if (!['positive', 'negative'].includes(item.label) || !item.source_text || !item.family_id) throw new Error(`Invalid benchmark case ${item.id}`);
 const context = await Bun.file(argument('context')).json();
 if (typeof context.icp !== 'string' || !context.icp) throw new Error('Context requires icp');
@@ -51,12 +51,14 @@ async function model(stage: string, instructions: string, items: unknown[], sche
   return saved.value as ModelValue;
 }
 const items = cases.map(item => ({ id: item.id, title: item.title, sourceId: item.source_id ?? (item.source_urls?.[0] ? new URL(item.source_urls[0]).hostname : 'supplied-source'), publishedAt: (item.source_date ?? item.date) ? Date.parse(item.source_date ?? item.date!) || null : null, content: item.source_text.slice(0, 14000), contentProvenance: item.content_provenance ?? 'article' }));
-const metadata = items.map(item => ({ id: item.id, title: item.title, excerpt: item.content.slice(0, 900), publicText: item.content.slice(0, 2500), contentProvenance: item.contentProvenance, publishedAt: item.publishedAt, sourceId: item.sourceId }));
+const metadata = items.map(item => ({ id: item.id, title: item.title, excerpt: item.content.slice(0, 900), publicText: item.content, contentProvenance: item.contentProvenance, publishedAt: item.publishedAt, sourceId: item.sourceId }));
 const selected = new Set<string>();
-const screenSchema = variant === 'baseline' ? { ...screeningJsonSchema, properties: { itemIds: { type: 'array', items: { type: 'string' }, maxItems: 12 } } } : screeningJsonSchema;
-for (let start = 0; start < metadata.length; start += 80) {
-  const batch = metadata.slice(start, start + 80), allowed = new Set(batch.map(item => item.id));
-  const value = await model('screen', screenInstructions, batch, screenSchema, variant === 'baseline' ? 1000 : 5000);
+const screenSchema = variant === 'baseline' ? { type: 'object', additionalProperties: false, required: ['itemIds'], properties: { itemIds: { type: 'array', items: { type: 'string' }, maxItems: 12 } } } : screeningJsonSchema;
+const screenBatchSize = variant === 'baseline' ? 80 : RESEARCH_SCREEN_BATCH_SIZE;
+for (let start = 0; start < metadata.length; start += screenBatchSize) {
+  const batch = metadata.slice(start, start + screenBatchSize), allowed = new Set(batch.map(item => item.id));
+  const value = await model('screen', screenInstructions, batch, variant === 'baseline' ? screenSchema : screeningJsonSchemaForItems(batch.map(item => item.id)), variant === 'baseline' ? 1000 : 5000);
+  if (variant !== 'baseline') value.itemIds = validateResearchScreening(researchScreeningSchema.parse(value), batch.map(item => item.id)).itemIds;
   for (const id of value.itemIds ?? []) if (allowed.has(id)) selected.add(id);
 }
 if (variant === 'baseline' && selected.size > 12) {
@@ -69,6 +71,7 @@ for (let start = 0; start < reviewed.length; start += 6) {
   const batch = reviewed.slice(start, start + 6), allowed = new Map(batch.map(item => [item.id, item]));
   const schema = { ...evidenceJsonSchema, properties: { findings: { ...evidenceJsonSchema.properties.findings, minItems: batch.length, maxItems: batch.length } } };
   const raw = researchEvidenceSchema.parse(await model('evidence', evidenceInstructions, batch.map(({ sourceId, ...item }) => ({ ...item, sourceId })), schema, 5000));
+  if (variant !== 'baseline') validateResearchEvidenceCoverage(raw.findings, batch.map(item => item.id));
   for (const finding of raw.findings) { const item = allowed.get(finding.itemId); if (item && !assessments.has(item.id)) assessments.set(item.id, { ...finding, grounded: !!matchResearchQuote(item.content, finding.evidence) }); }
 }
 const results = cases.map(item => { const assessment = assessments.get(item.id); return { id: item.id, label: item.label, family_id: item.family_id, split: item.split, title: item.title, screened: selected.has(item.id), score: assessment?.score ?? null, grounded: assessment?.grounded ?? false, qualified: !!(assessment?.grounded && assessment.score >= threshold), useful: !!(assessment?.grounded && assessment.score >= 70), assessment: assessment ?? null }; });

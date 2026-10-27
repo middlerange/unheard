@@ -15,8 +15,7 @@ import {
   research_sources,
 } from "./schema";
 import { RESEARCH_SOURCE_SEEDS } from "./research-sources";
-import { hydrateFreshResearchEvidence } from "./research-evidence";
-import { collectDiscoveredResearchSource, researchAbstractText, researchDiscoveryBlockedHosts } from "./research-discovery";
+import { collectDiscoveredResearchSource, fetchDiscoveredResearchArticle, researchAbstractText, researchDiscoveryBlockedHosts, type DiscoveryArticleTarget } from "./research-discovery";
 import {
   isResearchDailyTime,
   isResearchTimezone,
@@ -36,6 +35,7 @@ import {
   fetchPublicYoutubeTranscript,
   fetchResearchText,
   sourceHosts,
+  type CollectedItem,
 } from "./research-collectors";
 import {
   callResearchModel,
@@ -49,8 +49,10 @@ import {
   researchScreeningSchema,
   researchEvidenceSchema,
   researchHash,
-  screeningJsonSchema,
+  screeningJsonSchemaForItems,
   validateResearchEvidence,
+  validateResearchEvidenceCoverage,
+  validateResearchScreening,
 } from "./research-model";
 export { RESEARCH_MODEL } from "./research-model";
 export const DEFAULT_RESEARCH_ICP =
@@ -154,7 +156,6 @@ export async function getResearchSnapshot(
       .from(research_findings)
       .where(and(eq(research_findings.team_id, teamId), ne(research_findings.source_id, "slack-test-review")))
       .orderBy(desc(research_findings.score))
-      .limit(100)
       .all(),
     db
       .select({
@@ -173,7 +174,6 @@ export async function getResearchSnapshot(
       )
       .where(eq(research_drafts.team_id, teamId))
       .orderBy(desc(research_drafts.created_at))
-      .limit(30)
       .all(),
     db
       .select({ id: channels.id, name: channels.name })
@@ -495,6 +495,10 @@ export function researchSourceErrorMessage(error: unknown): string {
     ? "Source storage failed; no underlying database error was available."
     : message.slice(0, 400);
 }
+type ResearchCollectionProgress = {
+  urls: string[]; nextOffset: number; count: number; warning: string | null;
+  articles?: DiscoveryArticleTarget[]; articleOffset?: number; articleFailures?: string[];
+};
 async function collectForRun(
   run: typeof research_runs.$inferSelect,
   sourceId: string,
@@ -515,36 +519,65 @@ async function collectForRun(
     .get();
   if (existing?.status === "completed" || existing?.status === "failed")
     return { collected: existing.item_count };
-  let count = 0;
+  const progressId = `collection-progress:${stepId}`;
+  const saved = await db.select().from(research_cache).where(and(
+    eq(research_cache.id, progressId), eq(research_cache.team_id, run.team_id),
+  )).get();
+  let progress = saved ? JSON.parse(saved.value) as ResearchCollectionProgress : undefined;
+  async function saveCollectionProgress(value: ResearchCollectionProgress) {
+    await db.insert(research_cache).values({
+      id: progressId, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now(),
+    }).onConflictDoUpdate({ target: research_cache.id, set: { value: JSON.stringify(value) } });
+  }
+  let count = progress?.count || 0;
   let error: string | null = null;
   let failed = false;
   try {
+    if (!progress) {
     const collection = await collectDiscoveredResearchSource(
       source, run.created_at - run.days * 86_400_000, run.created_at,
       researchDiscoveryBlockedHosts(RESEARCH_SOURCE_SEEDS),
+      { deferArticleFetch: true },
     );
     error = collection.warning;
-    const items = await hydrateFreshResearchEvidence(
-      collection.items, source,
-      run.created_at - run.days * 86_400_000, run.created_at,
-    );
+    const itemUrls = new Set(collection.items.map(item => item.url));
+    const items: CollectedItem[] = [...collection.items, ...(collection.pendingArticles || []).filter(target => !itemUrls.has(target.url)).map(target => ({
+      url: target.url, title: target.title || new URL(target.url).pathname || new URL(target.url).hostname,
+      excerpt: "", publishedAt: null, contentType: "article" as const, transcriptStatus: "not_applicable" as const,
+    }))];
     const available = await db
-      .select({ url: research_items.canonical_url })
+      .select({ url: research_items.canonical_url, collectedAt: research_items.collected_at, publishedAt: research_items.published_at, transcriptStatus: research_items.transcript_status,
+        hasEvidence: sql<number>`${research_items.content} IS NOT NULL AND length(${research_items.content}) >= 500`,
+      })
       .from(research_items)
       .where(
         and(
           eq(research_items.team_id, run.team_id),
           eq(research_items.source_id, sourceId),
-          eq(research_items.transcript_status, "available"),
         ),
       );
-    const knownTranscripts = new Set(available.map((item) => item.url));
+    const known = new Map(available.map(item => [item.url, item]));
+    const articles = new Map((collection.pendingArticles || []).filter(target => {
+      const item = known.get(target.url);
+      return !item?.hasEvidence && (!item || item.collectedAt >= run.created_at - run.days * 86_400_000 ||
+        (item.publishedAt || 0) >= run.created_at - run.days * 86_400_000);
+    }).map(target => [target.url, target]));
+    for (const item of collection.items) {
+      const knownItem = known.get(item.url);
+      if (item.contentType === "article" && (item.content?.trim().length || 0) < 500 && !knownItem?.hasEvidence &&
+        item.publishedAt !== null && item.publishedAt <= run.created_at &&
+        ((item.publishedAt || 0) >= run.created_at - run.days * 86_400_000 || !knownItem || knownItem.collectedAt >= run.created_at - run.days * 86_400_000)) {
+        articles.set(item.url, { url: item.url, title: item.title });
+      }
+    }
     const videos = items.filter(
       (item) =>
         item.contentType === "video" &&
         item.publishedAt &&
-        item.publishedAt >= run.created_at - run.days * 86_400_000 &&
-        !knownTranscripts.has(item.url) &&
+        item.publishedAt <= run.created_at &&
+        (item.publishedAt >= run.created_at - run.days * 86_400_000 ||
+          !known.has(item.url) || known.get(item.url)!.collectedAt >= run.created_at - run.days * 86_400_000) &&
+        known.get(item.url)?.transcriptStatus !== "available" &&
         !/#?shorts?\b/i.test(item.title),
     );
     const interviewPriority = (title: string) =>
@@ -556,19 +589,8 @@ async function collectForRun(
     videos.sort(
       (a, b) => interviewPriority(b.title) - interviewPriority(a.title),
     );
-    for (let start = 0; start < Math.min(videos.length, 6); start += 2) {
-      await Promise.all(
-        videos.slice(start, start + 2).map(async (item) => {
-          const transcript = await fetchPublicYoutubeTranscript(item.url);
-          if (transcript) {
-            item.content = transcript;
-            item.transcriptStatus = "available";
-            item.contentProvenance = "transcript";
-          }
-        }),
-      );
-    }
     for (const item of items) {
+      if (!itemUrls.has(item.url) && known.has(item.url)) continue;
       const id = await researchHash(`${run.team_id}:${item.url}`);
       const inserted = await db
         .insert(research_items)
@@ -613,6 +635,48 @@ async function collectForRun(
             ),
           );
       }
+    }
+    progress = { urls: videos.map(item => item.url), nextOffset: 0, count, warning: error,
+      articles: [...articles.values()], articleOffset: 0, articleFailures: [],
+    };
+    await saveCollectionProgress(progress);
+    }
+    const articleQueue = progress.articles || [];
+    const articleEnd = Math.min(articleQueue.length, (progress.articleOffset || 0) + 12);
+    while ((progress.articleOffset || 0) < articleEnd) {
+      const targets = articleQueue.slice(progress.articleOffset || 0, Math.min(articleEnd, (progress.articleOffset || 0) + 3));
+      await Promise.all(targets.map(async target => {
+        try {
+          const item = await fetchDiscoveredResearchArticle(source, target, run.created_at);
+          await db.update(research_items).set({
+            ...(item.title ? { title: item.title } : {}), excerpt: item.excerpt,
+            published_at: sql`COALESCE(${research_items.published_at}, ${item.publishedAt})`,
+            ...(item.content ? { content: item.content, content_hash: await researchHash(item.content), content_provenance: item.contentProvenance || "article" } : {}),
+          }).where(and(eq(research_items.team_id, run.team_id), eq(research_items.canonical_url, target.url)));
+        } catch (caught) {
+          (progress!.articleFailures ||= []).push(`${target.url}: ${researchSourceErrorMessage(caught)}`);
+        }
+      }));
+      progress.articleOffset = (progress.articleOffset || 0) + targets.length;
+      await saveCollectionProgress(progress);
+    }
+    error = [progress.warning, progress.articleFailures?.length ? `${progress.articleFailures.length} original article page(s) could not be fetched; collection coverage is incomplete.` : null].filter(Boolean).join(" ") || null;
+    const transcriptEnd = Math.min(progress.urls.length, progress.nextOffset + 6);
+    while (progress.nextOffset < transcriptEnd) {
+      const urls = progress.urls.slice(progress.nextOffset, Math.min(transcriptEnd, progress.nextOffset + 2));
+      await Promise.all(urls.map(async url => {
+        const content = await fetchPublicYoutubeTranscript(url);
+        if (!content) return;
+        await db.update(research_items).set({
+          content, content_hash: await researchHash(content), content_provenance: "transcript", transcript_status: "available",
+        }).where(and(eq(research_items.team_id, run.team_id), eq(research_items.canonical_url, url)));
+      }));
+      progress.nextOffset += urls.length;
+      await saveCollectionProgress(progress);
+    }
+    if ((progress.articleOffset || 0) < articleQueue.length || progress.nextOffset < progress.urls.length) {
+      await db.update(research_run_sources).set({ item_count: count, error }).where(eq(research_run_sources.id, stepId));
+      return { collected: count, pending: true };
     }
   } catch (caught) {
     failed = true;
@@ -662,6 +726,20 @@ async function cachedModel(
       input,
     ]),
   );
+  async function validateReusable(value: unknown) {
+    try {
+      const ids = (input as Array<{ id: string }>).map(item => item.id);
+      if (stage === "screen") validateResearchScreening(researchScreeningSchema.parse(value), ids);
+      if (stage === "evidence") validateResearchEvidenceCoverage(researchEvidenceSchema.parse(value).findings, ids);
+    } catch (error) {
+      await db.insert(research_cache).values({
+        id: `invalid:${id}:${Date.now()}`, team_id: run.team_id,
+        value: JSON.stringify({ invalid: true, stage, response: value, reason: error instanceof Error ? error.message : "Invalid assessment coverage" }), created_at: Date.now(),
+      }).onConflictDoNothing();
+      await db.delete(research_cache).where(and(eq(research_cache.id, id), eq(research_cache.team_id, run.team_id)));
+      throw error;
+    }
+  }
   const cached = await db
     .select()
     .from(research_cache)
@@ -670,11 +748,13 @@ async function cachedModel(
     )
     .get();
   if (cached) {
+    const value = JSON.parse(cached.value) as unknown;
+    await validateReusable(value);
     await db
       .update(research_runs)
       .set({ cache_hits: sql`${research_runs.cache_hits} + 1` })
       .where(eq(research_runs.id, run.id));
-    return JSON.parse(cached.value) as unknown;
+    return value;
   }
   const result = await callResearchModel(
     system,
@@ -683,6 +763,7 @@ async function cachedModel(
     outputTokens,
     { teamId: run.team_id, runId: run.id, stage: "research", operation: stage },
   );
+  await validateReusable(result.value);
   await db
     .insert(research_cache)
     .values({
@@ -696,12 +777,16 @@ async function cachedModel(
 }
 type ResearchRankDiagnostics = ResearchRunDiagnostics & Required<Pick<ResearchRunDiagnostics, "evidenceCount" | "rejectedStories" | "screenedCount">>;
 type ResearchRankProgress = {
+  candidateIds?: string[];
+  discoveryCutoff?: number;
+  screenOffset?: number;
   selectedIds: string[];
   nextOffset: number;
   diagnostics: ResearchRankDiagnostics;
   coverageWarning: string | null;
 };
 const MAX_RANK_EVIDENCE_BATCHES = 3;
+const MAX_RANK_SCREEN_BATCHES = 3;
 
 async function rankRun(run: typeof research_runs.$inferSelect) {
   const db = await getDb();
@@ -722,16 +807,20 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
   await db.update(research_runs).set({ status: "ranking" }).where(eq(research_runs.id, run.id));
   if (!progress) {
     const sources = JSON.parse(run.source_ids) as string[];
-    const fetchedCandidates = await db
-      .select()
+    const discoveryCutoff = Date.now();
+    const candidates = await db
+      .select({ id: research_items.id })
       .from(research_items)
       .where(
         and(
           eq(research_items.team_id, run.team_id),
           inArray(research_items.source_id, sources),
-          gte(
-            research_items.published_at,
-            run.created_at - run.days * 86_400_000,
+          or(
+            gte(research_items.published_at, run.created_at - run.days * 86_400_000),
+            and(
+              gte(research_items.collected_at, run.created_at - run.days * 86_400_000),
+              lte(research_items.collected_at, discoveryCutoff),
+            ),
           ),
           lte(research_items.published_at, run.created_at),
           or(
@@ -740,62 +829,81 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
           ),
         ),
       )
-      .orderBy(desc(research_items.published_at))
-      .limit(1001)
+      .orderBy(desc(research_items.published_at), research_items.id)
       .all();
-    const coverageWarning =
-      fetchedCandidates.length > 1000
-        ? "Candidate limit reached: screened the newest 1,000 eligible items; older items within the selected window were not screened."
-        : null;
-    const candidates = fetchedCandidates.slice(0, 1000);
     const windowStart = run.created_at - run.days * 86_400_000;
+    const datedSignal = and(
+      lte(research_items.published_at, run.created_at),
+      or(gte(research_items.published_at, windowStart), and(gte(research_items.collected_at, windowStart), lte(research_items.collected_at, discoveryCutoff))),
+    );
+    const eligibleSignal = and(
+      datedSignal,
+      or(eq(research_items.content_type, "article"), eq(research_items.transcript_status, "available")),
+    );
     const coverage = await db.select({
-      eligible: sql<number>`COALESCE(SUM(CASE WHEN ${research_items.published_at} >= ${windowStart} AND ${research_items.published_at} <= ${run.created_at} AND (${research_items.content_type} = 'article' OR ${research_items.transcript_status} = 'available') THEN 1 ELSE 0 END), 0)`,
+      eligible: sql<number>`COALESCE(SUM(CASE WHEN ${eligibleSignal} THEN 1 ELSE 0 END), 0)`,
+      fresh: sql<number>`COALESCE(SUM(CASE WHEN ${eligibleSignal} AND ${research_items.published_at} >= ${windowStart} THEN 1 ELSE 0 END), 0)`,
+      evergreen: sql<number>`COALESCE(SUM(CASE WHEN ${eligibleSignal} AND ${research_items.published_at} < ${windowStart} THEN 1 ELSE 0 END), 0)`,
       undated: sql<number>`COALESCE(SUM(CASE WHEN ${research_items.published_at} IS NULL THEN 1 ELSE 0 END), 0)`,
-      unavailableVideos: sql<number>`COALESCE(SUM(CASE WHEN ${research_items.published_at} >= ${windowStart} AND ${research_items.published_at} <= ${run.created_at} AND ${research_items.content_type} = 'video' AND ${research_items.transcript_status} <> 'available' THEN 1 ELSE 0 END), 0)`,
+      unavailableVideos: sql<number>`COALESCE(SUM(CASE WHEN ${datedSignal} AND ${research_items.content_type} = 'video' AND ${research_items.transcript_status} <> 'available' THEN 1 ELSE 0 END), 0)`,
     }).from(research_items).where(and(eq(research_items.team_id, run.team_id), inArray(research_items.source_id, sources))).get();
     const rejectedStories: Array<{ title: string; score: number | null; reason: string }> = [];
     const diagnostics: ResearchRankDiagnostics = {
       eligibleCount: Number(coverage?.eligible || 0), undatedCount: Number(coverage?.undated || 0),
-      unavailableVideoCount: Number(coverage?.unavailableVideos || 0), screenedCount: candidates.length,
+      freshCount: Number(coverage?.fresh || 0), evergreenCount: Number(coverage?.evergreen || 0),
+      unavailableVideoCount: Number(coverage?.unavailableVideos || 0), screenedCount: 0,
       shortlistedCount: 0, evidenceCount: 0, rejectedStories,
       outcome: candidates.length ? 'Screening fresh material for useful stories.' : 'No dated, readable items in this window. Check source coverage and unavailable transcripts.',
     };
     await db.update(research_runs).set({ diagnostics: JSON.stringify(diagnostics) }).where(eq(research_runs.id, run.id));
-    if (candidates.length) {
+    progress = { candidateIds: candidates.map(item => item.id), discoveryCutoff, screenOffset: 0, selectedIds: [], nextOffset: 0, diagnostics, coverageWarning: null };
+    await persistProgress(progress);
+  }
+  // Freeze membership before any evidence hydration changes stored item metadata.
+  // Older checkpoints already contain their completed screening selection.
+  const candidateIds = progress.candidateIds || [];
+  for (let batches = 0; batches < MAX_RANK_SCREEN_BATCHES && (progress.screenOffset || 0) < candidateIds.length; batches++) {
+      const ids = candidateIds.slice(progress.screenOffset || 0, (progress.screenOffset || 0) + RESEARCH_SCREEN_BATCH_SIZE);
+      const rows = await db.select().from(research_items).where(and(
+        eq(research_items.team_id, run.team_id), inArray(research_items.id, ids),
+      )).all();
+      const candidates = ids.flatMap(id => rows.filter(item => item.id === id));
       const metadata = candidates.map((item) => ({
         id: item.id,
         title: item.title,
         excerpt: item.excerpt.slice(0, 900),
-        publicText: item.content?.slice(0, 2500) || null,
+        publicText: item.content || null,
         contentProvenance: item.content_provenance,
         publishedAt: item.published_at,
+        discoveredAt: item.collected_at,
+        signalKind: item.published_at! >= run.created_at - run.days * 86_400_000 ? "fresh" : "evergreen_newly_discovered",
         sourceId: item.source_id,
       }));
-      const selectedIds = new Set<string>();
-      for (let start = 0; start < metadata.length; start += RESEARCH_SCREEN_BATCH_SIZE) {
-        const batch = metadata.slice(start, start + RESEARCH_SCREEN_BATCH_SIZE);
-        const batchIds = new Set(batch.map((item) => item.id));
-        const screened = researchScreeningSchema.parse(
-          await cachedModel(
+      if (metadata.length) {
+        const screened = validateResearchScreening(
+          researchScreeningSchema.parse(await cachedModel(
             run,
             "screen",
-            batch,
+            metadata,
             RESEARCH_SCREEN_INSTRUCTIONS,
-            screeningJsonSchema,
+            screeningJsonSchemaForItems(metadata.map(item => item.id)),
             5000,
-          ),
+          )), metadata.map(item => item.id),
         );
-        for (const id of screened.itemIds)
-          if (batchIds.has(id)) selectedIds.add(id);
+        const selected = new Set(screened.itemIds);
+        progress.selectedIds.push(...ids.filter(id => selected.has(id)));
+        progress.diagnostics.rejectedStories.push(...screened.assessments.filter(item => !item.selected).map(assessment => ({
+          title: candidates.find(item => item.id === assessment.itemId)!.title,
+          score: null, reason: `Screening: ${assessment.reason}`,
+        })));
       }
-      diagnostics.shortlistedCount = selectedIds.size;
-      progress = { selectedIds: candidates.filter(item => selectedIds.has(item.id)).map(item => item.id), nextOffset: 0, diagnostics, coverageWarning };
-    } else {
-      progress = { selectedIds: [], nextOffset: 0, diagnostics, coverageWarning };
-    }
-    await persistProgress(progress);
+      progress.screenOffset = (progress.screenOffset || 0) + ids.length;
+      progress.diagnostics.screenedCount += candidates.length;
+      progress.diagnostics.shortlistedCount = progress.selectedIds.length;
+      progress.diagnostics.outcome = `Screened ${progress.diagnostics.screenedCount} of ${candidateIds.length} fresh items.`;
+      await persistProgress(progress);
   }
+  if ((progress.screenOffset || 0) < candidateIds.length) return { ok: true, pending: true };
   const diagnostics = progress.diagnostics;
   for (let batches = 0; batches < MAX_RANK_EVIDENCE_BATCHES && progress.nextOffset < progress.selectedIds.length; batches++) {
     const ids = progress.selectedIds.slice(progress.nextOffset, progress.nextOffset + RESEARCH_EVIDENCE_BATCH_SIZE);
@@ -827,14 +935,18 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
     if (batch.length) {
       const input = batch.map(item => ({
         id: item.id, title: item.title, sourceId: item.source_id, publishedAt: item.published_at,
+        discoveredAt: item.collected_at,
+        signalKind: item.published_at! >= run.created_at - run.days * 86_400_000 ? "fresh" : "evergreen_newly_discovered",
         content: item.content, contentProvenance: item.content_provenance,
       }));
       const output = researchEvidenceSchema.parse(await cachedModel(
         run, "evidence", input, RESEARCH_EVIDENCE_INSTRUCTIONS,
         { ...evidenceJsonSchema, properties: { findings: {
           ...evidenceJsonSchema.properties.findings, minItems: batch.length, maxItems: batch.length,
+          items: { ...evidenceJsonSchema.properties.findings.items, properties: { ...evidenceJsonSchema.properties.findings.items.properties, itemId: { type: "string", enum: batch.map(item => item.id) } } },
         } } }, 5000,
       ));
+      validateResearchEvidenceCoverage(output.findings, batch.map(item => item.id));
       const accepted = validateResearchEvidence(output.findings, batch.map(item => ({ id: item.id, content: item.content! })));
       for (const item of batch) {
         if (accepted.some(finding => finding.itemId === item.id)) continue;
@@ -855,6 +967,18 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
           .replace(/[^a-z0-9]+/g, "-")
           .replace(/^-|-$/g, "");
         if (!familyKey) continue;
+        const bundleId = `research-family-sources:${run.id}:${familyKey}`;
+        const existingBundle = await db.select().from(research_cache).where(and(
+          eq(research_cache.id, bundleId), eq(research_cache.team_id, run.team_id),
+        )).get();
+        const members = new Map<string, { itemId: string; evidence: string }>(
+          (existingBundle ? JSON.parse(existingBundle.value).items : []).map((member: { itemId: string; evidence: string }) => [member.itemId, member]),
+        );
+        members.set(item.id, { itemId: item.id, evidence: finding.evidence });
+        const bundle = JSON.stringify({ items: [...members.values()] });
+        await db.insert(research_cache).values({
+          id: bundleId, team_id: run.team_id, value: bundle, created_at: Date.now(),
+        }).onConflictDoUpdate({ target: research_cache.id, set: { value: bundle } });
         const familyOwner = await db.select({ itemId: research_findings.item_id })
           .from(research_findings).where(and(
             eq(research_findings.team_id, run.team_id),

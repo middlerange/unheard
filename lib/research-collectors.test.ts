@@ -62,6 +62,17 @@ describe("public research evidence and publication dates", () => {
     expect(articleResearchDate(html, "https://huggingface.co/blog/microsoft/thinkingbox-training", NOW)).toBe(Date.parse("2026-10-22T22:24:34.816Z"));
   });
 
+  it("reads Swan's matching article date when an undated WebPage precedes it in the graph", () => {
+    const url = "https://www.getswan.com/changelog/the-brain";
+    const schema = (rows: unknown[]) => `<script type="application/ld+json">${JSON.stringify({ "@graph": rows })}</script>`;
+    const page = { "@type": "WebPage", "@id": `${url}#webpage`, url, dateModified: "2026-10-23" };
+    const release = { "@type": "BlogPosting", url, datePublished: "2026-10-14T00:00:00.000Z", dateModified: "2026-10-23" };
+    expect(articleResearchDate(schema([page, release]), url, NOW)).toBe(Date.parse("2026-10-14T00:00:00Z"));
+    expect(articleResearchDate(schema([page, { ...release, url: "https://www.getswan.com/changelog/related" }]), url, NOW)).toBeNull();
+    expect(articleResearchDate(schema([page, { ...release, datePublished: "2026-10-30" }]), url, NOW)).toBeNull();
+    expect(articleResearchDate(schema([page, { "@type": "BlogPosting", datePublished: "2026-10-23" }]), url, NOW)).toBeNull();
+  });
+
   it("reads Wynter's own report byline without using quarter labels or site deployment dates", () => {
     const url = "https://wynter.com/post/wynter-index-q3-2026-b2b-marketing";
     const html = `<!-- Last Published: Fri Oct 23 2026 --><title>[Wynter Index] Q3 2026 | B2B Marketing</title><div class="content-container"><h1>Wynter Index Q3 2026</h1><div class="blog-article__sub-heading">A quarterly survey.</div><div class="wfu-post-byline"><div class="wfu-post-byline-author"></div><div class="wfu-post-byline-date">August 12, 2026</div></div></div><section><h2>Related report</h2><div class="wfu-post-byline-date">October 22, 2026</div></section><footer>Published October 23, 2026</footer>`;
@@ -161,12 +172,13 @@ describe("public research evidence and publication dates", () => {
   });
 });
 
-describe("bounded public source discovery", () => {
+describe("public source discovery", () => {
   it("gives configured article sections equal priority and preserves the publisher index order", () => {
     const html = `<main><a href="/engineering/new-engineering">New engineering</a>${Array.from({ length: 12 }, (_, index) => `<a href="/research/report-${index}">Research report with a longer descriptive title ${index}</a>`).join("")}<a href="/engineering/older-engineering">Older engineering</a></main>`;
     expect(discoverResearchLinks(html, { ...source, articlePathPrefixes: ["/engineering/", "/research/"], maxDiscoveryLinks: 12 })).toEqual([
       "https://example.com/engineering/new-engineering",
-      ...Array.from({ length: 11 }, (_, index) => `https://example.com/research/report-${index}`),
+      ...Array.from({ length: 12 }, (_, index) => `https://example.com/research/report-${index}`),
+      "https://example.com/engineering/older-engineering",
     ]);
   });
 
@@ -182,16 +194,16 @@ describe("bounded public source discovery", () => {
     expect(await fetchResearchText(source.url, sourceHosts(source), publicRedirect)).toBe("public content");
   });
 
-  it("looks past early navigation, keeps all main cards, and honors article paths and discovery limits", () => {
+  it("looks past early navigation, keeps all main cards, and honors article paths without a story quota", () => {
     const cards = Array.from({ length: 15 }, (_, index) => `<article><header><a href="/research/report-${index}">Original adoption research report ${index}</a></header></article>`).join("");
     const html = `<main><nav><a href="/research/ignored">Navigation research resource</a></nav><a href="/pricing">Pricing and company plans overview</a><a href="/contact">Contact the research team today</a>${cards}<a href="/other/report">Another unrelated resource</a></main>`;
-    expect(discoverResearchLinks(html, { ...source, articlePathPrefixes: ["/research/"], maxDiscoveryLinks: 12 })).toEqual(Array.from({ length: 12 }, (_, index) => `https://example.com/research/report-${index}`));
+    expect(discoverResearchLinks(html, { ...source, articlePathPrefixes: ["/research/"], maxDiscoveryLinks: 12 })).toEqual(Array.from({ length: 15 }, (_, index) => `https://example.com/research/report-${index}`));
     expect(discoverResearchLinks(html, source)).toHaveLength(16);
   });
 
   it("reads image alt titles and prefers article routes over generic resources", () => {
     const html = '<main><a href="/library">Browse the full research library</a><a href="/p/new-research"><img alt="Original customer adoption research" src="/card.png"></a><a href="/research/report.pdf">Download the complete research PDF</a></main>';
-    expect(discoverResearchLinks(html, { ...source, maxDiscoveryLinks: 1 })).toEqual(["https://example.com/p/new-research"]);
+    expect(discoverResearchLinks(html, { ...source, maxDiscoveryLinks: 1 })).toEqual(["https://example.com/p/new-research", "https://example.com/library"]);
   });
 
   it("accepts short and empty overlay links only under explicitly approved article paths", () => {
@@ -205,7 +217,7 @@ describe("bounded public source discovery", () => {
 
   it("falls back beyond an empty main only for scoped sources and keeps navigation excluded", () => {
     const html = '<nav><a href="/news/navigation-study">Latest research navigation story</a></nav><main></main><section><a href="/news/real-study"></a><a href="/news/second-study">Read</a><a href="/news/topics/ai">Research topic</a><a href="/research/team/alignment">Team</a><a href="https://outside.example/news/external-study">External research</a></section><footer><a href="/news/footer-study">Related research footer story</a></footer><script>const template = "<a href=\'/news/script-study\'>Script research story</a>";</script>';
-    expect(discoverResearchLinks(html, { ...source, articlePathPrefixes: ["/news/"], maxDiscoveryLinks: 1 })).toEqual(["https://example.com/news/real-study"]);
+    expect(discoverResearchLinks(html, { ...source, articlePathPrefixes: ["/news/"], maxDiscoveryLinks: 1 })).toEqual(["https://example.com/news/real-study", "https://example.com/news/second-study"]);
     expect(discoverResearchLinks(html, source)).toEqual([]);
     expect(discoverResearchLinks(html, { ...source, articlePathPrefixes: ["/news/"] })).toEqual([
       "https://example.com/news/real-study", "https://example.com/news/second-study",
@@ -217,7 +229,7 @@ describe("bounded public source discovery", () => {
     expect(discoverResearchLinks(html, { ...source, articlePathPrefixes: ["/news/"] })).toEqual(["https://example.com/news/main-study"]);
   });
 
-  it("keeps Lyssna author and topic archives from consuming the bounded article slots", () => {
+  it("excludes Lyssna author and topic archives from article discovery", () => {
     const html = `<main>${["diane-leyman", "ai-in-user-research", "concept-testing", "product-management"].map(slug => `<a href="/blog/${slug}-articles">Research articles</a>`).join("")}<a href="/blog/2">More research articles</a><a href="/blog/ai-skills-for-research">AI skills for research</a><a href="/blog/mcp-launch">A new research connection</a></main>`;
     const lyssna = { ...source, url: "https://www.lyssna.com/blog/", articlePathPrefixes: ["/blog/"], maxDiscoveryLinks: 2 };
     expect(discoverResearchLinks(html, lyssna)).toEqual([
@@ -225,6 +237,8 @@ describe("bounded public source discovery", () => {
     ]);
     expect(discoverResearchLinks(html, { ...lyssna, url: "https://example.com/blog/" })).toEqual([
       "https://example.com/blog/diane-leyman-articles", "https://example.com/blog/ai-in-user-research-articles",
+      "https://example.com/blog/concept-testing-articles", "https://example.com/blog/product-management-articles",
+      "https://example.com/blog/2", "https://example.com/blog/ai-skills-for-research", "https://example.com/blog/mcp-launch",
     ]);
   });
 
@@ -250,4 +264,13 @@ describe("bounded public source discovery", () => {
     expect(items[0].content).toContain(evidence.trim());
     expect(fetcher).toHaveBeenCalledTimes(11);
   });
+});
+
+it("collects every returned feed entry beyond the old sixty-item cap", () => {
+  const entries = Array.from({ length: 75 }, (_, i) => `<item><title>Study ${i}</title><link>https://example.com/research/${i}</link><pubDate>Mon, 26 Oct 2026 00:00:00 GMT</pubDate></item>`).join("");
+  expect(parseResearchFeed(`<rss version="2.0"><channel>${entries}</channel></rss>`, source)).toHaveLength(75);
+});
+it("discovers every matching article beyond both legacy source and forty-link caps", () => {
+  const html = `<main>${Array.from({ length: 55 }, (_, i) => `<a href="/research/report-${i}">Detailed original research report ${i}</a>`).join("")}</main>`;
+  expect(discoverResearchLinks(html, { ...source, articlePathPrefixes: ["/research/"], maxDiscoveryLinks: 1 })).toHaveLength(55);
 });

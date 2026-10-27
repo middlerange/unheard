@@ -582,7 +582,12 @@ describe("Slack review threads and approval safety", () => {
   it("keeps long research metadata inside Slack section limits", async () => {
     const post = await getPostWithDetails("research-publish", "a");
     const packet = buildSlackReviewPacket(
-      { id: "long", revision: 1 },
+      { id: "long", revision: 1, content: JSON.stringify({
+        editorial: {
+          writingStyle: "b2b-growth-mechanism", alpha: "a".repeat(1200), readerDecision: "d".repeat(900),
+        },
+        sourceContext: { publishedAt: "2025-08-01T00:00:00.000Z", discoveredAt: "2026-10-27T00:00:00.000Z", signalKind: "evergreen_newly_discovered" },
+      }) },
       buildApprovalSnapshot(post!),
       {
         title: "Title",
@@ -600,6 +605,10 @@ describe("Slack review threads and approval safety", () => {
       if (block.type === "section")
         expect(block.text!.text.length).toBeLessThanOrEqual(3000);
     }
+    expect(JSON.stringify(packet)).toContain("Writing style: growth mechanism");
+    expect(JSON.stringify(packet)).toContain("Original publication: 2025-08-01");
+    expect(JSON.stringify(packet)).toContain("not a new announcement");
+    expect(JSON.stringify(packet)).toContain("Reader decision:");
   });
   it("blocks mixed identities on legacy previews and before approval even if content is unchanged", async () => {
     run("INSERT INTO channels(id,team_id,name,platform,account_type,account_id,group_name,credentials,created_at,research_enabled,system_prompt)VALUES('identity-second','a','Another channel','twitter','personal','identity-second-account','personal','encrypted',1,1,'Write for product leaders')");

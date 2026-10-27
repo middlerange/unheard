@@ -4,7 +4,7 @@ import {
 } from "./research-profiles";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { drizzle } from "drizzle-orm/d1";
@@ -27,8 +27,10 @@ import {
 import {
   researchHash, validateResearchEvidence,
   RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS,
+  RESEARCH_SCREEN_BATCH_SIZE,
 } from "./research-model";
 import { callResearchModel } from "./research-model";
+import { RESEARCH_WRITING_MODEL } from "./research-writing";
 import { beginResearchUsage, finishResearchUsage, getResearchUsage } from "./research-usage";
 import {
   processResearchDraftJob,
@@ -38,6 +40,27 @@ import { createSlackTestReview } from "./slack-test-review";
 import { SLACK_TEST_EVIDENCE, SLACK_TEST_PROMPT } from "./slack-test-content";
 import type { ResearchSourceSeed } from "./research-types";
 import { RESEARCH_SOURCE_SEEDS } from "./research-sources";
+function editorialFixture(content: string) {
+  return {
+    writingStyle: "b2b-practitioner-teardown", styleRationale: "The source describes a concrete practitioner workflow to inspect.",
+    sourceFact: "A practitioner describes a specific user action and the surrounding workflow.",
+    evidenceQuote: content.slice(0, Math.min(120, content.length)),
+    alpha: "Inspect the alternate route before changing which steps are required for new users.",
+    readerDecision: "Audit each entry route before adding a setup gate to onboarding.",
+    boundary: "This account does not measure the effect on conversion.",
+  };
+}
+function editorialReviewFixture() {
+  return Response.json({ status: "completed", usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ verdict: "ready", reason: "A specific source supports a bounded reader decision.", issues: [] }) }] }] });
+}
+function screeningFixture(value: unknown, items?: Array<{ id: string }>) {
+  const output = value as { itemIds?: string[] };
+  if (!Array.isArray(output?.itemIds)) return value;
+  return { ...output, assessments: (items || []).map(item => ({
+    itemId: item.id, selected: output.itemIds!.includes(item.id),
+    reason: output.itemIds!.includes(item.id) ? "A specific supported workflow merits full evidence review." : "No usable profile-relevant mechanism is supplied.",
+  })) };
+}
 const state = vi.hoisted(() => ({ db: undefined as unknown }));
 vi.mock("./db/client", () => ({ getDb: async () => state.db }));
 import {
@@ -50,6 +73,16 @@ import {
   updateResearchSettings,
   updateResearchSource,
 } from "./research";
+async function finishResearchDraftJob(runId: string) {
+  let result = await processResearchDraftJob(runId);
+  while ("pending" in result && result.pending) result = await processResearchDraftJob(runId);
+  return result;
+}
+async function finishResearchRankJob(runId: string) {
+  let result = await processResearchJob({ operation: "rank", runId });
+  while ("pending" in result && result.pending) result = await processResearchJob({ operation: "rank", runId });
+  return result;
+}
 const source: ResearchSourceSeed = {
   id: "example",
   name: "Example",
@@ -233,12 +266,18 @@ describe("research persistence and team isolation", () => {
   const path = join(folder, "db.sqlite");
   const python = `import json,sqlite3,sys\np=json.load(sys.stdin)\nc=sqlite3.connect(p['path'])\nc.row_factory=sqlite3.Row\nc.execute('PRAGMA foreign_keys=ON')\nif 'script' in p:\n c.executescript(p['script']); c.commit(); print('[]')\nelse:\n out=[]\n for q in p['queries']:\n  cur=c.execute(q['sql'],q.get('params',[])); out.append({'results':[dict(r) for r in cur.fetchall()],'success':True,'meta':{'changes':cur.rowcount}})\n c.commit(); print(json.dumps(out))`;
   function execute(payload: object) {
-    const result = spawnSync("python3", ["-c", python], {
-      input: JSON.stringify({ path, ...payload }),
-      encoding: "utf8",
-    });
-    if (result.status !== 0) throw new Error(result.stderr);
-    return JSON.parse(result.stdout);
+    const inputPath = join(folder, "query.json");
+    writeFileSync(inputPath, JSON.stringify({ path, ...payload }));
+    const input = openSync(inputPath, "r");
+    try {
+      const result = spawnSync("python3", ["-c", python], {
+        stdio: [input, "pipe", "pipe"], encoding: "utf8", timeout: 30_000, maxBuffer: 16 * 1024 * 1024,
+      });
+      if (result.status !== 0) throw result.error || new Error(result.stderr);
+      return JSON.parse(result.stdout);
+    } finally {
+      closeSync(input);
+    }
   }
   class Statement {
     constructor(
@@ -314,7 +353,7 @@ describe("research persistence and team isolation", () => {
       error: "test finished",
     });
   }, 20_000);
-  it("accepts a seven-day discovery run, ranks only its exact publication window, and never drafts", async () => {
+  it("accepts a seven-day discovery run, respects publication and discovery windows, and never drafts", async () => {
     const now = Date.now();
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.feedUrl && source.kind === "rss")!;
     execute({ queries: [{ sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('weekly-window','Weekly window','weekly-window',?,?)", params: [now, now] }] });
@@ -341,18 +380,19 @@ describe("research persistence and team isolation", () => {
       ];
       execute({ queries: rows.map(row => ({
         sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,'weekly-window',?,?,?,?,?,?,?,'article')",
-        params: [row.id, seed.id, new URL(row.id, seed.url).href, row.id, evidence, row.date, now, evidence.repeat(10)],
+        params: [row.id, seed.id, new URL(row.id, seed.url).href, row.id, evidence, row.date, row.id === "weekly-too-old" ? run.createdAt - 8 * 86_400_000 : now, evidence.repeat(10)],
       })) });
       const selected = ["weekly-inside", "weekly-boundary"];
       fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
         expect(String(url)).toMatch(/^https:\/\/api\.openai\.com\//);
         const request = JSON.parse(String(init?.body));
         const input = JSON.parse(request.input);
+      if (input.proposed) return editorialReviewFixture();
         expect(input.items.map((item: { id: string }) => item.id).sort()).toEqual([...selected].sort());
-        const value = request.text.format.schema.properties.itemIds
+        const value = request.text.format.schema.properties.assessments
           ? { itemIds: selected }
           : { findings: selected.map((id, index) => ({ itemId: id, score: index ? 75 : 85, summary: "A documented account creation decision", whyItMatters: "Optional consent should not block signup", contentAngle: "Audit authentication paths", evidence, limitations: "A first-party descriptive account, not a conversion experiment", familyKey: id })) };
-        return Response.json({ status: "completed", usage: { input_tokens: 100, output_tokens: 50 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }] });
+        return Response.json({ status: "completed", usage: { input_tokens: 100, output_tokens: 50 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
       });
       await processResearchJob({ operation: "rank", runId: run.id });
       await processResearchJob({ operation: "drafts", runId: run.id });
@@ -476,25 +516,34 @@ describe("research persistence and team isolation", () => {
       { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_ids) VALUES('identity-generation-run','identity-generation','scan','drafting',1,1,?,'Product teams',?)", params: [now, JSON.stringify(["identity-source"])] },
       { sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES('identity-generation-item','identity-generation','identity-source','https://example.com/identity-story','Signup paths',?,?,?,?,'article')", params: [quote, now - 1000, now, quote.repeat(15)] },
       { sql: "INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key) VALUES('identity-generation-finding','identity-generation','identity-generation-run','identity-generation-item','identity-source','Signup paths','https://example.com/identity-story',?,90,'Signup gates','Preserve consent','Audit every path',?,'No conversion measurements',?,'identity-generation-family')", params: [now - 1000, quote, now] },
+      { sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES('identity-supporting-item','identity-generation','identity-source','https://example.com/identity-support','Independent signup account',?,?,?,?,'article')", params: ["A separate workflow keeps required consent before account creation.", now - 2000, now, "A separate workflow keeps required consent before account creation. Additional independent explanation of signup routes."] },
+      { sql: "INSERT INTO research_cache(id,team_id,value,created_at) VALUES('research-family-sources:identity-generation-run:identity-generation-family','identity-generation',?,?)", params: [JSON.stringify({ items: [{ itemId: "identity-generation-item", evidence: quote }, { itemId: "identity-supporting-item", evidence: "A separate workflow keeps required consent before account creation." }] }), now] },
     ] });
     const previousKey = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "test-identity-key";
     let calls = 0;
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       expect(String(url)).toBe("https://api.openai.com/v1/responses");
-      const input = JSON.parse(JSON.parse(String(init?.body)).input);
+      const request = JSON.parse(String(init?.body));
+      expect(request.model).toBe(RESEARCH_WRITING_MODEL);
+      const input = JSON.parse(request.input);
+      expect(input.source.supportingSources).toMatchObject([{ url: "https://example.com/identity-support", content: expect.stringContaining("A separate workflow") }]);
+      expect(input.allowedWritingStyles.map((style: { writingStyle: string }) => style.writingStyle)).toContain("b2b-research-insight");
+      if (input.proposed) return editorialReviewFixture();
       expect(input.identityGroups.map((group: { channelIds: string[] }) => group.channelIds.slice().sort()).sort()).toEqual([
         ["identity-company-li", "identity-company-x"], ["identity-personal-li", "identity-personal-x"],
       ]);
       calls++;
       const chosen = calls === 1 ? [profiles[0], profiles[2]] : profiles.slice(0, 2);
-      return Response.json({ status: "completed", usage: { input_tokens: 100, output_tokens: 40 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ ready: true, reason: "Fits this identity", targets: chosen.map(profile => ({ channelId: profile.id, platform: profile.platform, content: `Audit every signup path. Source: ${input.source.url}`, thread: [], supportQuote: quote, redditTitle: null, subreddit: null })) }) }] }] });
+      return Response.json({ status: "completed", usage: { input_tokens: 100, output_tokens: 40 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ ready: true, editorial: editorialFixture(input.source.content), reason: "Fits this identity", targets: chosen.map(profile => ({ channelId: profile.id, platform: profile.platform, content: `Audit every signup path. Sources: ${input.source.url} https://example.com/identity-support`, thread: [], supportQuote: quote, redditTitle: null, subreddit: null })) }) }] }] });
     });
     try {
-      expect(await processResearchDraftJob("identity-generation-run")).toEqual({ drafted: 1 });
+      expect(await finishResearchDraftJob("identity-generation-run")).toEqual({ drafted: 1 });
       expect(calls).toBe(2);
       const draft = execute({ queries: [{ sql: "SELECT content FROM research_drafts WHERE team_id='identity-generation'" }] })[0].results[0];
       expect(JSON.parse(draft.content).targets.map((target: { channelId: string }) => target.channelId).sort()).toEqual(["identity-company-li", "identity-company-x"]);
+      expect(execute({ queries: [{ sql: "SELECT DISTINCT model,cost_status FROM research_usage WHERE team_id='identity-generation'" }] })[0].results)
+        .toEqual([{ model: RESEARCH_WRITING_MODEL, cost_status: "unknown" }]);
     } finally {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
@@ -521,23 +570,24 @@ describe("research persistence and team isolation", () => {
       expect(String(url)).toBe("https://api.openai.com/v1/responses");
       const request = JSON.parse(String(init?.body));
       const input = JSON.parse(request.input);
+      if (input.proposed) return editorialReviewFixture();
       const title = input.source.title;
       calls.push(title);
       const invalid = title === "never-valid" || (title === "repairable" && calls.filter(value => value === title).length === 1);
-      return Response.json({ status: "completed", usage: { input_tokens: 100, output_tokens: 20 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ ready: true, reason: "A practical product case", targets: [{ channelId: "repairs-x", platform: "twitter", content: invalid ? `${"x".repeat(281)} ${input.source.url}` : `Audit every signup path. Source: ${input.source.url}`, thread: [], supportQuote: quote, redditTitle: null, subreddit: null }] }) }] }] });
+      return Response.json({ status: "completed", usage: { input_tokens: 100, output_tokens: 20 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ ready: true, editorial: editorialFixture(input.source.content), reason: "A practical product case", targets: [{ channelId: "repairs-x", platform: "twitter", content: invalid ? `${"x".repeat(281)} ${input.source.url}` : `Audit every signup path. Source: ${input.source.url}`, thread: [], supportQuote: quote, redditTitle: null, subreddit: null }] }) }] }] });
     });
     try {
-      expect(await processResearchDraftJob("repairs-run")).toEqual({ drafted: 2 });
+      expect(await finishResearchDraftJob("repairs-run")).toEqual({ drafted: 2 });
       expect(calls).toEqual(["never-valid", "never-valid", "repairable", "repairable", "already-valid"]);
       const snapshot = await getResearchSnapshot("repairs");
-      expect(snapshot.runs[0]).toMatchObject({ status: "completed", inputTokens: 500, outputTokens: 100 });
+      expect(snapshot.runs[0]).toMatchObject({ status: "completed", inputTokens: 520, outputTokens: 110 });
       expect(snapshot.runs[0].diagnostics?.rejectedStories).toEqual(expect.arrayContaining([expect.objectContaining({ title: "never-valid" })]));
       expect(snapshot.drafts.map(draft => draft.title).sort()).toEqual(["already-valid", "repairable"]);
       const usage = execute({ queries: [{ sql: "SELECT stage,operation FROM research_usage WHERE team_id='repairs' ORDER BY created_at" }] })[0].results;
-      expect(usage).toHaveLength(5);
+      expect(usage).toHaveLength(7);
       expect(usage.every((row: { stage: string }) => row.stage === "draft_generation")).toBe(true);
       expect(usage.filter((row: { operation: string }) => row.operation === "draft_repair")).toHaveLength(2);
-      expect(execute({ queries: [{ sql: "SELECT input_tokens,output_tokens FROM research_drafts WHERE team_id='repairs' ORDER BY input_tokens DESC" }] })[0].results).toEqual([{ input_tokens: 200, output_tokens: 40 }, { input_tokens: 100, output_tokens: 20 }]);
+      expect(execute({ queries: [{ sql: "SELECT input_tokens,output_tokens FROM research_drafts WHERE team_id='repairs' ORDER BY input_tokens DESC" }] })[0].results).toEqual([{ input_tokens: 210, output_tokens: 45 }, { input_tokens: 110, output_tokens: 25 }]);
     } finally {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
@@ -581,12 +631,13 @@ describe("research persistence and team isolation", () => {
       if (!String(url).startsWith("https://api.openai.com/")) throw new Error("Public feed evidence should already be available");
       const request = JSON.parse(String(init?.body));
       const input = JSON.parse(request.input);
+      if (input.proposed) return editorialReviewFixture();
       if (input.source) {
         draftedTitles.push(input.source.title);
         return Response.json({
           status: "completed", usage: { input_tokens: 100, output_tokens: 50 },
           output: [{ content: [{ type: "output_text", text: JSON.stringify({
-            ready: true, reason: "A specific documented onboarding decision.",
+            ready: true, editorial: editorialFixture(input.source.content), reason: "A specific documented onboarding decision.",
             targets: [{ channelId: "assessments-linkedin", platform: "linkedin", content: `Required and optional consent follow different signup paths. Audit alternate authentication paths before changing gates. Source: ${input.source.url}`, thread: [], supportQuote: strongQuote, redditTitle: null, subreddit: null }],
           }) }] }],
         });
@@ -595,7 +646,7 @@ describe("research persistence and team isolation", () => {
       if (request.text.format.schema.properties.findings) {
         expect(request.text.format.schema.properties.findings).toMatchObject({ minItems: 2, maxItems: 2 });
       }
-      const value = request.text.format.schema.properties.itemIds
+      const value = request.text.format.schema.properties.assessments
         ? { itemIds: items.map(item => item.id) }
         : { findings: items.map((item, index) => ({
           itemId: item.id,
@@ -609,7 +660,7 @@ describe("research persistence and team isolation", () => {
         })) };
       return Response.json({
         status: "completed", usage: { input_tokens: 100, output_tokens: 50 },
-        output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }],
+        output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }],
       });
     });
     try {
@@ -627,9 +678,9 @@ describe("research persistence and team isolation", () => {
         shortlistedCount: 2, evidenceCount: 2,
         rejectedStories: [{ title: "A generic launch campaign", score: 62, reason: rejectedReason }],
       });
-      expect(await processResearchDraftJob("assessments-run")).toEqual({ drafted: 1 });
+      expect(await finishResearchDraftJob("assessments-run")).toEqual({ drafted: 1 });
       expect(draftedTitles).toEqual(["A documented signup design tradeoff"]);
-      expect(fetcher).toHaveBeenCalledTimes(3);
+      expect(fetcher).toHaveBeenCalledTimes(4);
     } finally {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
@@ -664,12 +715,13 @@ describe("research persistence and team isolation", () => {
       expect(String(url)).toBe("https://api.openai.com/v1/responses");
       const request = JSON.parse(String(init?.body));
       const input = JSON.parse(request.input);
+      if (input.proposed) return editorialReviewFixture();
       let value: unknown;
-      if (request.text.format.schema.properties.itemIds) {
+      if (request.text.format.schema.properties.assessments) {
         expect(request.instructions).toBe(RESEARCH_SCREEN_INSTRUCTIONS);
         expect(input.items).toHaveLength(all.length);
-        expect(request.text.format.schema.properties.itemIds.maxItems).toBeGreaterThanOrEqual(all.length);
-        value = { itemIds: [...useful.map(item => item.id), thinAd.id, "unknown-screen-id"] };
+        expect(request.text.format.schema.properties.assessments.maxItems).toBeGreaterThanOrEqual(all.length);
+        value = { itemIds: [...useful.map(item => item.id), thinAd.id] };
       } else {
         expect(request.instructions).toBe(RESEARCH_EVIDENCE_INSTRUCTIONS);
         expect(input.items.length).toBeLessThanOrEqual(6);
@@ -687,7 +739,7 @@ describe("research persistence and team isolation", () => {
           };
         }) };
       }
-      return Response.json({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }] });
+      return Response.json({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
     });
     try {
       await processResearchJob({ operation: "rank", runId: "recall-run" });
@@ -700,7 +752,7 @@ describe("research persistence and team isolation", () => {
         findingsCount: 17,
         diagnostics: {
           eligibleCount: 19, screenedCount: 19, shortlistedCount: 18, evidenceCount: 18,
-          rejectedStories: [{ title: thinAd.title, score: 42, reason: "Thin promotional claims without a specific supported workflow." }],
+          rejectedStories: expect.arrayContaining([{ title: thinAd.title, score: 42, reason: "Thin promotional claims without a specific supported workflow." }]),
         },
       });
       expect(snapshot.drafts).toHaveLength(0);
@@ -710,7 +762,7 @@ describe("research persistence and team isolation", () => {
       else process.env.OPENAI_API_KEY = previousKey;
     }
   }, 20_000);
-  it("retains an existing reviewed story when another source produces the same family", async () => {
+  it("retains an existing reviewed story and bundles verified sources when multiple articles produce the same family", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
     const now = Date.now();
     const quote = "A shared product scaffold removes repeated setup before the first prototype.";
@@ -718,20 +770,22 @@ describe("research persistence and team isolation", () => {
       { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('family','Family','family',?,?)", params: [now, now] },
       { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp,source_count,source_ids) VALUES('family-run','family','scan','collecting',7,?,'Product practitioners',1,?)", params: [now, JSON.stringify([seed.id])] },
       { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES('family-step','family-run',?,'completed')", params: [seed.id] },
-      ...["original", "second"].map(id => ({
+      ...["original", "second", "third"].map(id => ({
         sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,'family',?,?,?,?,?,?,?,'public_feed')",
-        params: [id, seed.id, `${new URL(seed.url).origin}/family-${id}`, id, quote, now - 1000, now, `${quote} ${"Detailed product workflow evidence. ".repeat(30)}`],
+        params: [id, seed.id, `${new URL(seed.url).origin}/family-${id}`, id, quote, now - 1000, now, `${id}: ${quote} ${"Detailed product workflow evidence. ".repeat(30)}`],
       })),
       { sql: "INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key,status) VALUES('original-finding','family','family-run','original',?,'Original','https://example.com/original',?,85,'Saved summary','Useful','Saved angle',?,'Attributed',?,'shared-scaffold','dismissed')", params: [seed.id, now - 1000, quote, now] },
+      { sql: "INSERT INTO research_drafts(id,team_id,run_id,finding_id,content,status,revision,slack_channel_id,slack_thread_ts,created_at,updated_at) VALUES('family-existing-review','family','family-run','original-finding','{\"targets\":[]}','pending',3,'CEXISTING','123.456',?,?)", params: [now, now] },
     ] });
     const previousKey = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "test-family-key";
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
       const request = JSON.parse(String(init?.body));
-      const value = request.text.format.schema.properties.itemIds
-        ? { itemIds: ["second"] }
-        : { findings: [{ itemId: "second", score: 90, summary: "New coverage", whyItMatters: "Useful", contentAngle: "Same launch", evidence: quote, limitations: "Attributed", familyKey: "shared-scaffold" }] };
-      return Response.json({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }] });
+      const input = JSON.parse(request.input);
+      const value = request.text.format.schema.properties.assessments
+        ? { itemIds: ["second", "third"] }
+        : { findings: input.items.map((item: { id: string }) => ({ itemId: item.id, score: 90, summary: "New coverage", whyItMatters: "Useful", contentAngle: "Same launch", evidence: quote, limitations: "Attributed", familyKey: "shared-scaffold" })) };
+      return Response.json({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
     });
     try {
       expect(await processResearchJob({ operation: "rank", runId: "family-run" })).toEqual({ ok: true, pending: false });
@@ -739,7 +793,13 @@ describe("research persistence and team isolation", () => {
         .toEqual([{ id: "original-finding", item_id: "original", status: "dismissed", score: 85, summary: "Saved summary" }]);
       const run = (await getResearchSnapshot("family")).runs[0];
       expect(run.status).toBe("completed");
-      expect(run.diagnostics).toMatchObject({ evidenceCount: 1, rejectedStories: [{ title: "second", score: 90, reason: expect.stringContaining("already has a saved finding") }] });
+      expect(run.diagnostics).toMatchObject({ evidenceCount: 2, rejectedStories: expect.arrayContaining([{ title: "second", score: 90, reason: expect.stringContaining("already has a saved finding") }]) });
+      const [bundle] = execute({ queries: [{ sql: "SELECT value FROM research_cache WHERE id='research-family-sources:family-run:shared-scaffold'" }] })[0].results;
+      expect(JSON.parse(bundle.value)).toEqual({ items: [{ itemId: "second", evidence: quote }, { itemId: "third", evidence: quote }] });
+      expect(execute({ queries: [{ sql: "SELECT content,status,revision,slack_channel_id,slack_thread_ts FROM research_drafts WHERE id='family-existing-review'" }] })[0].results)
+        .toEqual([{ content: '{"targets":[]}', status: "pending", revision: 3, slack_channel_id: "CEXISTING", slack_thread_ts: "123.456" }]);
+      await processResearchJob({ operation: "rank", runId: "family-run" });
+      expect(execute({ queries: [{ sql: "SELECT value FROM research_cache WHERE id='research-family-sources:family-run:shared-scaffold'" }] })[0].results).toEqual([bundle]);
     } finally {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
@@ -805,6 +865,7 @@ describe("research persistence and team isolation", () => {
         if (String(url).startsWith("https://api.openai.com/")) {
           const request = JSON.parse(String(init?.body));
           const input = JSON.parse(request.input);
+      if (input.proposed) return editorialReviewFixture();
           const extraction = String(request.instructions).includes(
             "Act as a strict",
           );
@@ -831,7 +892,7 @@ describe("research persistence and team isolation", () => {
           } else {
             const older = input.items.find((item: { id: string }) => item.id === "rank-item-80");
             if (older) expect(older).toMatchObject({
-              publicText: content.slice(0, 2500), contentProvenance: "public_feed",
+              publicText: content, contentProvenance: "public_feed",
             });
             screenedIds.push(
               ...input.items.map((item: { id: string }) => item.id),
@@ -848,7 +909,7 @@ describe("research persistence and team isolation", () => {
             status: "completed",
             output: [
               {
-                content: [{ type: "output_text", text: JSON.stringify(value) }],
+                content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }],
               },
             ],
             usage: { input_tokens: 20, output_tokens: 10 },
@@ -857,7 +918,7 @@ describe("research persistence and team isolation", () => {
         throw new Error(`Retained public feed evidence should not require an article fetch: ${String(url)}`);
       });
     try {
-      await processResearchJob({ operation: "rank", runId: "ranking-run" });
+      await finishResearchRankJob("ranking-run");
       expect(screenedIds).toHaveLength(81);
       expect(screenedIds).toContain("rank-item-80");
       expect(
@@ -877,7 +938,7 @@ describe("research persistence and team isolation", () => {
             },
           ],
         })[0].results,
-      ).toEqual([{ input_tokens: 60 }]);
+      ).toEqual([{ input_tokens: 20 * (Math.ceil(81 / RESEARCH_SCREEN_BATCH_SIZE) + 1) }]);
       execute({
         queries: [
           {
@@ -888,8 +949,8 @@ describe("research persistence and team isolation", () => {
           },
         ],
       });
-      await processResearchJob({ operation: "rank", runId: "ranking-run" });
-      expect(fetcher).toHaveBeenCalledTimes(3);
+      await finishResearchRankJob("ranking-run");
+      expect(fetcher).toHaveBeenCalledTimes(Math.ceil(81 / RESEARCH_SCREEN_BATCH_SIZE) + 1);
       expect(
         execute({
           queries: [
@@ -898,7 +959,7 @@ describe("research persistence and team isolation", () => {
             },
           ],
         })[0].results,
-      ).toEqual([{ cache_hits: 3 }]);
+      ).toEqual([{ cache_hits: Math.ceil(81 / RESEARCH_SCREEN_BATCH_SIZE) + 1 }]);
     } finally {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
@@ -934,11 +995,12 @@ describe("research persistence and team isolation", () => {
       }
       const request = JSON.parse(String(init?.body));
       const input = JSON.parse(request.input);
+      if (input.proposed) return editorialReviewFixture();
       let value: unknown;
-      if (request.text.format.schema.properties.itemIds) {
+      if (request.text.format.schema.properties.assessments) {
         screened++;
-        expect(input.items).toHaveLength(25);
-        value = { itemIds: items.map(item => item.id) };
+        expect(input.items.length).toBeLessThanOrEqual(RESEARCH_SCREEN_BATCH_SIZE);
+        value = { itemIds: input.items.map((item: { id: string }) => item.id) };
       } else {
         batchSizes.push(input.items.length);
         value = { findings: input.items.map((item: { id: string }) => {
@@ -953,7 +1015,7 @@ describe("research persistence and team isolation", () => {
           };
         }) };
       }
-      return Response.json({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }] });
+      return Response.json({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
     });
     try {
       expect(await processResearchJob({ operation: "rank", runId: "resume-run" })).toEqual({ ok: true, pending: true });
@@ -968,7 +1030,7 @@ describe("research persistence and team isolation", () => {
         params: [seed.id, `${new URL(seed.url).origin}/new-arrival`, now - 1000, now, content(0)],
       }] });
       expect(await processResearchJob({ operation: "rank", runId: "resume-run" })).toEqual({ ok: true, pending: false });
-      expect(screened).toBe(1);
+      expect(screened).toBe(Math.ceil(25 / RESEARCH_SCREEN_BATCH_SIZE));
       expect(batchSizes).toEqual([6, 6, 6, 6, 1]);
       expect(reviewedIds).toEqual(items.map(item => item.id));
       const [finished] = execute({ queries: [{ sql: "SELECT status,completed_at,findings_count,diagnostics FROM research_runs WHERE id='resume-run'" }] })[0].results;
@@ -985,6 +1047,253 @@ describe("research persistence and team isolation", () => {
       else process.env.OPENAI_API_KEY = previousKey;
     }
   }, 20_000);
+  it("continues every original article page in bounded durable chunks and preserves first-seen metadata", async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
+    const now = Date.now();
+    const origin = new URL(seed.url).origin;
+    const articles = Array.from({ length: 13 }, (_, index) => ({
+      url: `${origin}/chunked-article-${index}`,
+      at: Math.floor((now - (index === 12 ? 180 * 86400000 : 1000)) / 1000) * 1000,
+    }));
+    const content = "A concrete original onboarding workflow describes the first useful action and the optional setup tradeoff. ".repeat(20);
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('article-chunks','Article chunks','article-chunks',0,0)" },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES('article-chunks-run','article-chunks','collect','collecting',1,0,?,'Product teams',1,?)", params: [now, JSON.stringify([seed.id])] },
+    ] });
+    let feedFetches = 0;
+    const fetched: string[] = [];
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      const url = String(input);
+      if (url === seed.feedUrl) {
+        feedFetches++;
+        return new Response(`<rss><channel>${articles.map((article, index) => `<item><title>Original workflow ${index}</title><link>${article.url}</link><pubDate>${new Date(article.at).toUTCString()}</pubDate><description>A short original workflow teaser.</description></item>`).join("")}</channel></rss>`);
+      }
+      const article = articles.find(article => article.url === url);
+      if (!article) throw new Error(`Unexpected fetch ${url}`);
+      fetched.push(url);
+      return new Response(`<html><article><h1>Original workflow details</h1><time datetime="${new Date(article.at).toISOString()}"></time><p>${content}</p></article></html>`);
+    });
+    try {
+      expect(await processResearchJob({ operation: "collect", runId: "article-chunks-run", sourceId: seed.id })).toEqual({ collected: 13, pending: true });
+      expect(fetched).toHaveLength(12);
+      const [initial, checkpoint] = execute({ queries: [
+        { sql: "SELECT collected_at FROM research_items WHERE team_id='article-chunks' AND canonical_url=?", params: [articles[12].url] },
+        { sql: "SELECT value FROM research_cache WHERE id=?", params: [`collection-progress:article-chunks-run:${seed.id}`] },
+      ] }).map((result: { results: unknown[] }) => result.results[0]);
+      expect(JSON.parse(checkpoint.value)).toMatchObject({ articleOffset: 12, articles: articles.map(article => ({ url: article.url })) });
+      expect(checkpoint.value).not.toContain(content);
+      expect(await processResearchJob({ operation: "collect", runId: "article-chunks-run", sourceId: seed.id })).toEqual({ collected: 13, error: null });
+      expect(fetched).toEqual(articles.map(article => article.url));
+      expect(feedFetches).toBe(1);
+      const [last] = execute({ queries: [{ sql: "SELECT published_at,collected_at,content FROM research_items WHERE team_id='article-chunks' AND canonical_url=?", params: [articles[12].url] }] })[0].results;
+      expect(last).toMatchObject({ published_at: articles[12].at, collected_at: initial.collected_at });
+      expect(last.content).toContain(content.trim());
+    } finally {
+      fetcher.mockRestore();
+    }
+  }, 30_000);
+
+  it("continues all public video transcripts beyond six without recollecting the source", async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "youtube")!;
+    const now = Date.now();
+    const videos = Array.from({ length: 8 }, (_, index) => `vid0000000${index}`);
+    const transcript = "A practitioner explains a specific product onboarding decision, implementation and limits. ".repeat(20);
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('all-transcripts','All transcripts','all-transcripts',0,0)" },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES('all-transcripts-run','all-transcripts','collect','collecting',1,0,?,'Product teams',1,?)", params: [now, JSON.stringify([seed.id])] },
+    ] });
+    let feedFetches = 0;
+    const watched: string[] = [];
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      const url = new URL(String(input));
+      if (url.pathname.includes("feeds/")) {
+        feedFetches++;
+        return new Response(`<feed>${videos.map(id => `<entry><title>Practitioner interview ${id}</title><link rel="alternate" href="https://www.youtube.com/watch?v=${id}"/><published>${new Date(now - 1000).toISOString()}</published></entry>`).join("")}</feed>`);
+      }
+      if (url.pathname === "/watch") {
+        watched.push(url.searchParams.get("v")!);
+        return new Response(`{"captionTracks":[{"baseUrl":"https://www.youtube.com/api/timedtext?v=${url.searchParams.get("v")}","languageCode":"en"}]}`);
+      }
+      if (url.pathname === "/api/timedtext") return Response.json({ events: [{ segs: [{ utf8: transcript }] }] });
+      throw new Error(`Unexpected network request: ${url.origin}${url.pathname}`);
+    });
+    try {
+      expect(await processResearchJob({ operation: "collect", runId: "all-transcripts-run", sourceId: seed.id })).toEqual({ collected: 8, pending: true });
+      expect(watched).toHaveLength(6);
+      expect(await processResearchJob({ operation: "collect", runId: "all-transcripts-run", sourceId: seed.id })).toEqual({ collected: 8, error: null });
+      expect(watched).toEqual(videos);
+      expect(feedFetches).toBe(1);
+      expect(execute({ queries: [{ sql: "SELECT COUNT(*) count FROM research_items WHERE team_id='all-transcripts' AND transcript_status='available'" }] })[0].results).toEqual([{ count: 8 }]);
+      const calls = fetcher.mock.calls.length;
+      expect(await processResearchJob({ operation: "collect", runId: "all-transcripts-run", sourceId: seed.id })).toEqual({ collected: 8 });
+      expect(fetcher).toHaveBeenCalledTimes(calls);
+    } finally {
+      fetcher.mockRestore();
+    }
+  }, 30_000);
+
+  it("labels newly discovered evergreen signals without redating or resurfacing known old sources", async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
+    const now = Date.now();
+    const quote = "This older original essay explains a practical onboarding choice and its tradeoff.";
+    const rows = [
+      { id: "lane-fresh", publishedAt: now - 1000, discoveredAt: now - 500 },
+      { id: "lane-new-evergreen", publishedAt: now - 180 * 86400000, discoveredAt: now - 500 },
+      { id: "lane-known-old", publishedAt: now - 180 * 86400000, discoveredAt: now - 2 * 86400000 },
+      { id: "lane-undated", publishedAt: null, discoveredAt: now - 500 },
+      { id: "lane-future", publishedAt: now + 1000, discoveredAt: now - 500 },
+    ];
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('signal-lanes','Signal lanes','signal-lanes',0,0)" },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES('signal-lanes-run','signal-lanes','scan','collecting',1,0,?,'Product managers',1,?)", params: [now, JSON.stringify([seed.id])] },
+      { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES('signal-lanes-step','signal-lanes-run',?,'completed')", params: [seed.id] },
+      ...rows.map(row => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content) VALUES(?,'signal-lanes',?,?,?,?,?,?,?)",
+        params: [row.id, seed.id, `${new URL(seed.url).origin}/${row.id}`, row.id, quote, row.publishedAt, row.discoveredAt, `${quote} ${"Detailed original reasoning. ".repeat(25)}`],
+      })),
+    ] });
+    const priorKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-signal-lanes";
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const input = JSON.parse(request.input);
+      expect(input.items.map((item: { id: string }) => item.id)).toEqual(["lane-fresh", "lane-new-evergreen"]);
+      expect(input.items[0]).toMatchObject({ signalKind: "fresh", publishedAt: now - 1000, discoveredAt: now - 500 });
+      expect(input.items[1]).toMatchObject({ signalKind: "evergreen_newly_discovered", publishedAt: now - 180 * 86400000, discoveredAt: now - 500 });
+      const value = request.text.format.schema.properties.assessments
+        ? { itemIds: input.items.map((item: { id: string }) => item.id) }
+        : { findings: input.items.map((item: { id: string }) => ({ itemId: item.id, score: 85, summary: "A bounded original decision", whyItMatters: "A practical onboarding choice", contentAngle: "Evaluate the tradeoff", evidence: quote, limitations: "Historical practitioner essay, not a new release", familyKey: item.id })) };
+      return Response.json({ status: "completed", usage: { input_tokens: 10, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
+    });
+    try {
+      expect(await processResearchJob({ operation: "rank", runId: "signal-lanes-run" })).toEqual({ ok: true, pending: false });
+      const [run, evergreen] = execute({ queries: [
+        { sql: "SELECT diagnostics FROM research_runs WHERE id='signal-lanes-run'" },
+        { sql: "SELECT published_at FROM research_findings WHERE team_id='signal-lanes' AND item_id='lane-new-evergreen'" },
+      ] }).map((result: { results: unknown[] }) => result.results[0]);
+      expect(JSON.parse(run.diagnostics)).toMatchObject({ eligibleCount: 2, freshCount: 1, evergreenCount: 1, undatedCount: 1, screenedCount: 2, evidenceCount: 2 });
+      expect(evergreen.published_at).toBe(now - 180 * 86400000);
+    } finally {
+      fetcher.mockRestore();
+      if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = priorKey;
+    }
+  }, 30_000);
+
+  it("screens every eligible item beyond one thousand using a frozen, resumable queue", async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
+    const now = Date.now();
+    const quote = "The final source documents a concrete onboarding decision and its tradeoff.";
+    const items = Array.from({ length: 1005 }, (_, index) => ({ id: `uncapped-item-${index}`, title: `Workflow ${index}` }));
+    const insertItem = (id: string, title: string, at: number) => ({
+      sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content) VALUES(?,'uncapped-screen',?,?,?,?,?,?,?)",
+      params: [id, seed.id, `${new URL(seed.url).origin}/${id}`, title, quote, at, now, `${quote} ${"Detailed implementation evidence. ".repeat(20)}`],
+    });
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('uncapped-screen','Uncapped','uncapped-screen',0,0)" },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES('uncapped-screen-run','uncapped-screen','scan','collecting',1,0,?,'Product managers',1,?)", params: [now, JSON.stringify([seed.id])] },
+      { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES('uncapped-screen-step','uncapped-screen-run',?,'completed')", params: [seed.id] },
+      ...items.map((item, index) => insertItem(item.id, item.title, now - index * 1000)),
+    ] });
+    const priorKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-uncapped-screen-key";
+    const screened: string[] = [];
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const input = JSON.parse(request.input);
+      if (input.proposed) return editorialReviewFixture();
+      let value: unknown;
+      if (request.text.format.schema.properties.assessments) {
+        screened.push(...input.items.map((item: { id: string }) => item.id));
+        value = { itemIds: input.items.filter((item: { id: string }) => item.id === items.at(-1)!.id).map((item: { id: string }) => item.id) };
+      } else {
+        expect(input.items.map((item: { id: string }) => item.id)).toEqual([items.at(-1)!.id]);
+        value = { findings: [{ itemId: items.at(-1)!.id, score: 85, summary: "A concrete onboarding decision", whyItMatters: "A practical product tradeoff", contentAngle: "Audit the first useful action", evidence: quote, limitations: "First-party account", familyKey: "uncapped-final-workflow" }] };
+      }
+      return Response.json({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
+    });
+    try {
+      let result = await processResearchJob({ operation: "rank", runId: "uncapped-screen-run" });
+      expect(result).toMatchObject({ pending: true });
+      const firstCount = screened.length;
+      execute({ queries: [insertItem("uncapped-new-arrival", "New arrival after snapshot", now - 1)] });
+      let continuations = 0;
+      while ("pending" in result && result.pending) {
+        result = await processResearchJob({ operation: "rank", runId: "uncapped-screen-run" });
+        expect(++continuations).toBeLessThan(30);
+      }
+      expect(firstCount).toBeLessThan(items.length);
+      expect(screened).toEqual(items.map(item => item.id));
+      expect(new Set(screened).size).toBe(1005);
+      const [stored] = execute({ queries: [{ sql: "SELECT status,diagnostics,findings_count,error FROM research_runs WHERE id='uncapped-screen-run'" }] })[0].results;
+      expect(stored).toMatchObject({ status: "completed", findings_count: 1, error: null });
+      expect(JSON.parse(stored.diagnostics)).toMatchObject({ eligibleCount: 1005, screenedCount: 1005, shortlistedCount: 1, evidenceCount: 1 });
+      const calls = fetcher.mock.calls.length;
+      await processResearchJob({ operation: "rank", runId: "uncapped-screen-run" });
+      expect(fetcher).toHaveBeenCalledTimes(calls);
+    } finally {
+      fetcher.mockRestore();
+      if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = priorKey;
+    }
+  }, 60_000);
+
+  it("archives incomplete or duplicate evidence responses without advancing or reusing invalid paid output", async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
+    const now = Date.now();
+    const ids = ["coverage-a", "coverage-b"];
+    const quote = "The original workflow removes optional setup before the first useful action.";
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('coverage-boundary','Coverage boundary','coverage-boundary',0,0)" },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES('coverage-boundary-run','coverage-boundary','scan','collecting',1,0,?,'Product managers',1,?)", params: [now, JSON.stringify([seed.id])] },
+      { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES('coverage-boundary-step','coverage-boundary-run',?,'completed')", params: [seed.id] },
+      ...ids.map((id, index) => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content) VALUES(?,'coverage-boundary',?,?,?,?,?,?,?)",
+        params: [id, seed.id, `${new URL(seed.url).origin}/${id}`, id, quote, now - (index + 1) * 1000, now, `${quote} ${"Concrete workflow details and scope. ".repeat(25)}`],
+      })),
+    ] });
+    const priorKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-coverage-boundary";
+    let evidenceCalls = 0;
+    let screenCalls = 0;
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const input = JSON.parse(request.input);
+      let value: unknown;
+      if (request.text.format.schema.properties.assessments) {
+        screenCalls++;
+        value = screeningFixture({ itemIds: ids }, input.items);
+      } else {
+        evidenceCalls++;
+        const findings = ids.map(id => ({ itemId: id, score: 85, summary: "A concrete onboarding decision", whyItMatters: "First useful action", contentAngle: "Audit optional setup", evidence: quote, limitations: "One practitioner workflow", familyKey: id }));
+        value = { findings: evidenceCalls === 1 ? findings.slice(0, 1) : evidenceCalls === 2 ? [findings[0], findings[0]] : findings };
+      }
+      return Response.json({ status: "completed", usage: { input_tokens: 10, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }] });
+    });
+    try {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        await expect(processResearchJob({ operation: "rank", runId: "coverage-boundary-run" })).rejects.toThrow();
+        expect(evidenceCalls).toBe(attempt);
+        const [checkpoint, cache, archives] = execute({ queries: [
+          { sql: "SELECT value FROM research_cache WHERE id='rank-progress:coverage-boundary-run'" },
+          { sql: "SELECT COUNT(*) count FROM research_cache WHERE team_id='coverage-boundary' AND id NOT LIKE 'invalid:%' AND json_type(value,'$.findings')='array'" },
+          { sql: "SELECT COUNT(*) count FROM research_cache WHERE team_id='coverage-boundary' AND id LIKE 'invalid:%'" },
+        ] }).map((result: { results: unknown[] }) => result.results[0]);
+        expect(JSON.parse(checkpoint.value)).toMatchObject({ selectedIds: ids, nextOffset: 0, diagnostics: { evidenceCount: 0 } });
+        expect(cache.count).toBe(0);
+        expect(archives.count).toBe(attempt);
+      }
+      expect(await processResearchJob({ operation: "rank", runId: "coverage-boundary-run" })).toEqual({ ok: true, pending: false });
+      expect(screenCalls).toBe(1);
+      expect(evidenceCalls).toBe(3);
+      expect(execute({ queries: [{ sql: "SELECT findings_count FROM research_runs WHERE id='coverage-boundary-run'" }] })[0].results).toEqual([{ findings_count: 2 }]);
+    } finally {
+      fetcher.mockRestore();
+      if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = priorKey;
+    }
+  }, 30_000);
+
   it("saves a fixed local daily time and claims concurrent minute ticks without consuming a busy occurrence", async () => {
     execute({ queries: [
       { sql: "UPDATE research_settings SET daily_enabled=0" },
@@ -1242,7 +1551,7 @@ describe("research persistence and team isolation", () => {
             seed.id,
             `https://example.com/excluded-${index}`,
             at,
-            now,
+            index === 0 ? now - 2 * 86400000 : now,
           ],
         })),
         {
@@ -1277,6 +1586,73 @@ describe("research persistence and team isolation", () => {
       fetcher.mockRestore();
     }
   }, 20_000);
+  it("continues beyond twenty draft candidates without regenerating existing reviews or retrying declined stories", async () => {
+    const now = Date.now();
+    const quote = "Customer interviews exposed a specific setup step that delayed the first useful action.";
+    const ids = Array.from({ length: 25 }, (_, index) => `uncapped-draft-${index}`);
+    const insertFinding = (id: string, score: number) => [
+      { sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content) VALUES(?,'uncapped-drafts','uncapped-source',?,?,?,?,?,?)", params: [`item-${id}`, `https://example.com/${id}`, id, quote, id === ids[24] ? now - 30 * 86400000 : now - 1000, now, `${quote} ${"The implementation and limits are described. ".repeat(20)}`] },
+      { sql: "INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key) VALUES(?,'uncapped-drafts','uncapped-draft-run',?,'uncapped-source',?,?,?,?, 'Specific setup friction','First useful action','Audit optional setup',?,'One practitioner example',?,?)", params: [id, `item-${id}`, id, `https://example.com/${id}`, id === ids[24] ? now - 30 * 86400000 : now - 1000, score, quote, now, `family-${id}`] },
+    ];
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('uncapped-drafts','Uncapped drafts','uncapped-drafts',0,0)" },
+      { sql: "INSERT INTO channels(id,team_id,name,platform,group_name,research_enabled,system_prompt,created_at) VALUES('uncapped-li','uncapped-drafts','Product lessons','linkedin','custom',1,'Explain specific product decisions to product managers with original evidence',0)" },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_ids) VALUES('uncapped-draft-run','uncapped-drafts','scan','drafting',1,1,?,'Product teams',?)", params: [now, JSON.stringify(["uncapped-source"])] },
+      ...ids.flatMap((id, index) => insertFinding(id, 99 - index)),
+      { sql: "INSERT INTO research_drafts(id,team_id,run_id,finding_id,content,status,revision,created_at,updated_at) VALUES('preserved-review','uncapped-drafts','uncapped-draft-run',?,?,'pending',3,?,?)", params: [ids[0], JSON.stringify({ preserved: "Existing approved copy and review state" }), now, now] },
+    ] });
+    const priorKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-uncapped-draft-key";
+    const calls: string[] = [];
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const input = JSON.parse(request.input);
+      if (input.proposed) return editorialReviewFixture();
+      if (input.source.title === ids[24]) expect(input.source).toMatchObject({ signalKind: "evergreen_newly_discovered", publishedAt: new Date(now - 30 * 86400000).toISOString() });
+      calls.push(input.source.title);
+      const value = input.source.title === ids[1]
+        ? { ready: false, reason: "The source is too thin for this audience", targets: [] }
+        : { ready: true, editorial: editorialFixture(input.source.content), reason: "A practical supported decision", targets: [{ channelId: "uncapped-li", platform: "linkedin", content: `Audit optional setup before requiring it. Source: ${input.source.url}`, thread: [], supportQuote: input.source.title === ids[2] ? "An unsupported quote that does not exist in the article." : quote, redditTitle: null, subreddit: null }] };
+      return Response.json({ status: "completed", usage: { input_tokens: 10, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
+    });
+    try {
+      let result = await processResearchDraftJob("uncapped-draft-run");
+      expect(result).toEqual({ drafted: 1, pending: true });
+      execute({ queries: insertFinding("uncapped-arrival-after-snapshot", 100) });
+      let continuations = 0;
+      while ("pending" in result && result.pending) {
+        result = await processResearchDraftJob("uncapped-draft-run");
+        expect(++continuations).toBeLessThan(40);
+      }
+      expect(result).toEqual({ drafted: 23 });
+      expect(calls).not.toContain(ids[0]);
+      expect(calls).not.toContain("uncapped-arrival-after-snapshot");
+      expect(calls.filter(id => id === ids[1])).toHaveLength(1);
+      expect(calls.filter(id => id === ids[2])).toHaveLength(2);
+      expect(new Set(calls)).toEqual(new Set(ids.slice(1)));
+      const [stored, preserved, counts] = execute({ queries: [
+        { sql: "SELECT status,diagnostics FROM research_runs WHERE id='uncapped-draft-run'" },
+        { sql: "SELECT content,status,revision FROM research_drafts WHERE id='preserved-review'" },
+        { sql: "SELECT COUNT(*) count FROM research_drafts WHERE team_id='uncapped-drafts'" },
+      ] }).map((result: { results: unknown[] }) => result.results[0]);
+      expect(stored.status).toBe("completed");
+      expect(JSON.parse(stored.diagnostics)).toMatchObject({ draftCandidatesCount: 25, draftedCount: 23 });
+      expect(JSON.parse(stored.diagnostics).rejectedStories).toEqual(expect.arrayContaining([
+        expect.objectContaining({ title: ids[1], reason: expect.stringContaining("too thin") }),
+        expect.objectContaining({ title: ids[2], reason: expect.stringContaining("validation failed") }),
+      ]));
+      expect(preserved).toEqual({ content: JSON.stringify({ preserved: "Existing approved copy and review state" }), status: "pending", revision: 3 });
+      expect(counts.count).toBe(23);
+      const totalCalls = fetcher.mock.calls.length;
+      expect(await processResearchDraftJob("uncapped-draft-run")).toEqual({ drafted: 23 });
+      expect(fetcher).toHaveBeenCalledTimes(totalCalls);
+    } finally {
+      fetcher.mockRestore();
+      if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = priorKey;
+    }
+  }, 60_000);
+
   it("chooses two strong24hour profile fits even after the top finding is declined, with cached edits and no auto-publishing", async () => {
     const now = Date.now();
     const quote = "Talk to customers before changing the onboarding flow.";
@@ -1342,7 +1718,7 @@ describe("research persistence and team isolation", () => {
           params: [now - 1],
         },
         {
-          sql: "UPDATE research_findings SET run_id='editorial-manual-run' WHERE id='ed-finding-previous-manual'",
+          sql: "UPDATE research_findings SET run_id='editorial-manual-run' WHERE id IN ('ed-finding-previous-manual','ed-finding-old')",
         },
       ],
     });
@@ -1354,6 +1730,7 @@ describe("research persistence and team isolation", () => {
         expect(String(url)).toBe("https://api.openai.com/v1/responses");
         const data = JSON.parse(String(init?.body));
         const input = JSON.parse(data.input);
+      if (input.proposed) return editorialReviewFixture();
         expect(["best", "runner", "third"]).toContain(input.source.title);
         return Response.json({
           status: "completed",
@@ -1371,7 +1748,7 @@ describe("research persistence and team isolation", () => {
                           targets: [],
                         }
                       : {
-                          ready: true,
+                          ready: true, editorial: editorialFixture(input.source.content),
                           reason: "Useful first hand evidence",
                           targets: [
                             {
@@ -1394,13 +1771,13 @@ describe("research persistence and team isolation", () => {
         });
       });
     try {
-      expect(await processResearchDraftJob("editorial-run")).toEqual({
+      expect(await finishResearchDraftJob("editorial-run")).toEqual({
         drafted: 2,
       });
-      expect(await processResearchDraftJob("editorial-run")).toEqual({
+      expect(await finishResearchDraftJob("editorial-run")).toEqual({
         drafted: 2,
       });
-      expect(fetcher).toHaveBeenCalledTimes(3);
+      expect(fetcher).toHaveBeenCalledTimes(5);
       const snapshot = await getResearchSnapshot("editorial");
       expect(snapshot.drafts).toHaveLength(2);
       expect(snapshot.drafts[0].content.targets[0].channelName).toBe(
@@ -1431,8 +1808,8 @@ describe("research persistence and team isolation", () => {
       ]);
       expect(snapshot.runs[0]).toMatchObject({
         status: "completed",
-        inputTokens: 90,
-        outputTokens: 120,
+        inputTokens: 110,
+        outputTokens: 130,
         diagnostics: {
           eligibleCount: 3, screenedCount: 3, shortlistedCount: 3, evidenceCount: 3,
           draftCandidatesCount: 3, draftedCount: 2,
@@ -1462,7 +1839,7 @@ describe("research persistence and team isolation", () => {
             "Shorten it",
           )
         ).inputTokens,
-      ).toBe(30);
+      ).toBe(40);
       expect(
         (
           await rewriteResearchDraftContent(
@@ -1472,18 +1849,18 @@ describe("research persistence and team isolation", () => {
           )
         ).inputTokens,
       ).toBe(0);
-      expect(fetcher).toHaveBeenCalledTimes(4);
+      expect(fetcher).toHaveBeenCalledTimes(7);
       // Replaying rank after a manual30-day scan must never generate approval drafts.
       execute({
         queries: [
           { sql: "UPDATE research_runs SET days=30 WHERE id='editorial-run'" },
         ],
       });
-      expect(await processResearchDraftJob("editorial-run")).toEqual({
+      expect(await finishResearchDraftJob("editorial-run")).toEqual({
         drafted: 0,
         skipped: true,
       });
-      expect(fetcher).toHaveBeenCalledTimes(4);
+      expect(fetcher).toHaveBeenCalledTimes(7);
     } finally {
       fetcher.mockRestore();
       if (priorKey === undefined) delete process.env.OPENAI_API_KEY;
@@ -1512,8 +1889,9 @@ describe("research persistence and team isolation", () => {
       .mockImplementation(async (url, init) => {
         expect(String(url)).toBe("https://api.openai.com/v1/responses");
         const request = JSON.parse(String(init?.body));
-        expect(request.model).toBe("gpt-6-luna");
+        expect(request.model).toBe(RESEARCH_WRITING_MODEL);
         const input = JSON.parse(request.input);
+      if (input.proposed) return editorialReviewFixture();
         expect(input.source.content).toBe(SLACK_TEST_EVIDENCE);
         expect(input.destinations).toEqual([
           {
@@ -1533,7 +1911,7 @@ describe("research persistence and team isolation", () => {
                 {
                   type: "output_text",
                   text: JSON.stringify({
-                    ready: true,
+                    ready: true, editorial: editorialFixture(input.source.content),
                     reason: "Internal setup sample",
                     targets: [
                       {
@@ -1564,8 +1942,8 @@ describe("research persistence and team isolation", () => {
       expect(result.content.targets[0].content).toContain(
         "Inspect the latest preview",
       );
-      expect(result.inputTokens).toBe(60);
-      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(result.inputTokens).toBe(70);
+      expect(fetcher).toHaveBeenCalledTimes(2);
       const snapshot = await getResearchSnapshot("test-rewrite");
       expect(snapshot.drafts[0].isTest).toBe(true);
       expect(snapshot.findings).toHaveLength(0);
@@ -1573,7 +1951,7 @@ describe("research persistence and team isolation", () => {
       expect(
         (await getResearchProfiles("test-rewrite")).profiles[0],
       ).toMatchObject({ enabled: false, systemPrompt: "" });
-      expect(await processResearchDraftJob(snapshot.runs[0].id)).toEqual({
+      expect(await finishResearchDraftJob(snapshot.runs[0].id)).toEqual({
         drafted: 0,
         skipped: true,
       });

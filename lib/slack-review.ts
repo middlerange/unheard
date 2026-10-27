@@ -240,7 +240,7 @@ export async function hashPostSnapshot(
   );
 }
 export function buildSlackReviewPacket(
-  draft: Pick<Draft, "id" | "revision"> & { is_test?: boolean },
+  draft: Pick<Draft, "id" | "revision"> & { is_test?: boolean; content?: string },
   snapshot: ReturnType<typeof buildApprovalSnapshot>,
   finding: {
     title: string;
@@ -248,6 +248,7 @@ export function buildSlackReviewPacket(
     why_it_matters: string;
     limitations: string;
     evidence: string;
+    published_at?: number;
   },
   snapshotHash: string,
   publication: Array<{
@@ -296,6 +297,27 @@ export function buildSlackReviewPacket(
       },
     },
   ];
+  const writing = draft.content ? JSON.parse(draft.content) as ResearchDraftContent : null;
+  if (writing?.editorial) {
+    const editorial = writing.editorial;
+    blocks.push({
+      type: "section",
+      text: {
+        type: "plain_text",
+        text: `Writing style: ${editorial.writingStyle.replace(/^b2b-/, "").replaceAll("-", " ")}\nAdded insight: ${editorial.alpha}\nReader decision: ${editorial.readerDecision}`,
+      },
+    });
+  }
+  const publishedAt = writing?.sourceContext?.publishedAt || (finding.published_at ? new Date(finding.published_at).toISOString() : null);
+  if (publishedAt) {
+    const lane = writing?.sourceContext?.signalKind === "evergreen_newly_discovered"
+      ? "Newly discovered older source; not a new announcement"
+      : writing?.sourceContext?.signalKind === "fresh" ? "Published in this scan's window" : "Original source date";
+    blocks.push({
+      type: "context",
+      elements: [{ type: "plain_text", text: `Original publication: ${publishedAt}\nDiscovery: ${lane}${writing?.sourceContext?.discoveredAt ? ` · first collected ${writing.sourceContext.discoveredAt}` : ""}` }],
+    });
+  }
   const alreadyPublished = new Map(
     publication
       .filter((target) => isPublicationComplete(target))

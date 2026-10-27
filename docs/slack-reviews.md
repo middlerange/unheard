@@ -6,8 +6,12 @@ ranking, evidence checks and draft generation run in Cloudflare Workflows, using
 collection alone remains free of model calls. The manual 30-day scan remains
 available for broader discovery.
 
-Daily runs draft at most two findings scoring at least 80, trying at most six
-strong candidates to find suitable profile matches. No qualifying finding
+Daily runs review every fresh, nonduplicate finding scoring at least 70 for a
+worthwhile post; 80 remains a priority band. There is no daily draft or review
+count quota. Durable steps process small batches and resume until all candidates
+are assessed, retaining the reasons for declined or invalid drafts. Existing
+drafts and their review states are preserved, and review jobs are idempotent per
+draft revision. No qualifying finding
 means no forced post. Each connected publishing profile opts in separately and has its own system
 prompt for audience, topic selection, voice and writing rules. The model chooses
 only profiles for which the finding fits. Drafts include source attribution and

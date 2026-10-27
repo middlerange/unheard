@@ -46,13 +46,13 @@ describe("fresh evidence before screening", () => {
     expect(await hydrateFreshResearchEvidence(entries, source, begin, end)).toEqual(entries);
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
-  it("bounds body fetches and retains every item even beyond the hydration budget", async () => {
+  it("hydrates every eligible feed entry beyond the former twenty-four-item quota", async () => {
     const fetcher = vi.fn(async () => new Response(`<main>${"Body evidence. ".repeat(50)}</main>`));
     vi.stubGlobal("fetch", fetcher);
     const entries = Array.from({ length: 30 }, (_, index) => item({ url: `https://example.com/study-${index}` }));
     const results = await hydrateFreshResearchEvidence(entries, source, begin, end);
-    expect(fetcher).toHaveBeenCalledTimes(24);
+    expect(fetcher).toHaveBeenCalledTimes(30);
     expect(results).toHaveLength(30);
-    expect(results.filter(row => row.content)).toHaveLength(24);
+    expect(results.filter(row => row.content)).toHaveLength(30);
   });
 });

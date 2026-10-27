@@ -107,7 +107,7 @@ Open `/research` to collect practitioner articles, original research, and select
 YouTube channels, scan the last 30 days, and save useful findings as ideas. The
 catalog preserves the original 43 sources and adds 22 curated entries; 25 are
 enabled by default, with competitor blogs and changelogs disabled. Daily scans
-review the preceding 24 hours and draft up to two strong matches using each
+review fresh and newly discovered source material and draft every worthwhile match using each
 opted-in publishing profile's own audience and writing instructions. Configure
 publishing profiles in Settings → Research profiles, then click **Connect to Slack**
 in Settings → Slack and choose a review channel and reviewers. Set

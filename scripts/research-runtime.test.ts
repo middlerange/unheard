@@ -32,6 +32,21 @@ describe('durable research execution', () => {
     expect(invoke.mock.calls.map(([payload]) => payload.operation)).toEqual(['plan', 'collect', 'fail']);
   });
 
+  it('continues transcript collection before ranking instead of dropping videos beyond the first batch', async () => {
+    let collectionCalls = 0;
+    const operations: string[] = [];
+    const invoke = vi.fn(async (payload: { operation: string }) => {
+      operations.push(payload.operation);
+      if (payload.operation === 'plan') return { sourceIds: ['public-video-source'] };
+      if (payload.operation === 'collect') return { collected: 14, pending: ++collectionCalls < 3 };
+      return { pending: false };
+    });
+    const doStep = vi.fn(async (_name: string, _config: unknown, work: () => Promise<unknown>) => work());
+    await runResearchWorkflow('video-run', { do: doStep }, invoke);
+    expect(operations).toEqual(['plan', 'collect', 'collect', 'collect', 'rank', 'drafts']);
+    expect(doStep.mock.calls.map(([name]) => name)).toContain('Collect public-video-source batch 3');
+  });
+
   it('bounds failure dispatch before validation and preserves the original exception', async () => {
     const original = new Error(`Database unavailable: ${'x'.repeat(6000)}`);
     const invoke = vi.fn(async (payload: { operation: string; error?: string }) => {
@@ -94,6 +109,21 @@ describe('durable research execution', () => {
     await expect(runResearchWorkflow('large-run', { do: doStep }, invoke)).rejects.toThrow('Model response interrupted');
     expect(invoke.mock.calls.map(([payload]) => payload.operation)).toEqual(['plan', 'rank', 'rank', 'fail']);
     expect(doStep.mock.calls.find(([name]) => name === 'Rank findings batch 2')?.[1]).toMatchObject({ retries: { limit: 0 } });
+  });
+
+  it('continues all drafting batches without a total draft quota or paid retries', async () => {
+    let draftCalls = 0;
+    const invoke = vi.fn(async (payload: { operation: string }) => {
+      if (payload.operation === 'plan') return { sourceIds: [] };
+      if (payload.operation === 'rank') return { pending: false };
+      draftCalls++;
+      return { drafted: draftCalls * 3, pending: draftCalls < 9 };
+    });
+    const doStep = vi.fn(async (_name: string, _config: unknown, work: () => Promise<unknown>) => work());
+    expect(await runResearchWorkflow('uncapped-run', { do: doStep }, invoke)).toEqual({ drafted: 27, pending: false });
+    expect(draftCalls).toBe(9);
+    expect(doStep.mock.calls.map(([name]) => name)).toContain('Draft daily posts batch 9');
+    for (const [, config] of doStep.mock.calls.slice(1)) expect(config).toMatchObject({ retries: { limit: 0 } });
   });
 
   it('signs internal dispatch and surfaces a failed handler response', async () => {

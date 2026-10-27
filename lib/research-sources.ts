@@ -1259,5 +1259,64 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     ],
     "maxDiscoveryLinks": 12,
     "notes": "Public guide hub verified 26 October 2026: six dated readable chapters, including source-grounded research synthesis, contradictory evidence and study-age/sample checks behind selected practitioner advice. These are method recommendations and implementation guidance, not proof of promoted-tool effectiveness. Original September publication dates govern freshness; later revision text may differ from what was present at publication. Living reports linked from chapters keep their own access/date limitations."
+  },
+  {
+    "id": "jeff-gothelf-original",
+    "name": "Jeff Gothelf — product discovery and AI decision quality",
+    "url": "https://jeffgothelf.com/blog/",
+    "feedUrl": "https://jeffgothelf.com/feed/",
+    "kind": "rss",
+    "category": "practitioner",
+    "author": "Jeff Gothelf",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Original practitioner RSS verified 26 October 2026: ten dated readable essays, including current product-team decision, customer discovery and AI evaluation work. Prefer concrete outcome definitions, learning methods and inspectable product decisions. An author's interpretation or first-hand anecdote is attributed evidence, not a general causal finding. Preserve original dates; a social repost does not make an old essay fresh. Public feed access does not imply access to private newsletter editions."
+  },
+  {
+    "id": "aws-ai-development-original",
+    "name": "AWS — original AI development methods and cases",
+    "url": "https://aws.amazon.com/blogs/devops/",
+    "feedUrl": "https://aws.amazon.com/blogs/devops/feed/",
+    "backfillUrls": ["https://aws.amazon.com/blogs/devops/ai-driven-development-life-cycle/"],
+    "kind": "rss",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Official DevOps RSS verified 26 October 2026: twenty dated readable articles. Original source for the named AI-DLC method appearing in practitioner research; its July2025 publication remains historical. Select product-team decision workflows, review boundaries, evaluation and concrete delivery cases; reject unrelated infrastructure tutorials and generic vendor announcements. Attribute vendor-reported results and distinguish current released workflows from old methodology or proposals."
+  },
+  {
+    "id": "rehearsals-original-updates",
+    "name": "Rehearsals — original simulation research and releases",
+    "url": "https://www.tryrehearsals.com/updates",
+    "kind": "web",
+    "category": "research",
+    "enabled": true,
+    "priority": 2,
+    "articlePathPrefixes": ["/updates/"],
+    "notes": "Scoped first-party updates verified 26 October 2026: seven dated readable research, methodology and product notes behind public discussion of AI twins and simulation. Observed latest dated article was September16, so this is not a promise of fresh daily yield. Preserve original dates, population definitions, validation method and vendor self-report caveats. A simulated panel is not interchangeable with observed customers; commercial fidelity numbers require their exact evaluation conditions."
+  },
+  {
+    "id": "swan-original-changelog",
+    "name": "Swan — original context and agent workflow releases",
+    "url": "https://www.getswan.com/changelog",
+    "backfillUrls": ["https://www.getswan.com/changelog/the-brain"],
+    "kind": "web",
+    "category": "industry",
+    "enabled": true,
+    "priority": 2,
+    "articlePathPrefixes": ["/changelog/"],
+    "notes": "Narrow public changelog verified 26 October 2026. Original October14 Brain release precedes selected practitioner discussion of company/account context, call notes and agent workflows. Read only specific released capabilities and availability with the article's matching original JSON-LD publication date. The earlier undated WebPage graph entry must not mask its dated BlogPosting. Changelog facts do not independently validate higher conversion, pipeline impact or creator attribution; broad comparison and SEO marketing feeds remain excluded."
+  },
+  {
+    "id": "gartner-original-public-research",
+    "name": "Gartner — original public research releases",
+    "url": "https://www.gartner.com/en/newsroom",
+    "feedUrl": "https://www.gartner.com/en/newsroom/rss",
+    "backfillUrls": ["https://www.gartner.com/en/newsroom/press-releases/2025-06-25-gartner-predicts-over-40-percent-of-agentic-ai-projects-will-be-canceled-by-end-of-2027"],
+    "kind": "rss",
+    "category": "research",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Official public research release RSS verified during upstream-source repair: twenty-five dated summaries. Original dated public pages can hydrate to substantial text, including the June2025 agent-project cancellation forecast. Feed and article initially returned HTTP403 and succeeded on a later probe; access can vary and failures must remain visible. Hydrate short excerpts before screening; public press-release evidence does not imply access to gated reports or unseen methods. Keep forecasts distinct from observed outcomes, retain sample/method limitations, and preserve original dates rather than later social discussion dates. Filter unrelated enterprise IT predictions against the actual ICP."
   }
 ];

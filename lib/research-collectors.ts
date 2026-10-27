@@ -175,7 +175,7 @@ export function parseResearchFeed(
   const entries = list(
     parsed.rss?.channel?.item || parsed.feed?.entry || parsed["rdf:RDF"]?.item,
   );
-  return entries.slice(0, 60).flatMap((entry: Record<string, unknown>) => {
+  return entries.flatMap((entry: Record<string, unknown>) => {
     const link = list(entry.link).find(
       (candidate: unknown) =>
         typeof candidate === "string" ||
@@ -371,7 +371,8 @@ export function articleResearchDate(
     return !types.some(type => typeof type === "string" && /(?:^|[/#])WebPage$/i.test(type))
       && (!articleUrl || !structuredIdentity(article));
   });
-  const article = matching[0] || (unscopedArticles.length === 1 ? unscopedArticles[0] : undefined);
+  const article = matching.find(candidate => parseResearchDate(candidate.datePublished, now) !== null)
+    || (matching.length === 0 && unscopedArticles.length === 1 ? unscopedArticles[0] : undefined);
   const structuredDate = parseResearchDate(article?.datePublished, now);
   if (structuredDate !== null) return structuredDate;
   let region = articleRegion(html);
@@ -450,8 +451,7 @@ export function discoverResearchLinks(
   if (!urls.size && main !== undefined && source.articlePathPrefixes?.length) {
     readLinks(html.replace(/<(script|style|nav|footer|aside)\b[^>]*>[\s\S]*?<\/\1>/gi, " "));
   }
-  const limit = Math.min(40, Math.max(1, source.maxDiscoveryLinks ?? 24));
-  return [...urls].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([url]) => url);
+  return [...urls].sort((a, b) => b[1] - a[1]).map(([url]) => url);
 }
 export async function collectResearchSource(
   source: ResearchSourceSeed,

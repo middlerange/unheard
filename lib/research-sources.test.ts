@@ -104,4 +104,20 @@ describe('research source selection', () => {
     expect(source.notes).toContain('verify its own publication date');
   });
 
+  it('connects original upstream methods and releases while leaving undated artifacts out', () => {
+    const feeds = RESEARCH_SOURCE_SEEDS.filter(source => ['jeff-gothelf-original', 'aws-ai-development-original', 'gartner-original-public-research'].includes(source.id));
+    expect(feeds).toHaveLength(3);
+    expect(feeds.every(source => source.enabled && source.kind === 'rss' && source.feedUrl)).toBe(true);
+    for (const [id, prefix] of [['swan-original-changelog', '/changelog/'], ['rehearsals-original-updates', '/updates/']]) {
+      expect(RESEARCH_SOURCE_SEEDS.find(source => source.id === id)).toMatchObject({ enabled: true, kind: 'web', articlePathPrefixes: [prefix] });
+    }
+    expect(RESEARCH_SOURCE_SEEDS.find(source => source.id === 'gartner-original-public-research')?.notes).toContain('HTTP403');
+    for (const [id, original] of [
+      ['aws-ai-development-original', 'https://aws.amazon.com/blogs/devops/ai-driven-development-life-cycle/'],
+      ['swan-original-changelog', 'https://www.getswan.com/changelog/the-brain'],
+      ['gartner-original-public-research', 'https://www.gartner.com/en/newsroom/press-releases/2025-06-25-gartner-predicts-over-40-percent-of-agentic-ai-projects-will-be-canceled-by-end-of-2027'],
+    ]) expect(RESEARCH_SOURCE_SEEDS.find(source => source.id === id)?.backfillUrls).toContain(original);
+    expect(RESEARCH_SOURCE_SEEDS.some(source => source.enabled && /coreyhaines31|outreach2day\.com/.test(source.url))).toBe(false);
+  });
+
 });

@@ -13,6 +13,7 @@ export type ResearchSourceSeed = {
   priority: 1 | 2 | 3;
   channelId?: string;
   articlePathPrefixes?: string[];
+  backfillUrls?: string[];
   maxDiscoveryLinks?: number;
   discoveryQueries?: string[];
   discoveryProvider?: "treg" | "hackernews";
@@ -26,6 +27,8 @@ export type ResearchSource = ResearchSourceSeed & {
 };
 export type ResearchRunDiagnostics = {
   eligibleCount?: number;
+  freshCount?: number;
+  evergreenCount?: number;
   undatedCount?: number;
   unavailableVideoCount?: number;
   screenedCount?: number;
@@ -100,6 +103,13 @@ export type ResearchJob = {
 };
 
 export type ResearchDraftContent = {
+  editorial?: import("./research-writing").ResearchEditorial;
+  editorialReview?: import("./research-writing").ResearchEditorialReview;
+  sourceContext?: {
+    publishedAt?: string;
+    discoveredAt?: string;
+    signalKind?: "evergreen_newly_discovered" | "fresh";
+  };
   targets: Array<{
     channelId: string;
     channelName?: string;

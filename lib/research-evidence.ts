@@ -18,7 +18,7 @@ export async function hydrateFreshResearchEvidence(
     item.contentType === "article" && !item.content &&
     item.publishedAt !== null && item.publishedAt >= windowStart &&
     item.publishedAt <= windowEnd,
-  ).slice(0, 24);
+  );
   for (let start = 0; start < candidates.length; start += 3) {
     await Promise.all(candidates.slice(start, start + 3).map(async (item) => {
       try {
