@@ -290,6 +290,13 @@ describe("research persistence and team isolation", () => {
       closeSync(input);
     }
   }
+  let storageFault: ((queries: Array<{ sql: string; params: unknown[] }>, phase: 'before' | 'after') => void) | undefined;
+  function storageExecute(queries: Array<{ sql: string; params: unknown[] }>) {
+    storageFault?.(queries, 'before');
+    const result = execute({ queries });
+    storageFault?.(queries, 'after');
+    return result;
+  }
   class Statement {
     constructor(
       public sql: string,
@@ -299,7 +306,7 @@ describe("research persistence and team isolation", () => {
       return new Statement(this.sql, params);
     }
     async all() {
-      return execute({ queries: [this] })[0];
+      return storageExecute([this])[0];
     }
     async raw() {
       const result = await this.all();
@@ -321,7 +328,7 @@ describe("research persistence and team isolation", () => {
     });
     const binding = {
       prepare: (sql: string) => new Statement(sql),
-      batch: async (queries: Statement[]) => execute({ queries }),
+      batch: async (queries: Statement[]) => storageExecute(queries),
     };
     state.db = drizzle(binding as never, { schema });
     execute({
@@ -689,12 +696,10 @@ describe("research persistence and team isolation", () => {
       expect(input.items.map((item: { id: string }) => item.id).sort()).toEqual(items.map(item => item.id).sort());
       if ((request.text?.format.schema ?? request.output_config.format.schema).properties.findings) {
         const findingsSchema = (request.text?.format.schema ?? request.output_config.format.schema).properties.findings;
-        if (request.output_config) {
-          expect(findingsSchema.description).toContain("minItems: 2");
-          expect(findingsSchema.description).toContain("maxItems: 2");
-        } else {
-          expect(findingsSchema).toMatchObject({ minItems: 2, maxItems: 2 });
-        }
+        expect(findingsSchema.type).toBe("object");
+        expect(findingsSchema.required.sort()).toEqual(items.map(item => item.id).sort());
+        expect(Object.keys(findingsSchema.properties).sort()).toEqual(items.map(item => item.id).sort());
+        expect(findingsSchema.additionalProperties).toBe(false);
       }
       const value = (request.text?.format.schema ?? request.output_config.format.schema).properties.assessments
         ? { itemIds: items.map(item => item.id) }
@@ -774,7 +779,7 @@ describe("research persistence and team isolation", () => {
       if ((request.text?.format.schema ?? request.output_config.format.schema).properties.assessments) {
         expect(request.instructions ?? request.system).toBe(RESEARCH_SCREEN_INSTRUCTIONS);
         expect(input.items.length).toBeLessThanOrEqual(RESEARCH_SCREEN_BATCH_SIZE);
-        expect(request.output_config.format.schema.properties.assessments.description).toContain(`maxItems: ${input.items.length}`);
+        expect(request.output_config.format.schema.properties.assessments.required).toEqual(input.items.map((item: { id: string }) => item.id));
         value = { itemIds: input.items.filter((item: { id: string }) => item.id !== career.id).map((item: { id: string }) => item.id) };
       } else {
         expect(request.instructions ?? request.system).toBe(RESEARCH_EVIDENCE_INSTRUCTIONS);
@@ -1518,6 +1523,103 @@ describe("research persistence and team isolation", () => {
       else process.env.ANTHROPIC_API_KEY = priorAnthropicKey;
     }
   }, 120_000);
+
+  it.each(['committed reply lost', 'checkpoint outage'])('preserves paid screening and absolute progress through storage failure: %s', async mode => {
+    const teamId = mode === 'committed reply lost' ? 'storage-committed' : 'storage-exhausted';
+    const runId = `${teamId}-run`;
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === 'rss' && source.feedUrl)!;
+    const now = Date.now();
+    execute({ queries: [
+      { sql: 'INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)', params: [teamId, teamId, teamId] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'scan','collecting',1,0,?,'Product managers',1,?)", params: [runId, teamId, now, JSON.stringify([seed.id])] },
+      { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: [`${teamId}-step`, runId, seed.id] },
+      { sql: 'INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content) VALUES(?,?,?,?,?,?,?,?,?)', params: [`${teamId}-item`, teamId, seed.id, `${new URL(seed.url).origin}/${teamId}`, 'A general update', 'No concrete mechanism.', now - 1000, now, 'No concrete mechanism. '.repeat(30)] },
+    ] });
+    const previousKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'test-storage';
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const input = JSON.parse(request.input ?? request.messages[0].content);
+      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify(screeningFixture({ itemIds: [] }, input.items)) }] }] });
+    });
+    let cacheFailures = 0;
+    const cacheWrites: unknown[][] = [];
+    const checkpointWrites: unknown[][] = [];
+    storageFault = (queries, phase) => {
+      const cache = queries.find(query => query.sql.startsWith('insert into "research_cache"') && query.params.some(param => typeof param === 'string' && /^[a-f0-9]{64}$/.test(param)));
+      if (mode === 'committed reply lost' && phase === 'after' && cache) {
+        cacheWrites.push([...cache.params]);
+        if (cacheFailures++ === 0) throw new Error('Network connection lost.');
+      }
+      const checkpoint = queries.find(query => query.params.includes(`rank-progress:${runId}`) && query.params.some(param => typeof param === 'string' && param.includes('"screenOffset":1')));
+      if (checkpoint && phase === (mode === 'committed reply lost' ? 'after' : 'before')) {
+        expect(queries).toHaveLength(2);
+        expect(queries[1].sql.toLowerCase()).toContain('update');
+        checkpointWrites.push([...checkpoint.params]);
+        if (mode === 'checkpoint outage' || checkpointWrites.length === 1) throw new Error('D1_ERROR: Network connection lost.');
+      }
+    };
+    try {
+      if (mode === 'checkpoint outage') {
+        await expect(processResearchJob({ operation: 'rank', runId })).rejects.toThrow('Network connection lost');
+        expect(checkpointWrites).toHaveLength(3);
+        const checkpoint = execute({ queries: [{ sql: 'SELECT value FROM research_cache WHERE id=?', params: [`rank-progress:${runId}`] }] })[0].results[0];
+        expect(JSON.parse(checkpoint.value).screenOffset).toBe(0);
+        expect(execute({ queries: [{ sql: "SELECT COUNT(*) count FROM research_cache WHERE team_id=? AND json_type(value,'$.assessments')='array'", params: [teamId] }] })[0].results[0].count).toBe(1);
+        storageFault = undefined;
+      }
+      expect(await processResearchJob({ operation: 'rank', runId })).toEqual({ ok: true, pending: false });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      const [checkpoint, run, usage] = execute({ queries: [
+        { sql: 'SELECT value FROM research_cache WHERE id=?', params: [`rank-progress:${runId}`] },
+        { sql: 'SELECT diagnostics,input_tokens,output_tokens,cache_hits FROM research_runs WHERE id=?', params: [runId] },
+        { sql: 'SELECT COUNT(*) count FROM research_usage WHERE run_id=?', params: [runId] },
+      ] }).map((result: { results: unknown[] }) => result.results[0]);
+      expect(JSON.parse(checkpoint.value)).toMatchObject({ screenOffset: 1, diagnostics: { screenedCount: 1, rejectedStories: [{ title: 'A general update' }] } });
+      expect(JSON.parse(run.diagnostics).screenedCount).toBe(1);
+      expect(run).toMatchObject({ input_tokens: 20, output_tokens: 10, cache_hits: mode === 'checkpoint outage' ? 1 : 0 });
+      expect(usage.count).toBe(1);
+      expect(checkpointWrites.slice(0, mode === 'checkpoint outage' ? 3 : 2).every(params => JSON.stringify(params) === JSON.stringify(checkpointWrites[0]))).toBe(true);
+      if (mode === 'committed reply lost') {
+        expect(cacheWrites).toHaveLength(2);
+        expect(cacheWrites[1]).toEqual(cacheWrites[0]);
+      }
+    } finally {
+      storageFault = undefined;
+      fetcher.mockRestore();
+      if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousKey;
+    }
+  }, 30_000);
+
+  it('records usage exactly once when begin and finish commit before their replies are lost', async () => {
+    const context = { teamId: 'a', runId: 'storage-usage-run', stage: 'research' as const, operation: 'screen' };
+    execute({ queries: [{ sql: "INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp) VALUES(?,'a','scan','ranking',1,?,'ICP')", params: [context.runId, Date.now()] }] });
+    const insertWrites: unknown[][] = [];
+    let finishWrites = 0;
+    storageFault = (queries, phase) => {
+      if (phase !== 'after') return;
+      const insert = queries.find(query => query.sql.startsWith('insert into "research_usage"'));
+      if (insert) {
+        insertWrites.push([...insert.params]);
+        if (insertWrites.length === 1) throw new Error('Network connection lost.');
+      }
+      if (queries.length === 2 && queries.some(query => query.sql.includes('update "research_usage"'))) {
+        if (finishWrites++ === 0) throw new Error('Network connection lost.');
+      }
+    };
+    try {
+      const id = await beginResearchUsage(context, 'gpt-6-luna');
+      await finishResearchUsage(id, context, { model: 'gpt-6-luna', tier: 'default', status: 'completed', usage: { input_tokens: 123, output_tokens: 45 } });
+      expect(insertWrites).toHaveLength(2);
+      expect(insertWrites[1]).toEqual(insertWrites[0]);
+      expect(finishWrites).toBe(2);
+      expect(execute({ queries: [{ sql: 'SELECT input_tokens,output_tokens FROM research_runs WHERE id=?', params: [context.runId] }] })[0].results).toEqual([{ input_tokens: 123, output_tokens: 45 }]);
+      expect(execute({ queries: [{ sql: 'SELECT id,status,input_tokens,output_tokens FROM research_usage WHERE run_id=?', params: [context.runId] }] })[0].results).toEqual([{ id, status: 'completed', input_tokens: 123, output_tokens: 45 }]);
+    } finally {
+      storageFault = undefined;
+    }
+  });
 
   it("archives incomplete or duplicate evidence responses without advancing or reusing invalid paid output", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;

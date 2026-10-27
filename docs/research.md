@@ -148,6 +148,11 @@ Durable steps process at most three screening batches and 18 selected evidence
 items each, then continue until all eligible material is assessed. These batch
 sizes limit work per step; they do not truncate the run. New arrivals wait for a
 subsequent run, and hydrated source text does not restart completed screening.
+Screening and evidence requests require an object field for every supplied item
+ID, with additional fields forbidden. This preserves complete coverage on
+providers whose schema format does not enforce array lengths. Both keyed
+responses and previously validated array caches normalize to the same internal
+assessments; exact item coverage, scores and source quotes are still validated.
 Eligibility has two explicit lanes: a source originally published inside the
 run's window, or an older dated source first discovered since the window start
 and before the ranking snapshot (including the current collection).
@@ -223,6 +228,10 @@ entrypoint. The normal build generates the Worker wrapper and shared runtime.
 Cloudflare Workflows persist collection steps independently of browser requests.
 Source steps retry; paid ranking does not automatically retry an interrupted
 request. A failed run can be followed by a new scan, which reuses persisted caches.
+Idempotent model-cache, atomic ranking-checkpoint and usage-ledger writes retry
+only a lost storage connection, at most three times. Frozen write payloads and
+the usage ledger's pending-state guard make a committed write with a lost reply
+safe to repeat. This never retries a model request or an entire paid step.
 
 All user APIs are scoped to the authenticated team. Workflow operations use a
 timestamped HMAC-signed internal endpoint. API keys remain server-side. Fetching is

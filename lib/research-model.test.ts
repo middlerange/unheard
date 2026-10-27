@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   validateResearchEvidenceCoverage, matchResearchQuote, validateResearchScreening, validateResearchEvidence, researchScreeningSchema, screeningJsonSchema, screeningJsonSchemaForItems, researchEvidenceSchema,
-  RESEARCH_SCREEN_BATCH_SIZE, openAIResearchOutput, callResearchModel,
+  RESEARCH_SCREEN_BATCH_SIZE, openAIResearchOutput, callResearchModel, evidenceJsonSchemaForItems,
 } from "./research-model";
+import { anthropicResearchSchema } from "./research-anthropic";
 
 vi.mock("./research-usage", () => ({
   beginResearchUsage: vi.fn(async () => "test-usage"),
@@ -87,8 +88,42 @@ it("requires exactly one evidence assessment per input before advancing a batch"
 it("constrains IDs to the input batch and derives selection without a duplicate list", () => {
   const assessment = { itemId: "a", selected: true, reason: "Concrete useful core" };
   expect(researchScreeningSchema.parse({ assessments: [assessment] }).itemIds).toEqual(["a"]);
-  expect(screeningJsonSchemaForItems(["a"]).properties.assessments.items.properties.itemId.enum).toEqual(["a"]);
-  expect(screeningJsonSchemaForItems(["a"]).properties.assessments.minItems).toBe(1);
+  const schema = screeningJsonSchemaForItems(["a"]).properties.assessments;
+  expect(schema.required).toEqual(["a"]);
+  expect(Object.keys(schema.properties)).toEqual(["a"]);
+  expect(schema.additionalProperties).toBe(false);
+});
+
+it("requires every screening answer as a named field even when the provider removes array length constraints", () => {
+  const ids = Array.from({ length: 8 }, (_, i) => `article-${i}`);
+  const schema = screeningJsonSchemaForItems(ids);
+  expect(anthropicResearchSchema(schema)).toEqual(schema);
+  expect(schema.properties.assessments.required).toEqual(ids);
+  const answers = Object.fromEntries(ids.map(itemId => [itemId, { selected: false, reason: "Off-profile evidence" }]));
+  const complete = researchScreeningSchema.parse({ assessments: answers });
+  expect(validateResearchScreening(complete, ids).assessments).toHaveLength(8);
+  const { [ids[7]]: _missing, ...omitted } = answers;
+  expect(() => validateResearchScreening(researchScreeningSchema.parse({ assessments: omitted }), ids)).toThrow("every input exactly once");
+  expect(() => validateResearchScreening(researchScreeningSchema.parse({ assessments: { ...omitted, foreign: answers[ids[7]] } }), ids)).toThrow("every input exactly once");
+  expect(() => researchScreeningSchema.parse({ assessments: { a: { selected: true, reason: "Decision", itemId: "forged" } } })).toThrow();
+});
+
+it("normalizes keyed evidence while retaining legacy cached arrays and quote validation", () => {
+  const { itemId, ...assessment } = finding;
+  const normalized = researchEvidenceSchema.parse({ findings: { [itemId]: assessment } });
+  expect(normalized).toEqual(researchEvidenceSchema.parse({ findings: [finding] }));
+  expect(validateResearchEvidenceCoverage(normalized.findings, [itemId])).toEqual([finding]);
+  expect(validateResearchEvidence(normalized.findings, items)).toEqual([finding]);
+  const schema = evidenceJsonSchemaForItems([itemId, "other"]);
+  expect(schema.properties.findings.required).toEqual([itemId, "other"]);
+  expect(schema.properties.findings.additionalProperties).toBe(false);
+  expect(Object.keys(schema.properties.findings.properties)).toEqual([itemId, "other"]);
+  const converted = anthropicResearchSchema(schema) as typeof schema;
+  expect(converted.properties.findings.required).toEqual([itemId, "other"]);
+  expect(() => validateResearchEvidenceCoverage(normalized.findings, [itemId, "other"])).toThrow("every input exactly once");
+  expect(() => researchEvidenceSchema.parse({ findings: { [itemId]: { ...assessment, itemId: "forged" } } })).toThrow();
+  const ungrounded = researchEvidenceSchema.parse({ findings: { [itemId]: { ...assessment, evidence: "" } } });
+  expect(validateResearchEvidence(ungrounded.findings, items)).toEqual([]);
 });
 
 it("preserves original quote offsets after Unicode case expansion", () => {

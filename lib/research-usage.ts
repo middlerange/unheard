@@ -1,6 +1,7 @@
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { getDb } from './db/client';
+import { retryResearchStorage } from './research-storage';
 import { research_runs, research_settings, research_usage } from './schema';
 import { priceResearchUsage, ANTHROPIC_RESEARCH_PRICING_DATE, ANTHROPIC_RESEARCH_PRICING_URL, type ModelUsage } from './research-pricing';
 import type { ResearchRunUsage, ResearchStageUsage, ResearchUsageStage, ResearchUsageSummary, ResearchUsageTotals } from './research-usage-types';
@@ -16,10 +17,11 @@ export type ResearchUsageContext = {
 export async function beginResearchUsage(context: ResearchUsageContext, model: string) {
   const db = await getDb();
   const id = crypto.randomUUID();
-  await db.insert(research_usage).values({
+  const createdAt = Date.now();
+  await retryResearchStorage(async () => db.insert(research_usage).values({
     id, team_id: context.teamId, run_id: context.runId, stage: context.stage,
-    operation: context.operation, model, created_at: Date.now(),
-  });
+    operation: context.operation, model, created_at: createdAt,
+  }).onConflictDoNothing());
   return id;
 }
 
@@ -31,7 +33,8 @@ export async function finishResearchUsage(
   const db = await getDb();
   const cost = priceResearchUsage(response.model, response.tier, response.usage);
   const pending = and(eq(research_usage.id, id), eq(research_usage.team_id, context.teamId), eq(research_usage.status, 'pending'));
-  await db.batch([
+  const completedAt = Date.now();
+  await retryResearchStorage(async () => db.batch([
     db.update(research_runs).set({
       input_tokens: sql`${research_runs.input_tokens} + ${cost.input ?? 0}`,
       output_tokens: sql`${research_runs.output_tokens} + ${cost.output ?? 0}`,
@@ -41,9 +44,9 @@ export async function finishResearchUsage(
       status: response.status, input_tokens: cost.input, output_tokens: cost.output,
       cached_input_tokens: cost.cached, cache_write_tokens: cost.writes,
       cost_nano_usd: cost.costNanoUsd, cost_status: cost.costStatus, rate_card: cost.rateCard,
-      completed_at: Date.now(),
+      completed_at: completedAt,
     }).where(pending),
-  ]);
+  ]));
 }
 
 const stages: ResearchUsageStage[] = ['research', 'draft_generation', 'slack_revision', 'legacy'];

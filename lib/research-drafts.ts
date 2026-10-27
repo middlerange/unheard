@@ -748,7 +748,7 @@ export async function processResearchDraftJob(runId: string) {
   if (drafted > 0) {
     outcome = `Created ${drafted} draft${drafted === 1 ? "" : "s"}; review delivery is tracked with each draft.`;
   } else if (progress.candidateIds.length === 0) {
-    outcome = `${diagnostics.outcome || "Research finished."} No fresh findings scored at least ${RESEARCH_POST_MIN_SCORE} for drafting.`;
+    outcome = `${diagnostics.outcome || "Research finished."} No eligible findings scored at least ${RESEARCH_POST_MIN_SCORE} for drafting.`;
   } else if (progress.selectedIds.length === 0) {
     outcome = "Strong findings were already drafted; duplicate stories were skipped.";
   } else if (validationSkips) {

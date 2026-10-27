@@ -1,6 +1,7 @@
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "./db/client";
+import { retryResearchStorage } from "./research-storage";
 import {
   ideas,
   channels,
@@ -40,7 +41,7 @@ import {
 } from "./research-collectors";
 import {
   callResearchModel,
-  evidenceJsonSchema,
+  evidenceJsonSchemaForItems,
   RESEARCH_MODEL,
   RESEARCH_PROMPT_VERSION,
   RESEARCH_SCREEN_BATCH_SIZE,
@@ -863,15 +864,17 @@ async function cachedModel(
     { teamId: run.team_id, runId: run.id, stage: "research", operation: stage },
   );
   await validateReusable(result.value);
-  await db
+  const cacheValue = JSON.stringify(result.value);
+  const cachedAt = Date.now();
+  await retryResearchStorage(async () => db
     .insert(research_cache)
     .values({
       id,
       team_id: run.team_id,
-      value: JSON.stringify(result.value),
-      created_at: Date.now(),
+      value: cacheValue,
+      created_at: cachedAt,
     })
-    .onConflictDoNothing();
+    .onConflictDoNothing());
   return result.value as unknown;
 }
 type ResearchRankDiagnostics = ResearchRunDiagnostics & Required<Pick<ResearchRunDiagnostics, "evidenceCount" | "rejectedStories" | "screenedCount">>;
@@ -895,13 +898,18 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
   )).get();
   let progress = saved ? JSON.parse(saved.value) as ResearchRankProgress : undefined;
   async function persistProgress(progress: ResearchRankProgress) {
-    await db.insert(research_cache).values({
-      id: progressId, team_id: run.team_id, value: JSON.stringify(progress), created_at: Date.now(),
-    }).onConflictDoUpdate({ target: research_cache.id, set: { value: JSON.stringify(progress) } });
-    await db.update(research_runs).set({
-      diagnostics: JSON.stringify(progress.diagnostics),
-      findings_count: sql`(SELECT COUNT(*) FROM research_findings WHERE run_id = ${run.id})`,
-    }).where(eq(research_runs.id, run.id));
+    const value = JSON.stringify(progress);
+    const diagnostics = JSON.stringify(progress.diagnostics);
+    const createdAt = Date.now();
+    await retryResearchStorage(async () => db.batch([
+      db.insert(research_cache).values({
+        id: progressId, team_id: run.team_id, value, created_at: createdAt,
+      }).onConflictDoUpdate({ target: research_cache.id, set: { value } }),
+      db.update(research_runs).set({
+        diagnostics,
+        findings_count: sql`(SELECT COUNT(*) FROM research_findings WHERE run_id = ${run.id})`,
+      }).where(eq(research_runs.id, run.id)),
+    ]));
   }
   await db.update(research_runs).set({ status: "ranking" }).where(eq(research_runs.id, run.id));
   if (!progress) {
@@ -952,7 +960,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       freshCount: Number(coverage?.fresh || 0), evergreenCount: Number(coverage?.evergreen || 0),
       unavailableVideoCount: Number(coverage?.unavailableVideos || 0), screenedCount: 0,
       shortlistedCount: 0, evidenceCount: 0, rejectedStories,
-      outcome: candidates.length ? 'Screening fresh material for useful stories.' : 'No dated, readable items in this window. Check source coverage and unavailable transcripts.',
+      outcome: candidates.length ? 'Screening eligible material for useful stories.' : 'No dated, readable items in this window. Check source coverage and unavailable transcripts.',
     };
     await db.update(research_runs).set({ diagnostics: JSON.stringify(diagnostics) }).where(eq(research_runs.id, run.id));
     progress = { candidateIds: candidates.map(item => item.id), discoveryCutoff, screenOffset: 0, selectedIds: [], nextOffset: 0, diagnostics, coverageWarning: null };
@@ -999,7 +1007,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       progress.screenOffset = (progress.screenOffset || 0) + ids.length;
       progress.diagnostics.screenedCount += candidates.length;
       progress.diagnostics.shortlistedCount = progress.selectedIds.length;
-      progress.diagnostics.outcome = `Screened ${progress.diagnostics.screenedCount} of ${candidateIds.length} fresh items.`;
+      progress.diagnostics.outcome = `Screened ${progress.diagnostics.screenedCount} of ${candidateIds.length} eligible items.`;
       await persistProgress(progress);
   }
   if ((progress.screenOffset || 0) < candidateIds.length) return { ok: true, pending: true };
@@ -1040,10 +1048,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       }));
       const output = researchEvidenceSchema.parse(await cachedModel(
         run, "evidence", input, RESEARCH_EVIDENCE_INSTRUCTIONS,
-        { ...evidenceJsonSchema, properties: { findings: {
-          ...evidenceJsonSchema.properties.findings, minItems: batch.length, maxItems: batch.length,
-          items: { ...evidenceJsonSchema.properties.findings.items, properties: { ...evidenceJsonSchema.properties.findings.items.properties, itemId: { type: "string", enum: batch.map(item => item.id) } } },
-        } } }, 5000,
+        evidenceJsonSchemaForItems(batch.map(item => item.id)), 5000,
       ));
       validateResearchEvidenceCoverage(output.findings, batch.map(item => item.id));
       const accepted = validateResearchEvidence(output.findings, batch.map(item => ({ id: item.id, content: item.content! })));
@@ -1140,7 +1145,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
   }
   if (progress.nextOffset < progress.selectedIds.length) return { ok: true, pending: true };
   if (!progress.selectedIds.length && diagnostics.screenedCount) {
-    diagnostics.outcome = `Screened ${diagnostics.screenedCount} fresh items; none had a strong profile-relevant angle.`;
+    diagnostics.outcome = `Screened ${diagnostics.screenedCount} eligible items; none had a strong profile-relevant angle.`;
     await persistProgress(progress);
   }
   const failed = await db

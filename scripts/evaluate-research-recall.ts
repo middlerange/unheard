@@ -2,7 +2,7 @@ import { anthropicResearchRequest, anthropicResearchOutput, type AnthropicResear
 import { RESEARCH_POST_MIN_SCORE } from '../lib/research-policy';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { RESEARCH_MODEL, RESEARCH_SCREEN_BATCH_SIZE, researchScreeningSchema, validateResearchScreening, validateResearchEvidenceCoverage, RESEARCH_PROMPT_VERSION, RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS, screeningJsonSchema, screeningJsonSchemaForItems, evidenceJsonSchema, researchEvidenceSchema, matchResearchQuote, researchHash, type ResearchEvidence } from '../lib/research-model';
+import { RESEARCH_MODEL, RESEARCH_SCREEN_BATCH_SIZE, researchScreeningSchema, validateResearchScreening, validateResearchEvidenceCoverage, RESEARCH_PROMPT_VERSION, RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS, screeningJsonSchema, screeningJsonSchemaForItems, evidenceJsonSchema, evidenceJsonSchemaForItems, researchEvidenceSchema, matchResearchQuote, researchHash, type ResearchEvidence } from '../lib/research-model';
 
 type ModelValue = { assessments?: Array<{ itemId: string; selected: boolean; reason: string }>; itemIds?: string[]; findings?: ResearchEvidence[] };
 type Assessment = ResearchEvidence & { grounded: boolean };
@@ -69,7 +69,7 @@ const reviewed = items.filter(item => selected.has(item.id));
 const assessments = new Map<string, Assessment>();
 for (let start = 0; start < reviewed.length; start += 6) {
   const batch = reviewed.slice(start, start + 6), allowed = new Map(batch.map(item => [item.id, item]));
-  const schema = { ...evidenceJsonSchema, properties: { findings: { ...evidenceJsonSchema.properties.findings, minItems: batch.length, maxItems: batch.length } } };
+  const schema = variant === 'baseline' ? { ...evidenceJsonSchema, properties: { findings: { ...evidenceJsonSchema.properties.findings, minItems: batch.length, maxItems: batch.length } } } : evidenceJsonSchemaForItems(batch.map(item => item.id));
   const raw = researchEvidenceSchema.parse(await model('evidence', evidenceInstructions, batch.map(({ sourceId, ...item }) => ({ ...item, sourceId })), schema, 5000));
   if (variant !== 'baseline') validateResearchEvidenceCoverage(raw.findings, batch.map(item => item.id));
   for (const finding of raw.findings) { const item = allowed.get(finding.itemId); if (item && !assessments.has(item.id)) assessments.set(item.id, { ...finding, grounded: !!matchResearchQuote(item.content, finding.evidence) }); }
