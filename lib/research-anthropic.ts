@@ -18,11 +18,18 @@ export function anthropicResearchSchema(value: unknown): unknown {
   return result;
 }
 
-export function anthropicResearchRequest(model: string, system: string, data: unknown, schema: Record<string, unknown>, maxTokens: number) {
+export type AnthropicResearchMode = 'schema' | 'tool';
+export const ANTHROPIC_RESEARCH_TOOL_NAME = 'submit_research';
+
+export function anthropicResearchRequest(model: string, system: string, data: unknown, schema: Record<string, unknown>, maxTokens: number, mode: AnthropicResearchMode = 'schema') {
   return {
     model, system, messages: [{ role: 'user', content: JSON.stringify(data) }],
     max_tokens: maxTokens, service_tier: 'standard_only', thinking: { type: 'disabled' },
-    output_config: { format: { type: 'json_schema', schema: anthropicResearchSchema(schema) } },
+    ...(mode === 'tool' ? {
+      tools: [{ name: ANTHROPIC_RESEARCH_TOOL_NAME,
+        description: 'Submit the research assessment data for application validation. This tool performs no external action.', input_schema: schema }],
+      tool_choice: { type: 'tool', name: ANTHROPIC_RESEARCH_TOOL_NAME, disable_parallel_tool_use: true },
+    } : { output_config: { format: { type: 'json_schema', schema: anthropicResearchSchema(schema) } } }),
   };
 }
 
@@ -30,10 +37,17 @@ export type AnthropicResearchResponse = {
   id?: string;
   model?: string;
   stop_reason?: string;
-  content?: Array<{ type: string; text?: string }>;
+  content?: Array<{ type: string; text?: string; name?: string; input?: unknown }>;
   usage?: ModelUsage & { service_tier?: string };
 };
 
-export function anthropicResearchOutput(result: AnthropicResearchResponse) {
+export function anthropicResearchOutput(result: AnthropicResearchResponse, mode: AnthropicResearchMode = 'schema') {
+  if (mode === 'tool' && result.stop_reason === 'tool_use') {
+    const block = result.content?.[0];
+    if (result.content?.length !== 1 || block?.type !== 'tool_use' || block.name !== ANTHROPIC_RESEARCH_TOOL_NAME
+      || !block.input || typeof block.input !== 'object' || Array.isArray(block.input)) return '';
+    return JSON.stringify(block.input);
+  }
+  if (result.content?.some(item => item.type === 'tool_use')) return '';
   return result.content?.filter(item => item.type === 'text').map(item => item.text || '').join('') || '';
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { anthropicResearchRequest, anthropicResearchSchema } from './research-anthropic';
+import { ANTHROPIC_RESEARCH_TOOL_NAME, anthropicResearchOutput, anthropicResearchRequest, anthropicResearchSchema } from './research-anthropic';
 import { callResearchModel, RESEARCH_MODEL, evidenceJsonSchema, ResearchModelRateLimitError } from './research-model';
 import { beginResearchUsage, finishResearchUsage } from './research-usage';
 
@@ -26,6 +26,68 @@ function mockMessage(overrides: Record<string, unknown> = {}) {
 }
 
 describe('Claude research transport', () => {
+  const submitted = { findings: { source: { claim: { summary: 'Submitted assessment data' } } } };
+  const toolBlock = { type: 'tool_use', id: 'tool-test', name: ANTHROPIC_RESEARCH_TOOL_NAME, input: submitted };
+  it('forces a data-only tool without strict grammar while default screening retains output_config', () => {
+    const schema = { type: 'object', properties: { findings: { type: 'object' } }, required: ['findings'], additionalProperties: false };
+    const request = anthropicResearchRequest(RESEARCH_MODEL, 'system', {}, schema, 16384, 'tool');
+    expect(request).toMatchObject({ max_tokens: 16384, thinking: { type: 'disabled' },
+      tool_choice: { type: 'tool', name: ANTHROPIC_RESEARCH_TOOL_NAME, disable_parallel_tool_use: true } });
+    expect(request).not.toHaveProperty('output_config');
+    if (!('tools' in request)) throw new Error('Tool request missing tools');
+    expect(request.tools).toHaveLength(1);
+    expect(request.tools[0].input_schema).toBe(schema);
+    expect(request.tools[0]).not.toHaveProperty('strict');
+    const screening = anthropicResearchRequest(RESEARCH_MODEL, 'screen', {}, schema, 100);
+    expect(screening).toHaveProperty('output_config.format.type', 'json_schema');
+    expect(screening).not.toHaveProperty('tools');
+    expect(screening).not.toHaveProperty('tool_choice');
+  });
+
+  it.each(['evidence', 'replay_evidence'])('uses forced tool submission only for %s and records a valid single submission as complete', async operation => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test');
+    const fetcher = mockMessage({ stop_reason: 'tool_use', content: [toolBlock] });
+    const usageContext = { ...context, operation };
+    const result = await callResearchModel('evidence', {}, evidenceJsonSchema, 16384, usageContext);
+    expect(result).toEqual({ value: submitted, inputTokens: 140, outputTokens: 20 });
+    const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
+    expect(body).not.toHaveProperty('output_config');
+    expect(body.tools[0].name).toBe(ANTHROPIC_RESEARCH_TOOL_NAME);
+    expect(body.tools[0]).not.toHaveProperty('strict');
+    expect(finishResearchUsage).toHaveBeenCalledWith('usage-id', usageContext, expect.objectContaining({ status: 'completed' }));
+  });
+
+  it.each([
+    [], [toolBlock, toolBlock], [{ ...toolBlock, name: 'foreign_tool' }],
+    [{ ...toolBlock, input: null }], [{ ...toolBlock, input: [] }],
+    [{ ...toolBlock, input: 'unparsed input' }], [{ type: 'text', text: JSON.stringify(submitted) }],
+    [{ type: 'text', text: 'Additional response' }, toolBlock], [{ ...toolBlock, input: undefined }],
+  ])('rejects incomplete, multiple, foreign or non-object tool data %j', async (...content) => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test');
+    mockMessage({ stop_reason: 'tool_use', content });
+    const usageContext = { ...context, operation: 'evidence' };
+    await expect(callResearchModel('evidence', {}, {}, 100, usageContext)).rejects.toThrow('did not complete');
+    expect(finishResearchUsage).toHaveBeenNthCalledWith(1, 'usage-id', usageContext, expect.objectContaining({ status: 'tool_use', usage: expect.objectContaining({ output_tokens: 20 }) }));
+    expect(anthropicResearchOutput({ stop_reason: 'tool_use', content }, 'tool')).toBe('');
+  });
+
+  it.each(['max_tokens', 'unknown', 'pause_turn'])('does not treat a tool block stopped by %s as completed', async stop_reason => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test'); mockMessage({ stop_reason, content: [toolBlock] });
+    const usageContext = { ...context, operation: 'evidence' };
+    await expect(callResearchModel('evidence', {}, {}, 100, usageContext)).rejects.toThrow('did not complete');
+    expect(finishResearchUsage).toHaveBeenNthCalledWith(1, 'usage-id', usageContext, expect.objectContaining({ status: stop_reason }));
+  });
+
+  it('preserves legacy completed text mocks for evidence but never accepts tool use during screening', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test');
+    const fetcher = mockMessage();
+    expect((await callResearchModel('evidence', {}, {}, 100, { ...context, operation: 'evidence' })).value).toEqual({ findings: [] });
+    fetcher.mockResolvedValueOnce(Response.json({ stop_reason: 'tool_use', content: [toolBlock] }));
+    await expect(callResearchModel('screen', {}, {}, 100, context)).rejects.toThrow('did not complete');
+    expect(JSON.parse(String(fetcher.mock.calls[1][1]?.body))).toHaveProperty('output_config');
+    expect(anthropicResearchOutput({ stop_reason: 'end_turn', content: [toolBlock] }, 'tool')).toBe('');
+  });
+
   it('sends native Messages requests and retains cache-inclusive usage', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'anthropic-test-key');
     const fetcher = mockMessage();

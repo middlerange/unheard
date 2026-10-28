@@ -55,6 +55,10 @@ function editorialFixture(content: string) {
     boundary: "This account does not measure the effect on conversion.",
   };
 }
+function fixtureResearchSchema(request: ReturnType<typeof JSON.parse>) {
+  return request.text?.format?.schema ?? request.output_config?.format?.schema ?? request.tools?.[0]?.input_schema;
+}
+
 function modelResponseFixture(value: {
   status: string;
   usage?: unknown;
@@ -435,12 +439,12 @@ describe("research persistence and team isolation", () => {
       expect(input.icp).toBeUndefined();
       expect(input.generalAudience).toBe(general);
       expect(input.publishingProfiles).toEqual(expect.arrayContaining([
-        expect.objectContaining({ id: "audience-company", systemPrompt: company, enabled: true }),
-        expect.objectContaining({ id: "audience-personal", systemPrompt: personal, enabled: true }),
+        expect.objectContaining({ id: "audience-company", selectionInstructions: company, enabled: true }),
+        expect.objectContaining({ id: "audience-personal", selectionInstructions: personal, enabled: true }),
       ]));
       expect(input.publishingProfiles).toHaveLength(2);
-      const choice = request.output_config.format.schema.properties.findings.properties["audience-item"].properties.chosenProfileId;
-      expect(choice.anyOf[0].enum.sort()).toEqual(["audience-company", "audience-personal"]);
+      const choices = fixtureResearchSchema(request).$defs.profileCheck.properties.profileId.enum;
+      expect([...choices].sort()).toEqual(["audience-company", "audience-personal"]);
       return modelResponseFixture({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ findings: [{
         itemId: "audience-item", chosenProfileId: "audience-personal", profileFit: "The personal profile explicitly covers distribution; inspect qualified referral traffic rather than treating company onboarding scope as a veto.",
         summary: "Observed search referral behavior", evidence: quote, contentAngle: "Measure qualified search referrals before changing distribution priorities", whyItMatters: "A personal growth practitioner chooses a distribution test", limitations: "Observational study, no causal claim", familyKey: "observed-search-referrals", score: 82,
@@ -536,7 +540,7 @@ describe("research persistence and team isolation", () => {
       const request = JSON.parse(String(init?.body));
       const input = JSON.parse(request.input ?? request.messages[0].content);
       let value: unknown;
-      if (input.items) value = (request.output_config.format.schema).properties.assessments
+      if (input.items) value = (fixtureResearchSchema(request)).properties.assessments
         ? screeningFixture({ itemIds: ["shared-qualification-item"] }, input.items)
         : { findings: [{ itemId: "shared-qualification-item", score: 88, summary: "Updated summary", whyItMatters: "Updated implication", contentAngle: "Updated angle", evidence: newQuote, limitations: "Updated limitations", familyKey: "new-family" }] };
       else {
@@ -764,7 +768,7 @@ describe("research persistence and team isolation", () => {
       if (String(url) === `${new URL(seed.url).origin}/partial-useful`) return new Response(`<article><p>${body}</p></article>`);
       expect(String(url)).toBe("https://api.anthropic.com/v1/messages");
       const request = JSON.parse(String(init?.body)), input = JSON.parse(request.messages[0].content);
-      const value = request.output_config.format.schema.properties.assessments
+      const value = fixtureResearchSchema(request).properties.assessments
         ? (screened.push(...input.items.map((item: { id: string }) => item.id)), screeningFixture({ itemIds: ["partial-useful"] }, input.items))
         : { findings: input.items.map((item: { id: string; contentProvenance: string }) => {
           assessed.push(item.id);
@@ -832,7 +836,7 @@ describe("research persistence and team isolation", () => {
         const input = JSON.parse(request.input ?? request.messages[0].content);
       if (input.proposed) return editorialReviewFixture();
         expect(input.items.map((item: { id: string }) => item.id).sort()).toEqual([...selected].sort());
-        const value = (request.text?.format.schema ?? request.output_config.format.schema).properties.assessments
+        const value = fixtureResearchSchema(request).properties.assessments
           ? { itemIds: selected }
           : { findings: selected.map((id, index) => ({ itemId: id, score: index ? 75 : 85, summary: "A documented account creation decision", whyItMatters: "Optional consent should not block signup", contentAngle: "Audit authentication paths", evidence, limitations: "A first-party descriptive account, not a conversion experiment", familyKey: id })) };
         return modelResponseFixture({ status: "completed", usage: { input_tokens: 100, output_tokens: 50 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
@@ -1350,15 +1354,21 @@ describe("research persistence and team isolation", () => {
         expect(profile.selectionInstructions).toBe(profiles.find(captured => captured.id === profile.id)?.systemPrompt);
         expect(profile).not.toHaveProperty('systemPrompt');
       }
-      expect(request.output_config.format.schema.$defs.profileCheck.properties.profileId.enum).toEqual(profiles.map(profile => profile.id));
+      expect(fixtureResearchSchema(request).$defs.profileCheck.properties.profileId.enum).toEqual(profiles.map(profile => profile.id));
       expect(input.items[0].sourceSections).toHaveLength(2);
-      expect(request.output_config.format.schema.$defs.sourceAssessment.required).toContain('sectionChecks');
+      expect(fixtureResearchSchema(request).$defs.sourceAssessment.required).toContain('sectionChecks');
       const primary = ++calls === 1 ? idea('consent-review', quotes[0], input.publishingProfiles) : idea('publication-confirmation', quotes[2], input.publishingProfiles);
       const additional = idea('preview-before-connection', quotes[1], input.publishingProfiles);
       for (const assessment of [primary, additional]) {
         for (const derived of ['score', 'chosenProfileId', 'profileFit']) expect(assessment).not.toHaveProperty(derived);
       }
-      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify({ findings: { [itemId]: { ...primary, additionalIdeas: [additional], sectionChecks: input.items[0].sourceSections.map((section: { id: string }, index: number) => ({ sectionId: section.id, familyKeys: [index === 0 ? primary.familyKey : additional.familyKey], notPostworthyReason: '' })) } } }) }] }] });
+      const nested = (assessment: typeof primary) => {
+        const { summary, evidence, contentAngle, whyItMatters, limitations, ...decision } = assessment;
+        return { ...decision, claim: { summary, evidence, contentAngle, whyItMatters, limitations } };
+      };
+      expect(request).not.toHaveProperty('output_config');
+      expect(request.tool_choice).toMatchObject({ type: 'tool', name: 'submit_research', disable_parallel_tool_use: true });
+      return Response.json({ id: `msg-distinct-${calls}`, model: 'claude-haiku-5-5', stop_reason: 'tool_use', usage: { input_tokens: 10, output_tokens: 5 }, content: [{ type: 'tool_use', id: `toolu-${calls}`, name: 'submit_research', input: { findings: { [itemId]: { ...nested(primary), additionalIdeas: [nested(additional)], sectionChecks: input.items[0].sourceSections.map((section: { id: string }, index: number) => ({ sectionId: section.id, familyKeys: [index === 0 ? primary.familyKey : additional.familyKey], notPostworthyReason: '' })) } } } }] });
     });
     try {
       await finishResearchRankJob(runIds[0]);
@@ -1464,14 +1474,14 @@ describe("research persistence and team isolation", () => {
         });
       }
       expect(input.items.map((item: { id: string }) => item.id).sort()).toEqual(items.map(item => item.id).sort());
-      if ((request.text?.format.schema ?? request.output_config.format.schema).properties.findings) {
-        const findingsSchema = (request.text?.format.schema ?? request.output_config.format.schema).properties.findings;
+      if (fixtureResearchSchema(request).properties.findings) {
+        const findingsSchema = fixtureResearchSchema(request).properties.findings;
         expect(findingsSchema.type).toBe("object");
         expect(findingsSchema.required.sort()).toEqual(items.map(item => item.id).sort());
         expect(Object.keys(findingsSchema.properties).sort()).toEqual(items.map(item => item.id).sort());
         expect(findingsSchema.additionalProperties).toBe(false);
       }
-      const value = (request.text?.format.schema ?? request.output_config.format.schema).properties.assessments
+      const value = fixtureResearchSchema(request).properties.assessments
         ? { itemIds: items.map(item => item.id) }
         : { findings: items.map((item, index) => ({
           itemId: item.id,
@@ -1549,10 +1559,10 @@ describe("research persistence and team isolation", () => {
       const input = JSON.parse(request.input ?? request.messages[0].content);
       if (input.proposed) return editorialReviewFixture();
       let value: unknown;
-      if ((request.text?.format.schema ?? request.output_config.format.schema).properties.assessments) {
+      if (fixtureResearchSchema(request).properties.assessments) {
         expect(request.instructions ?? request.system).toBe(RESEARCH_SCREEN_INSTRUCTIONS);
         expect(input.items.length).toBeLessThanOrEqual(RESEARCH_SCREEN_BATCH_SIZE);
-        expect(request.output_config.format.schema.properties.assessments.required).toEqual(input.items.map((item: { id: string }) => item.id));
+        expect(fixtureResearchSchema(request).properties.assessments.required).toEqual(input.items.map((item: { id: string }) => item.id));
         value = { itemIds: input.items.filter((item: { id: string }) => item.id !== career.id).map((item: { id: string }) => item.id) };
       } else {
         expect(request.instructions ?? request.system).toBe(RESEARCH_EVIDENCE_INSTRUCTIONS);
@@ -1618,7 +1628,7 @@ describe("research persistence and team isolation", () => {
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
       const request = JSON.parse(String(init?.body));
       const input = JSON.parse(request.input ?? request.messages[0].content);
-      const value = (request.text?.format.schema ?? request.output_config.format.schema).properties.assessments
+      const value = fixtureResearchSchema(request).properties.assessments
         ? { itemIds: [] }
         : { findings: input.items.map((item: { id: string }) => ({ itemId: item.id, score: 90, summary: "New coverage", whyItMatters: "Useful", contentAngle: "Same launch", evidence: quote, limitations: "Attributed", familyKey: "shared-scaffold" })) };
       return modelResponseFixture({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
@@ -1841,7 +1851,7 @@ describe("research persistence and team isolation", () => {
       const input = JSON.parse(request.input ?? request.messages[0].content);
       if (input.proposed) return editorialReviewFixture();
       let value: unknown;
-      if ((request.text?.format.schema ?? request.output_config.format.schema).properties.assessments) {
+      if (fixtureResearchSchema(request).properties.assessments) {
         screened++;
         expect(input.items.length).toBeLessThanOrEqual(RESEARCH_SCREEN_BATCH_SIZE);
         value = { itemIds: input.items.map((item: { id: string }) => item.id) };
@@ -2351,7 +2361,7 @@ describe("research persistence and team isolation", () => {
       expect(input.items.map((item: { id: string }) => item.id)).toEqual(["lane-fresh", "lane-new-evergreen"]);
       expect(input.items[0]).toMatchObject({ signalKind: "fresh", publishedAt: now - 1000, discoveredAt: now - 500 });
       expect(input.items[1]).toMatchObject({ signalKind: "evergreen_newly_discovered", publishedAt: now - 180 * 86400000, discoveredAt: now - 500 });
-      const value = (request.text?.format.schema ?? request.output_config.format.schema).properties.assessments
+      const value = fixtureResearchSchema(request).properties.assessments
         ? { itemIds: input.items.map((item: { id: string }) => item.id) }
         : { findings: input.items.map((item: { id: string }) => ({ itemId: item.id, score: 85, summary: "A bounded original decision", whyItMatters: "A practical onboarding choice", contentAngle: "Evaluate the tradeoff", evidence: quote, limitations: "Historical practitioner essay, not a new release", familyKey: item.id })) };
       return modelResponseFixture({ status: "completed", usage: { input_tokens: 10, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
@@ -2416,7 +2426,7 @@ describe("research persistence and team isolation", () => {
       const input = JSON.parse(request.input ?? request.messages[0].content);
       expect(input.items).toHaveLength(1);
       expect(input.items[0]).toMatchObject({ publishedAt: null, discoveredAt: firstSeen, signalKind: 'undated_reference' });
-      const screening = (request.text?.format.schema ?? request.output_config.format.schema).properties.assessments;
+      const screening = fixtureResearchSchema(request).properties.assessments;
       expect(input.items[0].id).toBe(screening ? 'watch-thin' : 'watch-current');
       const value = screening ? screeningFixture({ itemIds: [] }, input.items) : {
         findings: [{ itemId: 'watch-current', score: 85, summary: 'A bounded public framework', whyItMatters: 'A product decision to inspect', contentAngle: 'Inspect the resource before adopting its process', evidence: quote, limitations: 'Publication date is unknown; first observation does not prove novelty', familyKey: 'undated-watch-test' }],
@@ -2475,7 +2485,7 @@ describe("research persistence and team isolation", () => {
     const previousKey = process.env.ANTHROPIC_API_KEY; process.env.ANTHROPIC_API_KEY = "test-legacy-routing";
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
       const request = JSON.parse(String(init?.body)), input = JSON.parse(request.messages[0].content);
-      const value = request.output_config.format.schema.properties.assessments ? screeningFixture({ itemIds: [] }, input.items)
+      const value = fixtureResearchSchema(request).properties.assessments ? screeningFixture({ itemIds: [] }, input.items)
         : { findings: [{ itemId: `${team}-legacy-selected`, score: 85, summary: "An attributed requirements method", evidence: quote, contentAngle: "Review requirements before implementation", whyItMatters: "A product-team handoff", limitations: "No outcome proof", familyKey: `${team}-method` }] };
       return modelResponseFixture({ status: "completed", usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }] });
     });
@@ -2514,7 +2524,7 @@ describe("research persistence and team isolation", () => {
       const input = JSON.parse(request.input ?? request.messages[0].content);
       if (input.proposed) return editorialReviewFixture();
       let value: unknown;
-      if ((request.text?.format.schema ?? request.output_config.format.schema).properties.assessments) {
+      if (fixtureResearchSchema(request).properties.assessments) {
         screened.push(...input.items.map((item: { id: string }) => item.id));
         value = { itemIds: input.items.filter((item: { id: string }) => item.id === items.at(-1)!.id).map((item: { id: string }) => item.id) };
       } else {
@@ -2679,7 +2689,7 @@ describe("research persistence and team isolation", () => {
       const request = JSON.parse(String(init?.body));
       const input = JSON.parse(request.input ?? request.messages[0].content);
       let value: unknown;
-      if ((request.text?.format.schema ?? request.output_config.format.schema).properties.assessments) {
+      if (fixtureResearchSchema(request).properties.assessments) {
         screenCalls++;
         value = screeningFixture({ itemIds: ids }, input.items);
       } else {

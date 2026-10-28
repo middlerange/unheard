@@ -11,7 +11,7 @@ import { researchSectionInventory, type ResearchSourceSection } from "./research
 export { researchSourceSections } from "./research-sections";
 export { ResearchModelRateLimitError } from "./research-provider-error";
 export const RESEARCH_MODEL = "claude-haiku-5-5";
-export const RESEARCH_PROMPT_VERSION = "research-v23-compact-claim-grammar";
+export const RESEARCH_PROMPT_VERSION = "research-v24-validated-tool-evidence";
 export const RESEARCH_SCREEN_BATCH_SIZE = 8;
 export const RESEARCH_EVIDENCE_BATCH_SIZE = 6;
 export const RESEARCH_EVIDENCE_OUTPUT_TOKENS = 16_384;
@@ -310,6 +310,7 @@ export async function callResearchModel(
   model = RESEARCH_MODEL,
 ) {
   const anthropic = model.startsWith("claude-");
+  const anthropicMode = usageContext.operation === "evidence" || usageContext.operation === "replay_evidence" ? "tool" : "schema";
   const secret = anthropic ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
   const key = process.env[secret];
   if (!key) throw new Error(`Set ${secret} in Cloudflare secrets to run research`);
@@ -323,7 +324,7 @@ export async function callResearchModel(
       headers: anthropic ? {
         "x-api-key": key, "anthropic-version": "2026-10-21", "Content-Type": "application/json",
       } : { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify(anthropic ? anthropicResearchRequest(model, system, data, outputSchema, maxOutputTokens) : {
+      body: JSON.stringify(anthropic ? anthropicResearchRequest(model, system, data, outputSchema, maxOutputTokens, anthropicMode) : {
         model,
         service_tier: "default",
         store: false,
@@ -357,13 +358,14 @@ export async function callResearchModel(
     }
     if (anthropic) {
       const result = await response.json() as AnthropicResearchResponse;
+      const output = anthropicResearchOutput(result, anthropicMode);
+      const completed = result.stop_reason === "end_turn" || anthropicMode === "tool" && result.stop_reason === "tool_use" && Boolean(output);
       await finishResearchUsage(usageId, usageContext, {
         model: result.model || model, tier: result.usage?.service_tier || "standard",
-        responseId: result.id, status: result.stop_reason === "end_turn" ? "completed" : result.stop_reason || "unknown", usage: result.usage,
+        responseId: result.id, status: completed ? "completed" : result.stop_reason || "unknown", usage: result.usage,
       });
-      if (result.stop_reason !== "end_turn")
+      if (!completed)
         throw new Error("Anthropic did not complete the research response (stopped: " + (result.stop_reason || "unknown") + ")");
-      const output = anthropicResearchOutput(result);
       if (!output) throw new Error("Anthropic returned no structured research response");
       const cached = result.usage?.cache_read_input_tokens || 0;
       const writes = result.usage?.cache_creation_input_tokens || 0;
