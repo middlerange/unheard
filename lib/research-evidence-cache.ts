@@ -2,7 +2,7 @@ import { matchResearchQuote, researchEvidenceSchema, researchHash, validateResea
 import { RESEARCH_POST_MIN_SCORE } from "./research-policy";
 
 export type EvidenceCacheInput = { id: string; content?: string; [key: string]: unknown };
-type CitationRepair = { itemId: string; familyKey: string; original: string; selected: string; method: "ordered_omission_to_contiguous_span" };
+type CitationRepair = { itemId: string; familyKey: string; original: string; selected: string; method: "ordered_omission_to_contiguous_span" | "leading_determiner_to_contiguous_span" };
 export type EvidenceCacheValue = { findings: ResearchEvidence[]; citationRepairs?: CitationRepair[] };
 export type EvidenceCacheContext = {
   teamId: string;
@@ -37,12 +37,17 @@ function citationText(value: string) {
   return { text: chars.join(""), positions };
 }
 
-export function canonicalResearchCitation(content: string, evidence: string): string | null {
+function canonicalCitation(content: string, evidence: string): { selected: string; method: CitationRepair["method"] | null } | null {
   const exact = matchResearchQuote(content, evidence);
-  if (exact) return exact.length <= 600 ? evidence : null;
+  if (exact) return exact.length <= 600 ? { selected: evidence, method: null } : null;
   const closingMarks: Record<string, string> = { '"': '"', "'": "'", "“": "”", "‘": "’" };
   let quote = evidence.trim();
   if (closingMarks[quote[0]] === quote.at(-1)) quote = quote.slice(1, -1).trim();
+  const withoutDeterminer = quote.match(/^(?:a|an|the|your|our|this|that|these|those)\s+([\s\S]+)$/i)?.[1];
+  if (withoutDeterminer && withoutDeterminer.length >= 20 && withoutDeterminer.length <= 600) {
+    const span = matchResearchQuote(content, withoutDeterminer);
+    if (span && span.length >= 20 && span.length <= 600) return { selected: span, method: "leading_determiner_to_contiguous_span" };
+  }
   const fragments = quote.split(/\.{3}|…/).map(fragment => fragment.trim()).filter(Boolean);
   if (fragments.length < 2) return null;
   const source = citationText(content), spans: string[] = [];
@@ -58,8 +63,13 @@ export function canonicalResearchCitation(content: string, evidence: string): st
     spans.push(content.slice(source.positions[start], source.positions[start + needle.length - 1] + 1));
     cursor = start + needle.length;
   }
-  return spans.filter(span => span.length >= 20 && span.length <= 600)
+  const selected = spans.filter(span => span.length >= 20 && span.length <= 600)
     .reduce<string | null>((longest, span) => !longest || span.length > longest.length ? span : longest, null);
+  return selected ? { selected, method: "ordered_omission_to_contiguous_span" } : null;
+}
+
+export function canonicalResearchCitation(content: string, evidence: string): string | null {
+  return canonicalCitation(content, evidence)?.selected ?? null;
 }
 
 export function validateResearchEvidenceCacheValue(value: unknown, items: EvidenceCacheInput[], enabledProfileIds: string[]): EvidenceCacheValue {
@@ -71,23 +81,24 @@ export function validateResearchEvidenceCacheValue(value: unknown, items: Eviden
   for (const primary of findings) {
     for (const idea of [primary, ...(primary.additionalIdeas || [])]) {
       if (idea.score < RESEARCH_POST_MIN_SCORE) continue;
-      const selected = canonicalResearchCitation(bodies.get(primary.itemId) || "", idea.evidence);
-      if (!selected) throw new Error(`Research evidence has an unsupported passing quote for source ${primary.itemId}`);
-      if (selected !== idea.evidence) {
-        repairs.push({ itemId: primary.itemId, familyKey: idea.familyKey, original: idea.evidence, selected, method: "ordered_omission_to_contiguous_span" });
-        idea.evidence = selected;
+      const citation = canonicalCitation(bodies.get(primary.itemId) || "", idea.evidence);
+      if (!citation) throw new Error(`Research evidence has an unsupported passing quote for source ${primary.itemId}`);
+      if (citation.method) {
+        repairs.push({ itemId: primary.itemId, familyKey: idea.familyKey, original: idea.evidence, selected: citation.selected, method: citation.method });
+        idea.evidence = citation.selected;
       }
     }
   }
   if (value && typeof value === "object" && "citationRepairs" in value && Array.isArray(value.citationRepairs)) {
     for (const repair of value.citationRepairs) {
-      if (!repair || repair.method !== "ordered_omission_to_contiguous_span" || typeof repair.original !== "string"
+      if (!repair || !["ordered_omission_to_contiguous_span", "leading_determiner_to_contiguous_span"].includes(repair.method) || typeof repair.original !== "string"
         || repair.original.length > 600 || typeof repair.selected !== "string") continue;
       const primary = findings.find(finding => finding.itemId === repair.itemId);
       const idea = primary && [primary, ...(primary.additionalIdeas || [])].find(idea => idea.familyKey === repair.familyKey && idea.evidence === repair.selected);
-      if (idea && primary && canonicalResearchCitation(bodies.get(primary.itemId) || "", repair.original) === repair.selected
+      const verified = primary ? canonicalCitation(bodies.get(primary.itemId) || "", repair.original) : null;
+      if (idea && primary && verified?.method && verified.selected === repair.selected && verified.method === repair.method
         && !repairs.some(saved => saved.itemId === repair.itemId && saved.familyKey === repair.familyKey))
-        repairs.push({ itemId: primary.itemId, familyKey: idea.familyKey, original: repair.original, selected: repair.selected, method: "ordered_omission_to_contiguous_span" });
+        repairs.push({ itemId: primary.itemId, familyKey: idea.familyKey, original: repair.original, selected: repair.selected, method: verified.method });
     }
   }
   return repairs.length ? { ...output, citationRepairs: repairs } : output;

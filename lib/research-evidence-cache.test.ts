@@ -129,6 +129,67 @@ describe("explicit omission citation canonicalization", () => {
   });
 });
 
+describe("single leading determiner citation canonicalization", () => {
+  const thesis = "roadmap does not represent an obligation or commitment to accomplish everything on it.";
+  const source = { ...item("roadmap"), content: `But your ${thesis}` };
+  const original = `A ${thesis}`;
+
+  it("selects the unchanged actual source fragment after the model's leading determiner", () => {
+    expect(matchResearchQuote(source.content, original)).toBeNull();
+    const result = validateResearchEvidenceCacheValue({ findings: [{ ...assessment(source), evidence: original }] }, [source], ["personal"]);
+    expect(result.findings[0].evidence).toBe(thesis);
+    expect(result.citationRepairs).toEqual([{ itemId: source.id, familyKey: "workflow-roadmap", original, selected: thesis, method: "leading_determiner_to_contiguous_span" }]);
+    expect(matchResearchQuote(source.content, result.findings[0].evidence)).toBe(thesis);
+  });
+
+  it.each(["a", "an", "the", "your", "our", "this", "that", "these", "those"])("may discard only the approved leading token %s", determiner => {
+    expect(canonicalResearchCitation(`But its ${thesis}`, `${determiner} ${thesis}`)).toBe(thesis);
+  });
+
+  it.each([
+    `not ${thesis}`, `will ${thesis}`, `may ${thesis}`, `2 ${thesis}`, `plan ${thesis}`,
+    `A the ${thesis}`, "A roadmap does represent an obligation or commitment to accomplish everything on it.",
+    "A roadmap does not represent an obligation or commitment to accomplish everything on it safely.",
+    "A road map does not represent an obligation or commitment to accomplish everything on it.",
+  ])("never drops content, negation, modal verbs, repeated tokens or a suffix: %s", evidence => {
+    expect(canonicalResearchCitation(source.content, evidence)).toBeNull();
+  });
+
+  it("does not repair changed numbers or a remainder shorter than the quote floor", () => {
+    expect(canonicalResearchCitation("But its roadmap covers 10 teams and requires a review before commitments.", "A roadmap covers 20 teams and requires a review before commitments.")).toBeNull();
+    expect(canonicalResearchCitation("But its roadmap fits.", "A roadmap fits.")).toBeNull();
+  });
+
+  it.each([false, true])("preserves numeric/category scores and every editorial field (categories:%s)", categories => {
+    const raw = { findings: [{ ...assessment(source), evidence: original, ...(categories ? { qualityComponents: {
+      sourceSupport: "supported_bounded_claim", usefulDecision: "concrete_decision", scopeHonesty: "accurately_bounded",
+    } } : {}) }] };
+    const before = researchEvidenceSchema.parse(raw).findings[0];
+    const after = validateResearchEvidenceCacheValue(raw, [source], ["personal"]).findings[0];
+    expect({ ...after, evidence: original }).toEqual(before);
+    expect(raw.findings[0].evidence).toBe(original);
+  });
+
+  it("reverifies the specific private repair method when reusing the cached value", async () => {
+    const h = harness();
+    const result = validateResearchEvidenceCacheValue({ findings: [{ ...assessment(source), evidence: original }] }, [source], ["personal"]);
+    await cacheValidResearchEvidenceItems(result, [source], h.access);
+    const saved = h.cache.get(await researchEvidenceItemCacheId(context, source));
+    expect(validateResearchEvidenceCacheValue(saved, [source], ["personal"])).toEqual(result);
+    const forged = { ...result, citationRepairs: result.citationRepairs!.map(repair => ({ ...repair, method: "ordered_omission_to_contiguous_span" })) };
+    expect(validateResearchEvidenceCacheValue(forged, [source], ["personal"])).not.toHaveProperty("citationRepairs");
+  });
+
+  it("does not bypass the existing section boundary after dropping the determiner", () => {
+    const row = researchSourceSections({ ...source, content: `Insight 1: Discovery\n\n${"Inspect actual customer behavior before choosing a product change. ".repeat(3)}\n\nInsight 2: Roadmaps\n\n${source.content}` });
+    const result = validateResearchEvidenceCacheValue({ findings: [{ ...assessment(row), evidence: original,
+      sectionChecks: row.sourceSections.map((section, index) => ({ sectionId: section.id, familyKeys: index === 0 ? ["workflow-roadmap"] : [], notPostworthyReason: index === 0 ? "" : "No separate decision supplied." })),
+    }] }, [row], ["personal"]);
+    expect(result.findings[0].evidence).toBe(thesis);
+    expect(() => validateResearchSectionCoverage(result.findings, [row])).toThrow("inside their claimed section body");
+  });
+});
+
 describe("independent source evidence reuse", () => {
   it("reuses two sources in a reordered three-source batch and regenerates only a changed body", async () => {
     const h = harness(), a = item("a"), b = item("b"), c = item("c");
