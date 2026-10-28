@@ -543,6 +543,11 @@ type ResearchSourceBackoff = { retryAtByHost: Record<string, number>; targets: D
 const MAX_COLLECTION_RATE_ATTEMPTS = 3;
 const MAX_COLLECTION_INLINE_WAIT_MS = 5 * 60_000;
 const collectionHost = (url: string) => new URL(url).hostname.replace(/^www\./, "");
+function researchContentChangedAt(content: string, observedAt: number) {
+  return content.trim().length >= 500
+    ? sql<number | null>`CASE WHEN ${research_items.content} IS NOT ${content} THEN ${observedAt} ELSE ${research_items.content_changed_at} END`
+    : sql<number | null>`${research_items.content_changed_at}`;
+}
 async function collectForRun(
   run: typeof research_runs.$inferSelect,
   sourceId: string,
@@ -691,6 +696,7 @@ async function collectForRun(
       if (previous && previous.title === item.title && previous.excerpt === item.excerpt &&
         (previous.publishedAt !== null || item.publishedAt === null) && bodyUnchanged) continue;
       const id = await researchHash(`${run.team_id}:${item.url}`);
+      const observedAt = Date.now();
       const inserted = await db
         .insert(research_items)
         .values({
@@ -701,12 +707,13 @@ async function collectForRun(
           title: item.title,
           excerpt: item.excerpt,
           published_at: item.publishedAt,
-          collected_at: Date.now(),
+          collected_at: observedAt,
           content_type: item.contentType,
           transcript_status: item.transcriptStatus,
           content: item.content || null,
           content_provenance: item.contentProvenance || "unknown",
           content_hash: contentHash,
+          content_changed_at: (item.content?.trim().length || 0) >= 500 ? observedAt : null,
         })
         .onConflictDoNothing()
         .returning({ id: research_items.id })
@@ -724,6 +731,7 @@ async function collectForRun(
               content: sql`CASE WHEN ${preserveEvidence} THEN ${research_items.content} ELSE ${item.content} END`,
               content_provenance: sql`CASE WHEN ${preserveEvidence} THEN ${research_items.content_provenance} ELSE ${item.contentProvenance || "unknown"} END`,
               content_hash: sql`CASE WHEN ${preserveEvidence} THEN ${research_items.content_hash} ELSE ${contentHash} END`,
+              content_changed_at: sql`CASE WHEN ${preserveEvidence} THEN ${research_items.content_changed_at} ELSE ${researchContentChangedAt(item.content, observedAt)} END`,
               transcript_status: sql`CASE WHEN ${preserveEvidence} THEN ${research_items.transcript_status} ELSE ${item.transcriptStatus} END`,
             } : {}),
           })
@@ -775,7 +783,9 @@ async function collectForRun(
           await db.update(research_items).set({
             ...(item.title ? { title: item.title } : {}), excerpt: item.excerpt,
             published_at: sql`COALESCE(${research_items.published_at}, ${item.publishedAt})`,
-            ...(item.content ? { content: item.content, content_hash: await researchHash(item.content), content_provenance: item.contentProvenance || "article" } : {}),
+            ...(item.content ? { content: item.content, content_hash: await researchHash(item.content), content_provenance: item.contentProvenance || "article",
+              content_changed_at: researchContentChangedAt(item.content, Date.now()),
+            } : {}),
           }).where(and(eq(research_items.team_id, run.team_id), eq(research_items.canonical_url, target.url)));
           deferred.delete(target.url);
           return { target, rateLimit: null };
@@ -817,6 +827,7 @@ async function collectForRun(
         if (!content) return;
         await db.update(research_items).set({
           content, content_hash: await researchHash(content), content_provenance: "transcript", transcript_status: "available",
+          content_changed_at: researchContentChangedAt(content, Date.now()),
         }).where(and(eq(research_items.team_id, run.team_id), eq(research_items.canonical_url, url)));
       }));
       progress.nextOffset += urls.length;
@@ -1032,7 +1043,10 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
     const undatedWatchSignal = articleWatches.length ? and(
       isNull(research_items.published_at), watchedUrls,
       eq(research_items.content_type, "article"),
-      gte(research_items.collected_at, windowStart), lte(research_items.collected_at, discoveryCutoff),
+      or(
+        and(gte(research_items.collected_at, windowStart), lte(research_items.collected_at, discoveryCutoff)),
+        and(gte(research_items.content_changed_at, windowStart), lte(research_items.content_changed_at, discoveryCutoff)),
+      ),
     ) : sql`0`;
     const eligibleSignal = and(
       or(datedSignal, undatedWatchSignal),
@@ -1133,9 +1147,12 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       if (content.length < 500) throw new Error("Insufficient article evidence");
       const contentHash = await researchHash(content);
       const contentProvenance = item.content_provenance === "abstract" ? "abstract" : "article";
-      await db.update(research_items).set({ content, content_hash: contentHash, content_provenance: contentProvenance })
+      const observedAt = Date.now();
+      await db.update(research_items).set({ content, content_hash: contentHash, content_provenance: contentProvenance,
+        content_changed_at: researchContentChangedAt(content, observedAt),
+      })
         .where(and(eq(research_items.id, item.id), eq(research_items.team_id, run.team_id)));
-      return { ...item, content, content_hash: contentHash, content_provenance: contentProvenance };
+      return { ...item, content, content_hash: contentHash, content_provenance: contentProvenance, content_changed_at: observedAt };
     }));
     full.forEach((result, index) => {
       if (result.status === "rejected") diagnostics.rejectedStories.push({
@@ -1215,6 +1232,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
           source_id: item.source_id, title: item.title, url: item.canonical_url,
           published_at: item.published_at ?? item.collected_at,
           source_published_at: item.published_at, source_discovered_at: item.collected_at,
+          source_content_changed_at: item.content_changed_at,
           signal_kind: researchItemSignalKind(item, run),
           status: existingFinding?.status || "new", idea_id: existingFinding?.idea_id || null,
           created_at: existingFinding?.created_at ?? Date.now(), content_type: item.content_type, transcript_status: item.transcript_status,
@@ -1243,6 +1261,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
               published_at: qualified.published_at,
               source_published_at: qualified.source_published_at,
               source_discovered_at: qualified.source_discovered_at,
+              source_content_changed_at: qualified.source_content_changed_at,
               signal_kind: qualified.signal_kind,
               content_type: qualified.content_type,
               transcript_status: qualified.transcript_status,

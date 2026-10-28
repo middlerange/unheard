@@ -124,7 +124,7 @@ export async function fetchResearchText(
   }
   throw new Error("Too many redirects");
 }
-export function plainResearchText(raw: string) {
+function decodedResearchMarkup(raw: string) {
   const entities: Record<string, string> = {
     amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
   };
@@ -142,10 +142,27 @@ export function plainResearchText(raw: string) {
     decoded = next;
   }
   return decoded
-    .replace(/<(script|style|nav|footer|header)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
-    .replace(/<!--[\s\S]*?-->|<![^>]*>|<\/?[a-zA-Z](?:"[^"]*"|'[^']*'|[^'">])*>/g, " ")
+    .replace(/<(script|style|nav|footer)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<!--[\s\S]*?-->|<![^>]*>/g, " ");
+}
+const researchMarkupTag = /<\/?[a-zA-Z](?:"[^"]*"|'[^']*'|[^'">])*>/g;
+export function plainResearchText(raw: string) {
+  return decodedResearchMarkup(raw)
+    .replace(/<header\b[^>]*>[\s\S]*?<\/header>/gi, " ")
+    .replace(researchMarkupTag, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+export function readableResearchText(raw: string) {
+  return decodedResearchMarkup(raw)
+    .replace(/<\/?(?:h[1-6]|p|div|section|article|main|blockquote|ul|ol|dl|table|tr)\b(?:"[^"]*"|'[^']*'|[^'">])*>/gi, "\n\n")
+    .replace(/<\/?(?:li|dt|dd)\b(?:"[^"]*"|'[^']*'|[^'">])*>|<br\b[^>]*>/gi, "\n")
+    .replace(researchMarkupTag, " ")
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .slice(0, 14_000);
 }
 export function parseResearchDate(
   raw: unknown,
@@ -209,9 +226,9 @@ export function parseResearchFeed(
       assertPublicResearchUrl(url, sourceHosts(source));
       const title = plainResearchText(nodeText(entry.title)).slice(0, 300);
       if (!title || !raw) return [];
-      const publicBody = source.kind === "youtube" ? "" : plainResearchText(
+      const publicBody = source.kind === "youtube" ? "" : readableResearchText(
         nodeText(entry["content:encoded"] || entry.content),
-      ).slice(0, 14_000);
+      );
       return [
         {
           url,
@@ -605,7 +622,7 @@ export async function fetchPublicYoutubeTranscript(
 
 export function articleResearchText(html: string) {
   const region = articleRegion(html);
-  return plainResearchText(region ? region.replace(/<\/?header\b[^>]*>/gi, "") : html);
+  return readableResearchText(region ? region.replace(/<\/?header\b[^>]*>/gi, "") : html);
 }
 
 export function articleResearchTitle(html: string) {

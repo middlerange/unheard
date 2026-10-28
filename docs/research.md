@@ -547,7 +547,7 @@ do not copy those keys locally to run an experiment.
 
 ### Distinct ideas and explicit reference watches
 
-Research v20 returns one primary assessment per source and an `additionalIdeas`
+Research v21 returns one primary assessment per source and an `additionalIdeas`
 array for genuinely different supported decisions. Every idea keeps its own
 profile choice, score, exact quote and story family. Several paraphrases of one
 claim do not create several ideas. Family identities retain their saved ideas,
@@ -583,7 +583,7 @@ Source keys, profile choices and local quote/coverage checks remain strict.
 Provider rejection diagnostics retain only an allowlisted configuration category;
 raw provider messages, credentials and prompts are never stored as diagnostics.
 
-Each v20 idea declares its claim basis and checks every supplied publishing
+Each v21 idea declares its claim basis and checks every supplied publishing
 profile independently. The application selects the highest-relevance fitting
 profile and sums the existing rubric: relevance (30), source support (25), useful
 decision (30), honest scope (15). The minimum remains 70, with the same exact quote
@@ -596,3 +596,7 @@ boilerplate; unfamiliar instructions remain unchanged.
 The compact wire uses arrays for source assessments and per-profile checks to keep the provider grammar compact. The application enforces exactly one assessment per input, exactly one check per enabled profile, quote validity and the same 70-point threshold.
 
 The v20 scoring contract supplies explicit weak, partial and clear anchors for each rubric component. Evidence is assessed against the declared bounded claim, with no empirical-outcome penalty for a documented capability or attributed reasoned position. Independent conclusions remain separate ideas.
+
+The v21 research contract separates the captured source fact from an explicitly reasoned editorial implication. The researcher may derive a bounded decision or test from a documented design/capability; the publisher need not have already written that implication. This does not permit invented factual premises or outcome claims. Below-threshold rejections can omit story families without aborting other items; every qualifying idea still requires its own family and source quote.
+
+Undated exact page watches also track real stored-body observation changes. `content_changed_at` records observation of new usable or different public text; it is never a publication date. Unchanged fetches, hash-only repair and preserved feed excerpts do not advance it. Findings freeze `source_content_changed_at` separately.

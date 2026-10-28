@@ -3,7 +3,7 @@ import { getDb } from "./db/client";
 import { research_cache, research_findings } from "./schema";
 import { retryResearchStorage } from "./research-storage";
 
-type SourceDateFields = "source_published_at" | "source_discovered_at" | "signal_kind";
+type SourceDateFields = "source_published_at" | "source_discovered_at" | "source_content_changed_at" | "signal_kind";
 export type ResearchFindingRow = Omit<typeof research_findings.$inferSelect, SourceDateFields>
   & Partial<Pick<typeof research_findings.$inferSelect, SourceDateFields>>;
 

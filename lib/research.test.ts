@@ -1896,7 +1896,7 @@ describe("research persistence and team isolation", () => {
       expect(update.mock.calls.filter(([table]) => table === schema.research_items)).toHaveLength(0);
       changed = true;
       expect(await collect("metadata-repeat-third", now + 2000)).toEqual({ collected: 1, error: null });
-      const rows = execute({ queries: [{ sql: "SELECT canonical_url,title,excerpt,published_at,collected_at,content,content_hash,content_provenance,transcript_status FROM research_items WHERE team_id='metadata-repeat'" }] })[0].results;
+      const rows = execute({ queries: [{ sql: "SELECT canonical_url,title,excerpt,published_at,collected_at,content,content_hash,content_changed_at,content_provenance,transcript_status FROM research_items WHERE team_id='metadata-repeat'" }] })[0].results;
       const item = (id: string) => rows.find((row: { canonical_url: string }) => row.canonical_url === `${origin}/metadata-repeat-${id}`);
       expect(item("stable")).toMatchObject({ title: "Stable original", published_at: published, collected_at: now, content: body });
       expect(item("metadata")).toMatchObject({ title: "Updated title", excerpt: "Updated supporting quote", content: changedBody, content_hash: await researchHash(changedBody), collected_at: now });
@@ -1904,9 +1904,73 @@ describe("research persistence and team isolation", () => {
       expect(item("hydrated")).toMatchObject({ title: "Updated hydrated title", excerpt: "New public excerpt", content: fullArticle, content_hash: hydratedHash, content_provenance: "article", published_at: published, collected_at: now });
       expect(item("transcript")).toMatchObject({ title: "Updated transcript title", excerpt: "Updated caption quote", content: fullTranscript, content_hash: transcriptHash, content_provenance: "transcript", transcript_status: "available", published_at: published, collected_at: now });
       expect(item("new")).toMatchObject({ published_at: published + 2000, collected_at: now + 2000 });
+      for (const id of ['stable', 'undated', 'hydrated', 'transcript']) expect(item(id).content_changed_at).toBe(now);
+      for (const id of ['metadata', 'new']) expect(item(id).content_changed_at).toBe(now + 2000);
       expect(fetcher).toHaveBeenCalledTimes(3);
     } finally {
       insert.mockRestore(); update.mockRestore(); fetcher.mockRestore(); clock.mockRestore();
+    }
+  }, 30_000);
+
+  it('qualifies an old undated watch only after its stored public body actually changes', async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === 'web')!, search = RESEARCH_SOURCE_SEEDS.find(source => source.kind === 'search')!;
+    const priorMode = seed.pageMode, priorUrl = seed.url, origin = new URL(seed.url).origin;
+    seed.pageMode = 'article'; seed.url = `${origin}/body-change-watch`;
+    const team = 'body-change-watch', now = Date.now(), firstSeen = now - 30 * 86_400_000;
+    const itemId = await researchHash(`${team}:${seed.url}`);
+    const oldQuote = 'An existing public resource explains how teams review a proposed workflow.';
+    const newQuote = 'The updated public resource adds a human review step before a consequential action.';
+    const page = (quote: string) => `<article><h1>Public workflow</h1><p>${quote.repeat(12)}</p></article>`;
+    const oldBody = articleResearchText(page(oldQuote));
+    execute({ queries: [
+      { sql: 'INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)', params: [team, team, team] },
+      { sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,NULL,?,?,'article')", params: [itemId, team, search.id, seed.url, 'Public workflow', oldBody.slice(0, 1600), firstSeen, oldBody] },
+      { sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance,content_changed_at) VALUES(?,?,?,?,?,?,NULL,?,?,'article',?)", params: [`${team}-ordinary`, team, search.id, `${origin}/ordinary-undated`, 'An unrelated undated reference', oldBody, firstSeen, oldBody, now + 1000] },
+    ] });
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now), previousKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'test-body-change';
+    let changed = false, assessments = 0;
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      if (String(url) === seed.url) return new Response(page(changed ? newQuote : oldQuote));
+      expect(String(url)).toBe('https://api.anthropic.com/v1/messages');
+      const input = JSON.parse(JSON.parse(String(init?.body)).messages[0].content);
+      expect(input.items).toHaveLength(1);
+      expect(input.items[0]).toMatchObject({ id: itemId, publishedAt: null, discoveredAt: firstSeen, signalKind: 'undated_reference' });
+      assessments++;
+      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 1, output_tokens: 1 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify({ findings: { [itemId]: {
+        claimBasis: 'described_method', profileChecks: Object.fromEntries(input.publishingProfiles.map((profile: { id: string }) => [profile.id, { fits: true, relevance: 27, reason: 'A supported product workflow review decision.' }])),
+        summary: 'A human review step', evidence: newQuote, contentAngle: 'Inspect the review gate before automating this action.', whyItMatters: 'A consequential product workflow decision.', limitations: 'Publication date is unknown; observing a body update does not establish novelty.', familyKey: 'observed-body-review-gate', qualityComponents: { sourceSupport: 22, usefulDecision: 25, scopeHonesty: 14 }, additionalIdeas: [],
+      } } }) }] }] });
+    });
+    async function collectAndRank(id: string, at: number) {
+      clock.mockReturnValue(at);
+      execute({ queries: [
+        { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'scan','collecting',1,0,?,'Product teams',2,?)", params: [id, team, at - 10, JSON.stringify([seed.id, search.id])] },
+        { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: [`${id}:${search.id}`, id, search.id] },
+      ] });
+      expect(await processResearchJob({ operation: 'collect', runId: id, sourceId: seed.id })).toEqual({ collected: 0, error: null });
+      await finishResearchRankJob(id);
+    }
+    const stored = () => execute({ queries: [{ sql: 'SELECT source_id,published_at,collected_at,content_hash,content_changed_at FROM research_items WHERE id=?', params: [itemId] }] })[0].results[0];
+    try {
+      await collectAndRank(`${team}-unchanged`, now);
+      expect(stored()).toMatchObject({ source_id: search.id, published_at: null, collected_at: firstSeen, content_hash: await researchHash(oldBody), content_changed_at: null });
+      expect(assessments).toBe(0);
+      changed = true;
+      await collectAndRank(`${team}-updated`, now + 1000);
+      expect(stored()).toMatchObject({ source_id: search.id, published_at: null, collected_at: firstSeen, content_changed_at: now + 1000 });
+      const [finding] = await getRunResearchFindings(team, `${team}-updated`);
+      expect(finding).toMatchObject({ item_id: itemId, source_content_changed_at: now + 1000, source_discovered_at: firstSeen, source_published_at: null, signal_kind: 'undated_reference' });
+      expect(researchFindingSourceContext(finding, { created_at: now + 990, days: 1 }, firstSeen)).toMatchObject({ publishedAt: null, discoveredAt: new Date(firstSeen).toISOString(), contentChangedAt: new Date(now + 1000).toISOString(), signalKind: 'undated_reference' });
+      expect(assessments).toBe(1);
+      await collectAndRank(`${team}-unchanged-later`, now + 2 * 86_400_000);
+      expect(stored().content_changed_at).toBe(now + 1000);
+      expect(await getRunResearchFindings(team, `${team}-unchanged-later`)).toEqual([]);
+      expect(assessments).toBe(1);
+    } finally {
+      seed.pageMode = priorMode; seed.url = priorUrl; fetcher.mockRestore(); clock.mockRestore();
+      if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousKey;
     }
   }, 30_000);
 
@@ -2158,9 +2222,10 @@ describe("research persistence and team isolation", () => {
       expect(await processResearchJob({ operation: "collect", runId: "article-chunks-run", sourceId: seed.id })).toEqual({ collected: 13, error: null });
       expect(fetched).toEqual(articles.map(article => article.url));
       expect(feedFetches).toBe(1);
-      const [last] = execute({ queries: [{ sql: "SELECT published_at,collected_at,content FROM research_items WHERE team_id='article-chunks' AND canonical_url=?", params: [articles[12].url] }] })[0].results;
+      const [last] = execute({ queries: [{ sql: "SELECT published_at,collected_at,content,content_changed_at FROM research_items WHERE team_id='article-chunks' AND canonical_url=?", params: [articles[12].url] }] })[0].results;
       expect(last).toMatchObject({ published_at: articles[12].at, collected_at: initial.collected_at });
       expect(last.content).toContain(content.trim());
+      expect(last.content_changed_at).toBeGreaterThanOrEqual(initial.collected_at);
     } finally {
       fetcher.mockRestore();
     }
@@ -2284,8 +2349,8 @@ describe("research persistence and team isolation", () => {
         sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: [`${runId}:${sourceId}`, runId, sourceId],
       })),
       ...rows.map(row => ({
-        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,NULL,?,?,'article')",
-        params: [row.id, team, row.sourceId, `${new URL(seed.url).origin}/${row.id}`, row.id, quote, row.firstSeen, row.body],
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance,content_changed_at) VALUES(?,?,?,?,?,?,NULL,?,?,'article',?)",
+        params: [row.id, team, row.sourceId, `${new URL(seed.url).origin}/${row.id}`, row.id, quote, row.firstSeen, row.body, row.id === 'watch-after-cutoff' ? now + 1000 : null],
       })),
     ] });
     const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 50);

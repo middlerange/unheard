@@ -425,7 +425,7 @@ export const research_items = sqliteTable('research_items', {
   id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }), source_id: text('source_id').notNull(),
   canonical_url: text('canonical_url').notNull(), title: text('title').notNull(), excerpt: text('excerpt').notNull(), published_at: integer('published_at'),
   content_provenance: text('content_provenance').notNull().default('unknown'),
-  content: text('content'), content_hash: text('content_hash'), collected_at: integer('collected_at').notNull(), content_type: text('content_type').notNull().default('article'), transcript_status: text('transcript_status').notNull().default('not_applicable'),
+  content: text('content'), content_hash: text('content_hash'), content_changed_at: integer('content_changed_at'), collected_at: integer('collected_at').notNull(), content_type: text('content_type').notNull().default('article'), transcript_status: text('transcript_status').notNull().default('not_applicable'),
 });
 export const research_cache = sqliteTable('research_cache', {
   id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }), value: text('value').notNull(), created_at: integer('created_at').notNull(),
@@ -434,6 +434,7 @@ export const research_findings = sqliteTable('research_findings', {
   id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }), run_id: text('run_id').notNull().references(() => research_runs.id, { onDelete: 'cascade' }), item_id: text('item_id').notNull().references(() => research_items.id, { onDelete: 'cascade' }),
   source_id: text('source_id').notNull(), title: text('title').notNull(), url: text('url').notNull(), published_at: integer('published_at').notNull(), score: integer('score').notNull(),
   source_published_at: integer('source_published_at'), source_discovered_at: integer('source_discovered_at'), signal_kind: text('signal_kind'),
+  source_content_changed_at: integer('source_content_changed_at'),
   summary: text('summary').notNull(), why_it_matters: text('why_it_matters').notNull(), content_angle: text('content_angle').notNull(), evidence: text('evidence').notNull(), limitations: text('limitations').notNull(),
   status: text('status').notNull().default('new'), idea_id: text('idea_id'), created_at: integer('created_at').notNull(), family_key: text('family_key').notNull(), content_type: text('content_type').notNull().default('article'), transcript_status: text('transcript_status').notNull().default('not_applicable'),
 });

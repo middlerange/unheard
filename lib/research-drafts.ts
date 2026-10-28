@@ -277,6 +277,7 @@ export async function runResearchDraftWriting(input: ResearchDraftWritingInput, 
         sourceContext: {
           ...(typeof source.publishedAt === "string" || source.publishedAt === null ? { publishedAt: source.publishedAt } : {}),
           ...(typeof source.discoveredAt === "string" ? { discoveredAt: source.discoveredAt } : {}),
+          ...(typeof source.contentChangedAt === "string" ? { contentChangedAt: source.contentChangedAt } : {}),
           ...(source.signalKind === "evergreen_newly_discovered" || source.signalKind === "fresh" || source.signalKind === "undated_reference"
             ? { signalKind: source.signalKind } : {}),
         },

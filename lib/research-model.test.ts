@@ -136,12 +136,14 @@ describe("explicit no-profile rejection families", () => {
     expect(validateResearchEvidenceProfiles(parsed.findings, ["personal"])).toEqual([positive, negative]);
     expect(validateResearchEvidence(parsed.findings, items)).toEqual([positive]);
   });
+  it("does not fail a batch when a rejected below-threshold idea has no family",()=>{
+    const rejected={...finding,score:42,familyKey:"",chosenProfileId:"personal",profileFit:"A weak adjacent idea."};
+    const parsed=researchEvidenceSchema.parse({findings:[finding,rejected]});
+    expect(validateResearchEvidence(parsed.findings,items)).toEqual([finding]);
+  });
   it.each([
     { score: 70, chosenProfileId: "personal" },
     { score: 70, chosenProfileId: null },
-    { score: 1, chosenProfileId: null },
-    { score: 0, chosenProfileId: "personal" },
-    { score: 0 },
   ])("keeps story families required for every other assessment: %j", choice => {
     expect(() => researchEvidenceSchema.parse({ findings: [{ ...finding, ...choice, familyKey: "" }] })).toThrow("story family");
   });

@@ -27,4 +27,11 @@ describe("truthful research source dates", () => {
     expect(researchItemSignalKind({ published_at: now - 1000 }, run)).toBe("fresh");
     expect(researchItemSignalKind({ published_at: now - 180 * 86_400_000 }, run)).toBe("evergreen_newly_discovered");
   });
+
+  it("keeps the body observation separate from unknown publication and the original first sighting", () => {
+    const oldFirstSeen = now - 180 * 86_400_000;
+    const reference = { published_at: oldFirstSeen, source_published_at: null, source_discovered_at: oldFirstSeen, source_content_changed_at: now, signal_kind: "undated_reference" };
+    expect(researchFindingDates(reference)).toEqual({ publishedAt: null, discoveredAt: oldFirstSeen, contentChangedAt: now, signalKind: "undated_reference" });
+    expect(researchFindingSourceContext(reference, run, firstSeen)).toEqual({ publishedAt: null, discoveredAt: new Date(oldFirstSeen).toISOString(), contentChangedAt: new Date(now).toISOString(), signalKind: "undated_reference" });
+  });
 });

@@ -7,9 +7,11 @@ import {
   fetchResearchText,
   parseResearchFeed,
   plainResearchText,
+  readableResearchText,
   sourceHosts,
   ResearchRateLimitError,
 } from "./research-collectors";
+import { matchResearchQuote } from "./research-model";
 import type { ResearchSourceSeed } from "./research-types";
 
 const NOW = Date.parse("2026-10-23T12:00:00Z");
@@ -22,6 +24,43 @@ const evidence = "A public research finding about customer adoption and product 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("public research evidence and publication dates", () => {
+  it("keeps five report conclusions separate in article and public feed bodies", () => {
+    const sections = [
+      ["Insight 1: Investment priorities", "Respondents plan to increase AI search investment; this measures intended spending, not channel returns."],
+      ["Insight 2: Channel effectiveness", "Network introductions ranked first and intimate events second; adoption is a separate dimension."],
+      ["Insight 3: AI search", "AI search is a core channel for 39% of respondents; this is not the share of tools that are AI-first."],
+      ["Insight 4: Buyer signals", "Combine first-party product activity with third-party changes to decide which account play to run."],
+      ["Insight 5: Tool turnover", "Seven of the ten must-try tools were new to the list; this measures turnover, not the number of AI tools."],
+    ];
+    const body = `<h1>Five GTM report findings</h1>${sections.map(([heading, finding]) => `<section><h2>${heading}</h2><p>${finding}</p></section>`).join("")}<ul><li>Review the population.</li><li>Keep each denominator attached to its finding.</li></ul>`;
+    const html = `<title>Five GTM report findings</title><nav>Wrong navigation conclusion</nav><article>${body}<script>Wrong script conclusion</script><style>Wrong style conclusion</style></article>`;
+    const rss = `<rss><channel><item><title>Five GTM report findings</title><link>https://example.com/report</link><description>Short public teaser</description><content:encoded><![CDATA[${body}]]></content:encoded></item></channel></rss>`;
+    const atom = `<feed><entry><title>Five GTM report findings</title><link href="https://example.com/report"/><content type="html"><![CDATA[${body}]]></content></entry></feed>`;
+    const expected = ["Five GTM report findings", ...sections.flat(), "Review the population.", "Keep each denominator attached to its finding."];
+    for (const content of [articleResearchText(html), parseResearchFeed(rss, source)[0].content!, parseResearchFeed(atom, source)[0].content!]) {
+      expect(content.split(/\n+/)).toEqual(expected);
+      expect(plainResearchText(content)).toBe(plainResearchText(body));
+      const [heading, finding] = sections[4];
+      expect(matchResearchQuote(content, `${heading} ${finding}`)).toBe(`${heading}\n\n${finding}`);
+      expect(content).not.toContain("Wrong");
+    }
+    expect(parseResearchFeed(rss, source)[0]).toMatchObject({ title: "Five GTM report findings", excerpt: "Short public teaser", contentProvenance: "public_feed" });
+    expect(plainResearchText(body)).not.toContain("\n");
+  });
+
+  it("preserves decoded heading, paragraph and list boundaries within the public body limit", () => {
+    const headings = Array.from({ length: 6 }, (_, index) => `<h${index + 1}>Heading ${index + 1}</h${index + 1}>`).join("");
+    const html = `${headings}<p>First &amp; accurate paragraph.</p><p>Second<br>line.</p><ol><li>First item.</li><li>Second item.</li></ol>`;
+    const escaped = html.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    expect(readableResearchText(escaped).split(/\n+/)).toEqual([
+      "Heading 1", "Heading 2", "Heading 3", "Heading 4", "Heading 5", "Heading 6",
+      "First & accurate paragraph.", "Second", "line.", "First item.", "Second item.",
+    ]);
+    expect(readableResearchText(`<p>${"Evidence ".repeat(2000)}</p>`)).toHaveLength(14_000);
+    expect(readableResearchText("&lt;header&gt;&lt;h1&gt;Report heading&lt;/h1&gt;&lt;/header&gt;<p>Original finding.</p>")).toBe("Report heading\n\nOriginal finding.");
+    expect(readableResearchText('&lt;script&gt;hidden&lt;/script&gt;<style>hidden</style><nav>hidden</nav><!--<h2>hidden</h2>--><p>Visible evidence.</p>')).toBe("Visible evidence.");
+  });
+
   it("preserves HTTP 429 Retry-After without retrying inside the request", async () => {
     const fetcher = vi.fn(async () => new Response("Slow down", { status: 429, headers: { "retry-after": "120" } }));
     const error = await fetchResearchText("https://example.com/research", sourceHosts(source), fetcher).catch(error => error);
@@ -202,7 +241,7 @@ describe("public source discovery", () => {
     expect([...sourceHosts(source)].sort()).toEqual(["example.com", "www.example.com"]);
     expect(sourceHosts({ ...source, url: "https://www.example.com/research" })).toEqual(sourceHosts(source));
     const redirect = vi.fn(async () => new Response(null, { status: 302, headers: { location: "https://private.example.com/story" } }));
-    await expect(fetchResearchText(source.url, sourceHosts(source), redirect)).rejects.toThrow("outside the approved");
+    await expect(fetchResearchText(source.url, sourceHosts(source), redirect)).rejects.toThrow("Source redirect rejected");
     expect(redirect).toHaveBeenCalledTimes(1);
     const publicRedirect = vi.fn(async (url: string | URL | Request) => String(url).includes("www.")
       ? new Response("public content", { headers: { "content-type": "text/html" } })

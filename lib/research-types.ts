@@ -72,6 +72,7 @@ export type ResearchFinding = {
   url: string;
   publishedAt: number | null;
   discoveredAt: number | null;
+  contentChangedAt?: number;
   signalKind: import("./research-dates").ResearchSignalKind | null;
   score: number;
   summary: string;
@@ -116,6 +117,7 @@ export type ResearchDraftContent = {
   sourceContext?: {
     publishedAt?: string | null;
     discoveredAt?: string;
+    contentChangedAt?: string;
     signalKind?: import("./research-dates").ResearchSignalKind;
   };
   targets: Array<{

@@ -1939,5 +1939,49 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "enabled": true,
     "priority": 2,
     "notes": "Explicit public original reference watch. Preserve actual publication dates, unknown-date status and first observation; a newly observed old reference is not a new event. Attribute the original author/vendor, retain access limitations, and share only claims supported by the actually captured body. This known-page watch establishes reference coverage, not independent discovery of unseen material."
+  },
+  {
+    "id": "reference-2ac1625f4e6f",
+    "name": "Velociti — AI product operating system",
+    "url": "https://www.velocitipm.com/blog/the-ai-product-operating-system-why-knowing-what-to-build-is-the-only-moat-left",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Explicit public original reference watch. Preserve original publication dates and unknown-date status; a newly observed reference is not a new event. Attribute claims and retain access limitations. Known-page coverage is not blind discovery of unseen sources."
+  },
+  {
+    "id": "reference-328cdb605591",
+    "name": "April Dunford — Positioning and competition",
+    "url": "https://www.aprildunford.com/post/positioning-and-competition",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Explicit public original reference watch. Preserve original publication dates and unknown-date status; a newly observed reference is not a new event. Attribute claims and retain access limitations. Known-page coverage is not blind discovery of unseen sources."
+  },
+  {
+    "id": "reference-47f8905a46b4",
+    "name": "Google Ads — Demand Gen campaigns",
+    "url": "https://support.google.com/google-ads/answer/13695777?hl=en",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Explicit public original reference watch. Preserve original publication dates and unknown-date status; a newly observed reference is not a new event. Attribute claims and retain access limitations. Known-page coverage is not blind discovery of unseen sources."
+  },
+  {
+    "id": "reference-b05bd29548a3",
+    "name": "Growth Unhinged — State of B2B GTM report",
+    "url": "https://www.growthunhinged.com/p/2026-state-of-b2b-gtm-report",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "research",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Explicit original report watch. Preserve publication date and survey population/denominators; inspect distinct findings rather than treating the report as one conclusion. Known reference coverage is not independent discovery."
   }
 ];
