@@ -600,6 +600,23 @@ async function collectForRun(
       researchDiscoveryBlockedHosts(RESEARCH_SOURCE_SEEDS),
       { deferArticleFetch: true },
     );
+    const observedAt = Date.now();
+    const observation = JSON.stringify({
+      teamId: run.team_id, runId: run.id, sourceId, observedAt,
+      windowStart: run.created_at - run.days * 86_400_000, windowEnd: run.created_at,
+      items: collection.items.map(item => ({
+        url: item.url, title: item.title, publishedAt: item.publishedAt,
+        contentType: item.contentType, transcriptStatus: item.transcriptStatus,
+        ...(item.contentProvenance ? { contentProvenance: item.contentProvenance } : {}),
+        ...(item.content !== undefined ? { bodyCharacters: item.content.length } : {}),
+      })),
+      pendingArticles: collection.pendingArticles || [],
+      deferredArticles: backoff.targets,
+      warning: collection.warning,
+    });
+    await retryResearchStorage(async () => db.insert(research_cache).values({
+      id: `collection-observation:${stepId}`, team_id: run.team_id, value: observation, created_at: observedAt,
+    }).onConflictDoNothing());
     error = collection.warning;
     const itemUrls = new Set(collection.items.map(item => item.url));
     const pendingTargets = new Map([...(collection.pendingArticles || []), ...backoff.targets].map(target => [target.url, target]));

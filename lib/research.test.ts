@@ -1788,6 +1788,79 @@ describe("research persistence and team isolation", () => {
     }
   }, 30_000);
 
+  it.each(['rss', 'web'] as const)("captures immutable %s observations before excluding known items and retries only storage", async kind => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === kind && !source.backfillUrls?.length &&
+      (kind === 'rss' ? Boolean(source.feedUrl) : !source.feedUrl))!;
+    const team = `collection-observation-${kind}`, runId = `${team}-run`, now = Date.now();
+    const published = Math.floor((now - 1000) / 1000) * 1000;
+    const url = `${new URL(seed.url).origin}/observation-known`, deferredUrl = `${new URL(seed.url).origin}/observation-old-backoff`;
+    const body = 'A concrete public workflow describes a practitioner decision and its implementation limits. '.repeat(20).trim();
+    execute({ queries: [
+      { sql: 'INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)', params: [team, team, team] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'collect','collecting',14,0,?,'Product teams',1,?)", params: [runId, team, now, JSON.stringify([seed.id])] },
+      ...[url, deferredUrl].map((canonicalUrl, index) => ({
+        sql: 'INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_hash,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+        params: [`${team}-${index}`, team, seed.id, canonicalUrl, 'Known original workflow', 'Public summary', published, now - 1000, body, '', 'article'],
+      })),
+      { sql: 'INSERT INTO research_cache(id,team_id,value,created_at) VALUES(?,?,?,?)', params: [`collection-backoff:${team}:${seed.id}`, team, JSON.stringify({ retryAtByHost: {}, targets: [{ url: deferredUrl, title: 'Old deferred page' }] }), now] },
+    ] });
+    let changed = false, attempts = 0;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      expect(String(input)).toBe(seed.feedUrl || seed.url);
+      const title = changed ? 'Changed index title' : 'Known original workflow';
+      return new Response(kind === 'rss'
+        ? `<rss><channel><item><title>${title}</title><link>${url}</link><description>Public summary</description><pubDate>${new Date(published).toUTCString()}</pubDate><content:encoded><![CDATA[<p>${body}</p>]]></content:encoded></item></channel></rss>`
+        : `<main><a href="${url}">${title}</a></main>`);
+    });
+    const observationId = `collection-observation:${runId}:${seed.id}`;
+    storageFault = (queries, phase) => {
+      if (phase === (kind === 'rss' ? 'after' : 'before') && queries.some(query => query.sql.startsWith('insert into "research_cache"') && query.params.includes(observationId))) {
+        if (++attempts === 1) throw new Error('D1_ERROR: Network connection lost.');
+      }
+    };
+    try {
+      expect(await processResearchJob({ operation: 'collect', runId, sourceId: seed.id })).toEqual({ collected: 0, error: null });
+      expect(attempts).toBe(2);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      const [saved] = execute({ queries: [{ sql: 'SELECT team_id,value,created_at FROM research_cache WHERE id=?', params: [observationId] }] })[0].results;
+      expect(saved.team_id).toBe(team);
+      expect(JSON.parse(saved.value)).toEqual({
+        teamId: team, runId, sourceId: seed.id, observedAt: now, windowStart: now - 14 * 86_400_000, windowEnd: now,
+        items: kind === 'rss' ? [{ url, title: 'Known original workflow', publishedAt: published, contentType: 'article', transcriptStatus: 'not_applicable', contentProvenance: 'public_feed', bodyCharacters: body.length }] : [],
+        pendingArticles: kind === 'web' ? [{ url }] : [],
+        deferredArticles: [{ url: deferredUrl, title: 'Old deferred page' }], warning: null,
+      });
+      expect(saved.value).not.toContain(body);
+      storageFault = undefined;
+      changed = true;
+      clock.mockReturnValue(now + 1000);
+      execute({ queries: [
+        { sql: "UPDATE research_run_sources SET status='pending' WHERE id=?", params: [`${runId}:${seed.id}`] },
+        { sql: 'DELETE FROM research_cache WHERE id=?', params: [`collection-progress:${runId}:${seed.id}`] },
+      ] });
+      await processResearchJob({ operation: 'collect', runId, sourceId: seed.id });
+      await processResearchJob({ operation: 'collect', runId, sourceId: seed.id });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(execute({ queries: [{ sql: 'SELECT team_id,value,created_at FROM research_cache WHERE id=?', params: [observationId] }] })[0].results).toEqual([saved]);
+    } finally { storageFault = undefined; fetcher.mockRestore(); clock.mockRestore(); }
+  }, 20_000);
+
+  it('does not fabricate a collection observation when index retrieval fails', async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === 'rss' && source.feedUrl && !source.backfillUrls?.length)!;
+    const team = 'collection-observation-failure', runId = `${team}-run`, now = Date.now();
+    execute({ queries: [
+      { sql: 'INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)', params: [team, team, team] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'collect','collecting',14,0,?,'Product teams',1,?)", params: [runId, team, now, JSON.stringify([seed.id])] },
+    ] });
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('Unavailable', { status: 503 }));
+    try {
+      expect(await processResearchJob({ operation: 'collect', runId, sourceId: seed.id })).toMatchObject({ collected: 0, error: expect.stringContaining('503') });
+      expect(execute({ queries: [{ sql: 'SELECT value FROM research_cache WHERE id=?', params: [`collection-observation:${runId}:${seed.id}`] }] })[0].results).toEqual([]);
+      expect(execute({ queries: [{ sql: 'SELECT status FROM research_run_sources WHERE id=?', params: [`${runId}:${seed.id}`] }] })[0].results).toEqual([{ status: 'failed' }]);
+    } finally { fetcher.mockRestore(); }
+  });
+
   function savedArticleQueue(team: string, source: ResearchSourceSeed, urls: string[], now: number, rateLimits = {}) {
     const runId = `${team}-run`;
     execute({ queries: [
