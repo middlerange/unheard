@@ -6,7 +6,8 @@ import { getFrozenResearchAudience } from "./research-audience";
 import { researchSelectionAudience, RESEARCH_SELECTION_VIEW_VERSION } from "./research-selection-audience";
 import { cacheValidResearchEvidenceItems, researchEvidenceFailures, researchEvidenceItemCacheId, reuseResearchEvidenceItems, validateResearchEvidenceCacheValue, type EvidenceCacheInput, type EvidenceCacheValue, type EvidenceFailure } from "./research-evidence-cache";
 import { repairResearchCitation, RESEARCH_QUOTE_REPAIR_INSTRUCTIONS, sameContextQuoteFailure, verifyResearchEvidenceFailure } from "./research-quote-repair";
-import { coverResearchEvidence, ResearchCoveragePending, RESEARCH_COVERAGE_VERSION } from "./research-coverage";
+import { coverResearchEvidence, ResearchCoveragePending, RESEARCH_COVERAGE_VERSION, type ResearchCoverageAccess } from "./research-coverage";
+import { reviewResearchSources, ResearchSourceReviewPending, RESEARCH_SOURCE_REVIEW_VERSION } from "./research-source-review";
 import { researchFindingDates, researchItemSignalKind } from "./research-dates";
 import { getDraftResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
 import { hasUsablePewResearchBody, isPewResearchSource } from "./research-pew";
@@ -1125,15 +1126,16 @@ async function cachedModel(
     selectionViewVersion: RESEARCH_SELECTION_VIEW_VERSION, selectionAudience: researchSelectionAudience(audience),
     schemaForItem: (id: string) => evidenceJsonSchemaForItems([id], profileIds, { sectionCoverage: true }),
   };
-  const pointerId = `${run.mode === "replay" ? "research-replay:" : "research-coverage-run:"}${run.id}:coverage:${await researchHash(JSON.stringify(sources))}`;
-  const recordCoverage = async (planIds: string[], manifestIds: string[], pending: boolean) => {
+  const pointerPrefix = `${run.mode === "replay" ? "research-replay:" : "research-coverage-run:"}${run.id}:`;
+  const inputHash = await researchHash(JSON.stringify(sources));
+  const recordPhase = async (phase: string, version: string, planIds: string[], manifestIds: string[], pending: boolean) => {
     if (!planIds.length && !manifestIds.length) return;
-    const value = JSON.stringify({ version: RESEARCH_COVERAGE_VERSION, planIds, manifestIds, pending });
+    const pointerId = `${pointerPrefix}${phase}:${inputHash}`;
+    const value = JSON.stringify({ version, planIds, manifestIds, pending });
     await retryResearchStorage(async () => db.insert(research_cache).values({ id: pointerId, team_id: run.team_id, value, created_at: Date.now() })
       .onConflictDoUpdate({ target: research_cache.id, set: { value } }));
   };
-  try {
-    const covered = await coverResearchEvidence(sources, base as EvidenceCacheValue, {
+  const storage: Omit<ResearchCoverageAccess, "generate"> = {
       context, budget, read,
       claim: async (id, value) => (await db.insert(research_cache).values({ id, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now() })
         .onConflictDoNothing().returning({ id: research_cache.id })).length === 1,
@@ -1141,17 +1143,28 @@ async function cachedModel(
         .where(and(eq(research_cache.id, id), eq(research_cache.team_id, run.team_id), eq(research_cache.value, JSON.stringify(expected))))
         .returning({ id: research_cache.id })).length === 1,
       writeImmutable: async (id, value) => { await db.insert(research_cache).values({ id, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now() }).onConflictDoNothing(); },
+  };
+  try {
+    const covered = await coverResearchEvidence(sources, base as EvidenceCacheValue, {
+      ...storage,
       generate: async item => await baseCachedModel(run, "evidence", [item], system,
         evidenceJsonSchemaForItems([item.id], profileIds, { sectionCoverage: true }), outputTokens) as EvidenceCacheValue,
     });
-    await recordCoverage([], covered.manifestIds, false);
-    return covered.manifestIds.length ? { ...covered.value, coverageManifestIds: covered.manifestIds } : covered.value;
+    await recordPhase("coverage", RESEARCH_COVERAGE_VERSION, [], covered.manifestIds, false);
+    const reviewed = await reviewResearchSources(sources, { ...covered.value, coverageManifestIds: covered.manifestIds }, {
+      ...storage,
+      generate: async request => (await callResearchModel(request.instructions, request.data, request.schema, outputTokens,
+        { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? "replay_review_evidence" : "review_evidence" }, request.model)).value,
+    });
+    await recordPhase("source-review", RESEARCH_SOURCE_REVIEW_VERSION, [], reviewed.manifestIds, false);
+    return reviewed.value;
   } catch (error) {
-    if (error instanceof ResearchCoveragePending) await recordCoverage(error.planIds, error.manifestIds, true);
+    if (error instanceof ResearchSourceReviewPending) await recordPhase("source-review", RESEARCH_SOURCE_REVIEW_VERSION, error.planIds, error.manifestIds, true);
+    else if (error instanceof ResearchCoveragePending) await recordPhase("coverage", RESEARCH_COVERAGE_VERSION, error.planIds, error.manifestIds, true);
     throw error;
   }
 }
-export { cachedModel as cachedResearchModel };
+export { cachedModel as cachedResearchModel, baseCachedModel as cachedResearchBaseModel };
 type ResearchRankDiagnostics = ResearchRunDiagnostics & Required<Pick<ResearchRunDiagnostics, "evidenceCount" | "rejectedStories" | "screenedCount">>;
 type ResearchRankProgress = {
   candidateIds?: string[];

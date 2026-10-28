@@ -1,5 +1,6 @@
 import { matchResearchQuote, researchEvidenceSchema, researchHash, validateResearchEvidenceCoverage, validateResearchEvidenceProfiles, type ResearchEvidence } from "./research-model";
 import { RESEARCH_POST_MIN_SCORE } from "./research-policy";
+import type { ResearchSourceReviewProof, ResearchSourceReviewDiagnostic } from "./research-source-review-model";
 
 export type EvidenceCacheInput = { id: string; content?: string; [key: string]: unknown };
 export type EvidenceFailure = { itemId: string; reason: string; receiptId: string };
@@ -7,7 +8,12 @@ export type CitationRepair = { itemId: string; familyKey: string; original: stri
   { method: "ordered_omission_to_contiguous_span" | "leading_determiner_to_contiguous_span" }
   | { method: "model_passage_selection"; requestId: string; passageId: number; start: number; end: number; bodyHash: string; gradeHash: string }
 );
-export type EvidenceCacheValue = { findings: ResearchEvidence[]; citationRepairs?: CitationRepair[]; evidenceFailures?: EvidenceFailure[]; coverageManifestIds?: string[] };
+export type EvidenceCacheValue = {
+  findings: ResearchEvidence[]; citationRepairs?: CitationRepair[]; evidenceFailures?: EvidenceFailure[];
+  coverageManifestIds?: string[]; sourceReviewManifestIds?: string[];
+  multiProofs?: Array<ResearchSourceReviewProof & { reviewManifestId: string }>;
+  sourceReviewDiagnostics?: Array<ResearchSourceReviewDiagnostic & { reviewManifestId: string }>;
+};
 export type EvidenceCacheContext = {
   teamId: string;
   model: string;

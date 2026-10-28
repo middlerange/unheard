@@ -101,8 +101,9 @@ import {
   researchSourceErrorMessage,
   updateResearchSettings,
   updateResearchSource,
-  cachedResearchModel,
+  cachedResearchBaseModel,
 } from "./research";
+import { RESEARCH_SOURCE_REVIEW_INSTRUCTIONS } from "./research-source-review-model";
 async function finishResearchDraftJob(runId: string) {
   let result = await processResearchDraftJob(runId);
   while ("pending" in result && result.pending) result = await processResearchDraftJob(runId);
@@ -401,7 +402,7 @@ describe("research persistence and team isolation", () => {
         qualityComponents: { sourceSupport: 23, usefulDecision: 25, scopeHonesty: 14 },
       })) }) }] }] });
     });
-    const assess = (run: typeof first, items: typeof inputs) => cachedResearchModel(run, "evidence", items, RESEARCH_EVIDENCE_INSTRUCTIONS, {}, 8192);
+    const assess = (run: typeof first, items: typeof inputs) => cachedResearchBaseModel(run, "evidence", items, RESEARCH_EVIDENCE_INSTRUCTIONS, {}, 8192);
     try {
       await expect(assess(first, inputs)).rejects.toThrow("every input exactly once");
       const saved = execute({ queries: [{ sql: "SELECT value FROM research_cache WHERE team_id='a' AND id LIKE 'evidence-item:v1:%'", params: [] }] })[0].results;
@@ -437,9 +438,8 @@ describe("research persistence and team isolation", () => {
     process.env.ANTHROPIC_API_KEY = "test-structured-audience";
     globalThis.__contentHubResearchWorkflow__ = { create: vi.fn(async () => ({})) };
     const quote = "People who encountered an AI summary clicked a traditional search result less often in the observed visits.";
-    let calls = 0;
+    let sourceCalls = 0, reviewCalls = 0;
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
-      calls++;
       const request = JSON.parse(String(init?.body)), input = JSON.parse(request.messages[0].content);
       expect(input.icp).toBeUndefined();
       expect(input.generalAudience).toBe(general);
@@ -450,6 +450,24 @@ describe("research persistence and team isolation", () => {
       expect(input.publishingProfiles).toHaveLength(2);
       const choices = fixtureResearchSchema(request).$defs.profileCheck.properties.profileId.enum;
       expect([...choices].sort()).toEqual(["audience-company", "audience-personal"]);
+      if (Array.isArray(input.items[0].passages)) {
+        reviewCalls++;
+        expect(request.system).toBe(RESEARCH_SOURCE_REVIEW_INSTRUCTIONS);
+        expect(input.items[0]).not.toHaveProperty("content");
+        expect(input.items[0]).not.toHaveProperty("excerpt");
+        expect(input.items[0].passages.some((passage: { text: string }) => passage.text.includes(quote))).toBe(true);
+        return modelResponseFixture({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ findings: {
+          "audience-item": {
+            claimBasis: "no_useful_core", familyKey: "no-additional-reviewed-core",
+            profileChecks: input.publishingProfiles.map((profile: { id: string }) => ({ profileId: profile.id, fits: false, relevance: 0, reason: "No additional supported reader decision beyond the preserved parent finding." })),
+            qualityComponents: { sourceSupport: "unsupported", usefulDecision: "none", scopeHonesty: "accurately_bounded" },
+            claim: { summary: "No additional supported core.", evidencePassageIds: [], contentAngle: "", whyItMatters: "", limitations: "The accepted parent finding remains unchanged." },
+            additionalIdeas: [],
+          },
+        } }) }] }] });
+      }
+      sourceCalls++;
+      expect(input.items[0].content).toBe(quote.repeat(8));
       return modelResponseFixture({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ findings: [{
         itemId: "audience-item", chosenProfileId: "audience-personal", profileFit: "The personal profile explicitly covers distribution; inspect qualified referral traffic rather than treating company onboarding scope as a veto.",
         summary: "Observed search referral behavior", evidence: quote, contentAngle: "Measure qualified search referrals before changing distribution priorities", whyItMatters: "A personal growth practitioner chooses a distribution test", limitations: "Observational study, no causal claim", familyKey: "observed-search-referrals", score: 82,
@@ -467,10 +485,13 @@ describe("research persistence and team isolation", () => {
           && query.params.some(param => typeof param === "string" && param.includes('"nextOffset":1')))) throw new Error("Network connection lost.");
       };
       await expect(processResearchJob({ operation: "rank", runId: run.id })).rejects.toThrow("Network connection lost");
+      expect({ sourceCalls, reviewCalls }).toEqual({ sourceCalls: 1, reviewCalls: 1 });
       storageFault = undefined;
       await finishResearchRankJob(run.id);
-      expect(calls).toBe(1);
+      expect({ sourceCalls, reviewCalls }).toEqual({ sourceCalls: 1, reviewCalls: 1 });
+      expect(fetcher).toHaveBeenCalledTimes(2);
       expect(execute({ queries: [{ sql: "SELECT findings_count,cache_hits FROM research_runs WHERE id=?", params: [run.id] }] })[0].results[0]).toMatchObject({ findings_count: 1, cache_hits: 1 });
+      expect((await getRunResearchFindings(team, run.id))[0]).toMatchObject({ score: 82, evidence: quote, family_key: "observed-search-referrals" });
       const saved = execute({ queries: [{ sql: "SELECT * FROM research_runs WHERE id=?", params: [run.id] }] })[0].results[0];
       expect((await getFrozenResearchAudience(saved)).publishingProfiles.find(profile => profile.id === "audience-personal")?.systemPrompt).toBe(personal);
       const snapshot = execute({ queries: [{ sql: "SELECT value FROM research_cache WHERE id=?", params: [`research-audience:${run.id}`] }] })[0].results[0].value;

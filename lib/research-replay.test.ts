@@ -1,12 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { spawnSync } from 'node:child_process';
-import { closeSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { drizzle } from 'drizzle-orm/d1';
 import * as schema from './schema';
 import { researchReplayAction, researchReplayStatus, researchReplayRequestSchema, researchReplayItemSchema, researchReplayEligibility, researchReplayRoute, readResearchReplayRequest, researchReplaySignalKind } from './research-replay';
 import { processResearchJob, createResearchRun } from './research';
+import { createSyncResearchSqlite } from './research-test-sqlite';
+import { researchHash } from './research-model';
 const state = vi.hoisted(() => ({ db: null as unknown }));
 vi.mock('./db/client', () => ({ getDb: async () => state.db }));
 const body = 'A practitioner describes checking each user entry route before adding an onboarding requirement. '.repeat(8);
@@ -14,6 +15,17 @@ const item = (id: string) => ({ id, sourceId: 'linear-product-craft', url: `http
   content: body, contentProvenance: 'public_feed', contentType: 'article' as const, transcriptStatus: 'not_applicable' as const });
 const prepare = (runId: string, count = 1) => ({ operation: 'prepare', runId, audienceRunId: 'saved-audience', windowStart: 1000, windowEnd: 2000, inventorySha256: 'a'.repeat(64), inventoryCount: count, sourceIds: ['linear-product-craft'] });
 async function rankPending(runId: string) { const result = await processResearchJob({ operation: 'rank', runId }); return 'pending' in result && result.pending; }
+function rejectedSourceReview(payload: any) {
+  return { findings: Object.fromEntries(payload.items.map((source: any) => [source.id, {
+    claimBasis: 'no_useful_core',
+    profileChecks: payload.publishingProfiles.map((profile: any) => ({ profileId: profile.id, fits: false, relevance: 0, reason: 'No additional supported core beyond the existing fixture finding.' })),
+    claim: { summary: 'No additional supported core beyond the existing fixture finding.', evidencePassageIds: [], contentAngle: '', whyItMatters: '', limitations: 'The source supports the cached base finding only.' },
+    familyKey: '', qualityComponents: { sourceSupport: 'unsupported', usefulDecision: 'none', scopeHonesty: 'accurately_bounded' }, additionalIdeas: [],
+  }])) };
+}
+function modelResponse(value: unknown, id: string) {
+  return Response.json({ id, model: 'claude-haiku-5-5', stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(value) }], usage: { input_tokens: 10, output_tokens: 10 } });
+}
 const runIds = ['11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-222222222222','33333333-3333-4333-8333-333333333333','44444444-4444-4444-8444-444444444444'];
 it('rejects labels, expected outcomes, private URLs and unsupported inventory sizes before preparation', () => {
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), expectedGrade: 90 }).success).toBe(false);
@@ -54,12 +66,8 @@ it('separates undated watch observations and historical references from fresh pu
 
 describe('configured replay persistence and paid cache boundary', () => {
   const folder = mkdtempSync(join(tmpdir(), 'research-replay-')), path = join(folder, 'db.sqlite');
-  const python = `import json,sqlite3,sys\np=json.load(sys.stdin)\nc=sqlite3.connect(p['path']);c.row_factory=sqlite3.Row;c.execute('PRAGMA foreign_keys=ON')\nif 'script' in p:\n c.executescript(p['script']);c.commit();print('[]')\nelse:\n out=[]\n for q in p['queries']:\n  cur=c.execute(q['sql'],q.get('params',[]));out.append({'results':[dict(r) for r in cur.fetchall()],'success':True,'meta':{'changes':cur.rowcount}})\n c.commit();print(json.dumps(out))`;
+  const sqlite = createSyncResearchSqlite(path), execute = sqlite.execute;
   let fault: ((queries: Array<{sql:string;params:unknown[]}>, phase:string) => void) | undefined;
-  function execute(payload: object) {
-    const inputPath = join(folder, 'query.json'); writeFileSync(inputPath, JSON.stringify({ path, ...payload })); const input = openSync(inputPath, 'r');
-    try { const r = spawnSync('python3', ['-c', python], { stdio:[input,'pipe','pipe'], encoding:'utf8', timeout:30000,maxBuffer:32*1024*1024 }); if(r.status!==0)throw r.error||new Error(r.stderr);return JSON.parse(r.stdout); } finally {closeSync(input);}
-  }
   function query(sql:string,params:unknown[]=[]) { return execute({queries:[{sql,params}]})[0].results; }
   function storage(queries:Array<{sql:string;params:unknown[]}>) {
     for (const query of queries) if (/\blike\b/i.test(query.sql) && query.params.some(value => typeof value === 'string' && value.length > 50)) throw Error('LIKE or GLOB pattern too complex: SQLITE_ERROR');
@@ -68,7 +76,7 @@ describe('configured replay persistence and paid cache boundary', () => {
     fault?.(queries,'after');return out;
   }
   class Statement { constructor(public sql:string,public params:unknown[]=[]){ } bind(...params:unknown[]){return new Statement(this.sql,params);}async all(){return storage([this])[0];}async raw(){return(await this.all()).results.map((r:object)=>Object.values(r));}async run(){return this.all();}}
-  let paidCalls = 0;
+  let paidCalls = 0, reviewCalls = 0;
   const requests: any[] = [];
   beforeAll(() => {
     execute({script:readdirSync('drizzle-d1').filter(f=>f.endsWith('.sql')).sort().map(f=>readFileSync(join('drizzle-d1',f),'utf8')).join('\n')});
@@ -79,19 +87,31 @@ describe('configured replay persistence and paid cache boundary', () => {
     process.env.ANTHROPIC_API_KEY='mock-replay-key';
     globalThis.__contentHubResearchWorkflow__={create:vi.fn(async()=>({id:'mock'}))};
     vi.stubGlobal('fetch',vi.fn(async (_url:string,init:RequestInit)=>{
-      paidCalls++;const request=JSON.parse(String(init.body)),payload=JSON.parse(request.messages[0].content);requests.push(payload);
+      const request=JSON.parse(String(init.body)),payload=JSON.parse(request.messages[0].content);
+      if(Array.isArray(payload.items?.[0]?.passages)){reviewCalls++;return modelResponse(rejectedSourceReview(payload),'review-'+reviewCalls);}
+      paidCalls++;requests.push(payload);
       const findings=Object.fromEntries(payload.items.map((row:any)=>[row.id,{chosenProfileId:row.id.endsWith('reject')?null:'personal',profileFit:row.id.endsWith('reject')?'No supported audience decision.':'Personal product delivery remit includes this action.',summary:'A bounded method for inspecting onboarding.',evidence:row.id.endsWith('reject')?'':body.slice(0,100),contentAngle:row.id.endsWith('reject')?'':'Check the route before changing the requirement.',whyItMatters:'A concrete practitioner decision.',limitations:'One account; no measured improvement.',familyKey:row.id.endsWith('reject')?'':'route-check',score:row.id.endsWith('reject')?0:80}]));
       const value=request.system.startsWith('Screen for potential editorial usefulness')?{assessments:Object.fromEntries(payload.items.map((row:any)=>[row.id,{reason:'A concrete method warrants evidence inspection.',selected:true}]))}:{findings};
       return Response.json({id:'msg_'+paidCalls,model:'claude-haiku-5-5',stop_reason:'end_turn',content:[{type:'text',text:JSON.stringify(value)}],usage:{input_tokens:100,output_tokens:100}});
     }));
   });
-  afterAll(()=>{fault=undefined;vi.unstubAllGlobals();globalThis.__contentHubResearchWorkflow__=undefined;rmSync(folder,{recursive:true,force:true});});
+  afterAll(()=>{fault=undefined;vi.unstubAllGlobals();globalThis.__contentHubResearchWorkflow__=undefined;sqlite.close();rmSync(folder,{recursive:true,force:true});});
+  it('keeps real SQLite errors, foreign keys and batch rollback across persistent requests', () => {
+    execute({ script: 'CREATE TABLE fixture_parent(id INTEGER PRIMARY KEY); CREATE TABLE fixture_child(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES fixture_parent(id));' });
+    expect(() => execute({ queries: [{ sql: 'INSERT INTO fixture_parent VALUES(1)' }, { sql: 'INSERT INTO fixture_child VALUES(1,99)' }] })).toThrow('FOREIGN KEY constraint failed');
+    expect(query('SELECT * FROM fixture_parent')).toEqual([]);
+    expect(() => query('SELECT missing_column FROM fixture_parent')).toThrow('no such column');
+    query('INSERT INTO fixture_parent VALUES(2)');
+    query('INSERT INTO fixture_child VALUES(2,2)');
+    expect(query('SELECT * FROM fixture_child')).toEqual([{ id: 2, parent_id: 2 }]);
+  });
   it('continues replay after a verified terminal quote failure and reuses failed and valid source caches', async () => {
     const id='66666666-6666-4666-8666-666666666666',later='77777777-7777-4777-8777-777777777777';
     const inputs=[item('grounding-failed'),item('grounding-valid')];
-    let grades=0,repairs=0;
+    let grades=0,repairs=0,reviews=0;
     const fetcher=vi.spyOn(globalThis,'fetch').mockImplementation(async(_url,init)=>{
       const request=JSON.parse(String(init?.body)),payload=JSON.parse(request.messages[0].content);
+      if(Array.isArray(payload.items?.[0]?.passages)){reviews++;return modelResponse(rejectedSourceReview(payload),'quote-review-'+reviews);}
       let value:unknown;
       if(payload.claims){repairs++;value={'route-check':{passageId:0,supportsCore:false}};}
       else{
@@ -122,18 +142,19 @@ describe('configured replay persistence and paid cache boundary', () => {
       expect(evidence.evidenceFailures[0].reason).toContain('unsupported_core');
       const receipt=JSON.parse(query('SELECT value FROM research_cache WHERE id=?',[evidence.evidenceFailures[0].receiptId])[0].value);
       expect(receipt.rawGrade.findings['grounding-failed'].claim.evidence).toContain('paraphrased');
-      expect(grades).toBe(2);expect(repairs).toBe(1);
+      expect(grades).toBe(2);expect(repairs).toBe(1);expect(reviews).toBe(2);
       const replay=await run(later);expect(replay.run.findings_count).toBe(1);
-      expect(grades).toBe(2);expect(repairs).toBe(1);
+      expect(grades).toBe(2);expect(repairs).toBe(1);expect(reviews).toBe(2);
       expect(query('SELECT COUNT(*) count FROM research_usage WHERE run_id=?',[later])[0].count).toBe(0);
     }finally{fetcher.mockRestore();}
   },60000);
   it('checkpoints excerpt coverage after cached parents and reuses the complete derived result', async () => {
     const id='88888888-8888-4888-8888-888888888888',later='99999999-9999-4999-8999-999999999999';
     const source={...item('windowed-source'),content:Array.from({length:20},(_,n)=>`Workflow case ${n}: ${body}`).join('\n\n').slice(0,14000)};
-    let baseCalls=0,windowCalls=0;
+    let baseCalls=0,windowCalls=0,reviews=0;
     const fetcher=vi.spyOn(globalThis,'fetch').mockImplementation(async(_url,init)=>{
       const request=JSON.parse(String(init?.body)),payload=JSON.parse(request.messages[0].content),input=payload.items[0];
+      if(Array.isArray(input.passages)){reviews++;return modelResponse(rejectedSourceReview(payload),'coverage-review-'+reviews);}
       const focus=input.windowFocus;
       if(focus)windowCalls++;else baseCalls++;
       const introLength=focus?.ranges.filter((range:any)=>range.role==='introduction').reduce((n:number,range:any)=>n+range.end-range.start,0)||0;
@@ -158,10 +179,73 @@ describe('configured replay persistence and paid cache boundary', () => {
       const first=await researchReplayStatus('team',id),evidence=first.records.find(row=>row.id.endsWith(':evidence:0'))!.value;
       expect(first.run.status).toBe('completed');expect(evidence.coverageManifestIds).toHaveLength(1);
       expect(evidence.assessments[0].summary).toBe('The unchanged whole-source parent.');
-      const calls={baseCalls,windowCalls};await start(later);steps=0;while(await rankPending(later))if(++steps>5)throw Error('Cached coverage failed to complete');
-      expect({baseCalls,windowCalls}).toEqual(calls);
+      expect(reviews).toBe(1);const calls={baseCalls,windowCalls,reviews};await start(later);steps=0;while(await rankPending(later))if(++steps>5)throw Error('Cached coverage failed to complete');
+      expect({baseCalls,windowCalls,reviews}).toEqual(calls);
       expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[later])[0].n).toBe(0);
       expect((await researchReplayStatus('team',later)).run.findings_count).toBe(first.run.findings_count);
+    }finally{fetcher.mockRestore();}
+  },60000);
+
+  it('persists a new multi-passage review idea and replays it without repeating source, window or review calls', async () => {
+    const id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',later='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const intake='A coordinator records the request and its unresolved assumptions before assigning an owner.';
+    const handoff='A reviewer checks those assumptions and passes a checked decision record to the implementer.';
+    const source={...item('compound-source'),content:[intake,body.repeat(12),handoff].join('\n\n')};
+    let bases=0,windows=0,reviews=0,repairs=0;
+    let selectedIds:number[]=[];
+    const fetcher=vi.spyOn(globalThis,'fetch').mockImplementation(async(_url,init)=>{
+      const request=JSON.parse(String(init?.body)),payload=JSON.parse(request.messages[0].content),input=payload.items?.[0];
+      if(payload.claims){repairs++;throw Error('Literal fixture evidence must not need repair');}
+      const catalog=Array.isArray(input.passages),windowed=Boolean(input.windowFocus);
+      const profileChecks=[
+        {profileId:'personal',fits:catalog||!windowed,relevance:catalog||!windowed?25:0,reason:'An explicit intake and review handoff.'},
+        {profileId:'company',fits:false,relevance:0,reason:'Outside this company fixture remit.'},
+      ];
+      if(catalog){
+        reviews++;expect(input).not.toHaveProperty('content');
+        selectedIds=input.passages.filter((passage:any)=>passage.selectable&&(passage.text===intake||passage.text===handoff)).map((passage:any)=>passage.passageId);
+        expect(selectedIds).toHaveLength(2);expect(new Set(selectedIds).size).toBe(2);
+        return modelResponse({findings:{[input.id]:{
+          claimBasis:'described_method',profileChecks,
+          claim:{summary:'A coordinator records assumptions before assignment, then a reviewer checks them and hands a decision record to the implementer.',evidencePassageIds:selectedIds,
+            contentAngle:'Test whether intake ownership and the checked implementation handoff are explicit.',whyItMatters:'A request can be recorded without its assumptions ever reaching the person implementing it.',limitations:'A described workflow, not measured delivery improvement.'},
+          familyKey:'reviewed-intake-handoff',qualityComponents:{sourceSupport:'supported_bounded_claim',usefulDecision:'concrete_decision',scopeHonesty:'accurately_bounded'},additionalIdeas:[],
+        }}},'compound-review-'+reviews);
+      }
+      if(windowed)windows++;else bases++;
+      return modelResponse({findings:{[input.id]:{
+        claimBasis:windowed?'no_useful_core':'described_method',profileChecks,
+        claim:{summary:windowed?'No independent supported window core.':'A coordinator records assumptions before assignment.',evidence:windowed?'':intake,
+          contentAngle:windowed?'':'Inspect the intake record before assigning implementation.',whyItMatters:'Make unresolved assumptions visible.',limitations:'A documented practice without measured results.'},
+        familyKey:windowed?'':'intake-record',qualityComponents:{sourceSupport:windowed?'unsupported':'supported_bounded_claim',usefulDecision:windowed?'none':'concrete_decision',scopeHonesty:'accurately_bounded'},additionalIdeas:[],sectionChecks:[],
+      }}},'compound-base-'+bases+'-window-'+windows);
+    });
+    try{
+      const run=async(runId:string)=>{
+        await researchReplayAction('team',prepare(runId));await researchReplayAction('team',{operation:'upload',runId,chunkIndex:0,items:[source]});await researchReplayAction('team',{operation:'start',runId});
+        let steps=0;while(await rankPending(runId))if(++steps>30)throw Error('Multi-passage replay did not finish');
+        return researchReplayStatus('team',runId);
+      };
+      const result=await run(id),evidence=result.records.find(row=>row.id.endsWith(':evidence:0'))!.value;
+      expect(result.run.status).toBe('completed');expect(result.run.findings_count).toBe(2);
+      expect(bases).toBe(1);expect(windows).toBeGreaterThan(0);expect(reviews).toBe(1);expect(repairs).toBe(0);
+      expect(evidence.assessments[0]).toMatchObject({familyKey:'intake-record',evidence:intake});
+      expect(evidence.acceptedIdeas.map((idea:any)=>idea.familyKey)).toEqual(['intake-record','reviewed-intake-handoff']);
+      expect(evidence.sourceReviewManifestIds).toHaveLength(1);expect(evidence.multiProofs).toHaveLength(1);
+      const proof=evidence.multiProofs[0];
+      expect(proof).toMatchObject({itemId:source.id,familyKey:'reviewed-intake-handoff',bodyHash:await researchHash(source.content),evidencePassageIds:selectedIds,reviewManifestId:evidence.sourceReviewManifestIds[0]});
+      expect(proof.passages.map((passage:any)=>passage.text)).toEqual([intake,handoff]);
+      for(const passage of proof.passages)expect(source.content.slice(passage.start,passage.end)).toBe(passage.text);
+      expect(evidence.acceptedIdeas[1].evidence).toBe(intake);
+      const manifest=JSON.parse(query('SELECT value FROM research_cache WHERE id=?',[proof.reviewManifestId])[0].value);
+      expect(manifest.result.multiProofs[0].passages).toEqual(proof.passages);
+      expect(manifest.parent.findings[0].familyKey).toBe('intake-record');
+      expect(query('SELECT operation,COUNT(*) n FROM research_usage WHERE run_id=? GROUP BY operation ORDER BY operation',[id])).toEqual([{operation:'replay_evidence',n:1},{operation:'replay_review_evidence',n:1},{operation:'replay_window_evidence',n:windows}]);
+      const calls={bases,windows,reviews,repairs},replay=await run(later);
+      expect({bases,windows,reviews,repairs}).toEqual(calls);expect(replay.run.findings_count).toBe(2);
+      expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[later])[0].n).toBe(0);
+      expect(replay.records.find(row=>row.id.endsWith(':evidence:0'))!.value.multiProofs).toEqual(evidence.multiProofs);
+      for(const table of ['research_items','research_findings','research_drafts','slack_jobs','research_run_sources'])expect(query(`SELECT COUNT(*) n FROM ${table}`)[0].n).toBe(0);
     }finally{fetcher.mockRestore();}
   },60000);
 
@@ -187,11 +271,11 @@ describe('configured replay persistence and paid cache boundary', () => {
     let fail=true;fault=(q,phase)=>{if(fail&&phase==='before'&&q.some(r=>r.sql.includes('insert into "research_cache"')&&r.params.includes(`research-replay:${id}:progress`))){fail=false;throw Error('Permanent checkpoint failure');}};
     await expect(processResearchJob({operation:'rank',runId:id})).rejects.toThrow('Permanent checkpoint');fault=undefined;
     expect(paidCalls).toBe(before+2);
-    expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[id])[0].n).toBe(2);
+    expect(query('SELECT operation,COUNT(*) n FROM research_usage WHERE run_id=? GROUP BY operation ORDER BY operation',[id])).toEqual([{operation:'replay_evidence',n:2},{operation:'replay_review_evidence',n:2}]);
     await processResearchJob({operation:'rank',runId:id});await processResearchJob({operation:'rank',runId:id});
     expect(paidCalls).toBe(before+2);
     const result=await researchReplayStatus('team',id);expect(result.run.status).toBe('completed');expect(result.run.findings_count).toBe(1);
-    expect(query('SELECT operation FROM research_usage WHERE run_id=?',[id])).toEqual([{operation:'replay_evidence'},{operation:'replay_evidence'}]);
+    expect(query('SELECT operation,COUNT(*) n FROM research_usage WHERE run_id=? GROUP BY operation ORDER BY operation',[id])).toEqual([{operation:'replay_evidence',n:2},{operation:'replay_review_evidence',n:2}]);
     expect(requests.at(-1).publishingProfiles.map((p:any)=>p.id)).toEqual(['personal','company']);
     for(const table of ['research_items','research_findings','research_drafts','slack_jobs','research_run_sources'])expect(query(`SELECT COUNT(*) n FROM ${table}`)[0].n).toBe(0);
     expect(query("SELECT status FROM research_runs WHERE id='saved-audience'")[0].status).toBe('completed');
@@ -223,9 +307,9 @@ describe('configured replay persistence and paid cache boundary', () => {
   it('routes every item beyond300 over durable batches with no total quota and records absent bodies explicitly',async()=>{
     const id=runIds[2],items=Array.from({length:305},(_,n)=>item('many-'+n));await researchReplayAction('team',prepare(id,items.length));
     for(let n=0;n<items.length;n+=20)await researchReplayAction('team',{operation:'upload',runId:id,chunkIndex:n/20,items:items.slice(n,n+20)});
-    await researchReplayAction('team',{operation:'start',runId:id});let calls=0;while(await rankPending(id)){calls++;if(calls>100)throw Error('Did not complete');}
+    await researchReplayAction('team',{operation:'start',runId:id});let calls=0;while(await rankPending(id)){calls++;if(calls>items.length*2)throw Error('Did not complete');}
     const result=await researchReplayStatus('team',id);expect(result.run.findings_count).toBe(305);expect(result.run.collected_count).toBe(305);
-    expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[id])[0].n).toBe(305);
+    expect(query('SELECT operation,COUNT(*) n FROM research_usage WHERE run_id=? GROUP BY operation ORDER BY operation',[id])).toEqual([{operation:'replay_evidence',n:305},{operation:'replay_review_evidence',n:305}]);
     expect(query('SELECT COUNT(*) n FROM research_findings')[0].n).toBe(0);
   },300000);
 });
