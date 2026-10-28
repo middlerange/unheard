@@ -765,7 +765,7 @@ async function collectForRun(
       if (inserted) count++;
       else {
         const hasConfiguredChapter = RESEARCH_SOURCE_SEEDS.some(seed => seed.enabled && seed.pageMode === "article"
-          && seed.articleSectionHeading && canonicalResearchUrl(seed.url) === item.url);
+          && (seed.articleSectionHeading || seed.articleTimestampRange) && canonicalResearchUrl(seed.url) === item.url);
         const preserveEvidence = sql`(${item.contentProvenance === "public_feed" || item.contentProvenance === "abstract" ? 1 : 0}
           AND ${research_items.content_provenance} IN ('article', 'transcript', 'public_section'))
           OR (${hasConfiguredChapter && item.contentProvenance !== "public_section" ? 1 : 0}

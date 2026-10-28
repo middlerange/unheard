@@ -294,6 +294,51 @@ describe("topic-driven public discovery", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it.each([undefined, "2026-04-07T00:00:00Z"])("captures the complete configured timestamp interval through the deferred discovery path: %s", async date => {
+    const url = "https://research.example/interview";
+    const selected = `Guest [0:23:12]: This complete contrast stays available. ${"Original source context stays intact. ".repeat(450).trim()}\n\nGuest [0:34:22]: The complete later mechanism is also retained.`;
+    const html = `${date ? `<meta property="article:published_time" content="${date}">` : ""}<title>Original practitioner interview | Publisher</title><main><h1>Original practitioner interview</h1><p>${"Earlier unrelated material. ".repeat(1000)}</p><p>${selected.split('\n\n').join('</p><p>')}</p><p>Host [0:35:01]: The next subject stays outside the section.</p></main>`;
+    const fetcher = vi.fn(async (input: string | URL) => {
+      expect(String(input)).toBe(url);
+      return new Response(html);
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const result = await collectDiscoveredResearchSource({ ...source, kind: "web", url, pageMode: "article",
+      articleTimestampRange: { start: "0:23:12", end: "0:35:01" } }, start, end, new Set(), { deferArticleFetch: true });
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({ url, title: "Original practitioner interview — 0:23:12–0:35:01",
+      contentProvenance: "public_section", transcriptStatus: "available", publishedAt: date ? Date.parse(date) : null });
+    expect(result.items[0].content).toBe(selected);
+    expect(result.items[0].content!.length).toBeGreaterThan(14_000);
+    expect(result.items[0].content).not.toContain("Earlier unrelated material");
+    expect(result.items[0].content).not.toContain("The next subject");
+    expect(result.pendingArticles).toBeUndefined();
+    expect(result.warning).toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails a missing timestamp interval without prefix or free-reader fallback and refuses another article", async () => {
+    vi.stubEnv("TREG_TOKEN", "must-not-be-called");
+    const url = "https://research.example/interview";
+    const timestampSource = { ...source, kind: "web" as const, url, pageMode: "article" as const,
+      articleTimestampRange: { start: "0:23:12", end: "0:35:01" } };
+    const fetcher = vi.fn(async () => new Response(`<main><h1>Original practitioner interview</h1><p>${"An unrelated readable prefix. ".repeat(600)}</p><p>Guest [0:23:12]: Missing end boundary.</p></main>`));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(collectDiscoveredResearchSource(timestampSource, start, end, new Set(), { deferArticleFetch: true })).rejects.toThrow("timestamp was not found");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await expect(fetchDiscoveredResearchArticle(timestampSource, { url: `${url}/other` }, end)).rejects.toThrow("explicitly configured article");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a chapter-watch redirect to an unapproved Google host blocked", async () => {
+    const url = "https://support.google.com/google-ads/answer/2497941?hl=en";
+    const fetcher = vi.fn(async () => new Response(null, { status: 302, headers: { location: "https://www.google.com/redirected" } }));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(collectDiscoveredResearchSource({ ...source, kind: "web", url, pageMode: "article",
+      articleSectionHeading: "About dynamic prospecting" }, start, end, new Set(), { deferArticleFetch: true })).rejects.toThrow("Source redirect rejected");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it("fails a missing or ambiguous chapter instead of fetching a fallback body or retaining the article prefix", async () => {
     vi.stubEnv("TREG_TOKEN", "must-not-be-called");
     const url = "https://research.example/interview";

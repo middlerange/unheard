@@ -1,5 +1,5 @@
 import {
-  articleResearchDate, articleResearchSection, articleResearchText, articleResearchTitle, assertPublicResearchUrl,
+  articleResearchDate, articleResearchSection, articleResearchTimestampSection, articleResearchText, articleResearchTitle, assertPublicResearchUrl,
   assertResearchArticleSectionWatch, ResearchArticleSectionError,
   canonicalResearchUrl, collectResearchSource, fetchResearchText,
   discoverResearchLinks, parseResearchDate, plainResearchText, sourceArticleHosts, sourceHosts, type CollectedItem,
@@ -25,9 +25,10 @@ export async function fetchDiscoveredResearchArticle(
   htmlOverride?: string,
 ): Promise<CollectedItem> {
   assertResearchArticleSectionWatch(source);
-  if (source.articleSectionHeading !== undefined && canonicalResearchUrl(target.url) !== canonicalResearchUrl(source.url))
+  const hasConfiguredChapter = source.articleSectionHeading !== undefined || source.articleTimestampRange !== undefined;
+  if (hasConfiguredChapter && canonicalResearchUrl(target.url) !== canonicalResearchUrl(source.url))
     throw new ResearchArticleSectionError("Public chapter watches only apply to their explicitly configured article");
-  if (isPewResearchSource(source) && source.articleSectionHeading === undefined) return fetchPewResearchArticle(source, target.url, windowEnd);
+  if (isPewResearchSource(source) && !hasConfiguredChapter) return fetchPewResearchArticle(source, target.url, windowEnd);
   const candidateSource = { ...source, url: target.url, feedUrl: undefined };
   const hosts = sourceArticleHosts(source.kind === "search" ? candidateSource : source);
   assertPublicResearchUrl(target.url, hosts);
@@ -51,8 +52,9 @@ export async function fetchDiscoveredResearchArticle(
   const abstractOnly = arxivId?.[1] === "abs";
   const repositoryReadme = url.hostname === "github.com" && /^\/[^/]+\/[^/]+\/?$/.test(url.pathname)
     ? html.match(/<article\b[^>]*class=["'][^"']*\bmarkdown-body\b[^"']*["'][^>]*>[\s\S]*?<\/article>/i)?.[0] : undefined;
-  const section = source.articleSectionHeading === undefined ? null : articleResearchSection(html, source.articleSectionHeading);
-  const content = (section?.content ?? (abstractOnly ? researchAbstractText(html) : articleResearchText(repositoryReadme || html))).slice(0, 14_000);
+  const section = source.articleTimestampRange !== undefined ? articleResearchTimestampSection(html, source.articleTimestampRange)
+    : source.articleSectionHeading !== undefined ? articleResearchSection(html, source.articleSectionHeading) : null;
+  const content = section?.content ?? (abstractOnly ? researchAbstractText(html) : articleResearchText(repositoryReadme || html)).slice(0, 14_000);
   const heading = arxivId
     ? html.match(/<h1\b[^>]*class=["'][^"']*\b(?:title|ltx_title_document)\b[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i)?.[1]
     : articleResearchTitle(repositoryReadme || html);
@@ -66,7 +68,7 @@ export async function fetchDiscoveredResearchArticle(
     contentProvenance: section ? "public_section" : abstractOnly ? "abstract" : "article",
     ...(content.length >= 500 ? { content } : {}),
     contentType: "article",
-    transcriptStatus: "not_applicable",
+    transcriptStatus: source.articleTimestampRange ? "available" : "not_applicable",
   };
 }
 
