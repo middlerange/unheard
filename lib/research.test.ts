@@ -26,7 +26,7 @@ import {
   verifyResearchRequest,
 } from "./research-internal";
 import {
-  researchHash, validateResearchEvidence,
+  researchHash, researchEvidenceSchema, validateResearchEvidence,
   RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS,
   RESEARCH_SCREEN_BATCH_SIZE,
 } from "./research-model";
@@ -1262,17 +1262,30 @@ describe("research persistence and team isolation", () => {
       'An explicit confirmation gate keeps the final publication under human control.',
     ];
     const runIds = [`${team}-first`, `${team}-second`];
+    const profiles = [
+      { id: 'company-linkedin', platform: 'linkedin', groupName: 'company' },
+      { id: 'company-twitter', platform: 'twitter', groupName: 'company' },
+      { id: 'personal-twitter', platform: 'twitter', groupName: 'personal' },
+      { id: 'personal-linkedin', platform: 'linkedin', groupName: 'personal' },
+    ].map(profile => ({ ...profile, name: profile.id, systemPrompt: profile.groupName === 'company'
+      ? 'Select only documented releases and adoption lessons from our own named product.'
+      : 'Select independent product-builder workflow, growth, distribution and judgment decisions.' }));
+    const capturedIcp = `Product teams\n\nPublishing profiles: ${JSON.stringify(profiles)}`;
     execute({ queries: [
       { sql: 'INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)', params: [team, team, team] },
       ...runIds.map((id, index) => ({
-        sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'scan',?,1,0,?,'Product teams',1,?)", params: [id, team, index === 0 ? 'collecting' : 'completed', now + index, JSON.stringify([seed.id])],
+        sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'scan',?,1,0,?,?,1,?)", params: [id, team, index === 0 ? 'collecting' : 'completed', now + index, capturedIcp, JSON.stringify([seed.id])],
       })),
       ...runIds.map(id => ({ sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: [`${id}:${seed.id}`, id, seed.id] })),
       { sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,'article')", params: [itemId, team, seed.id, `${new URL(seed.url).origin}/distinct-decision-report`, 'Independently supported workflow decisions', quotes[0], now - 1000, now, quotes.slice(0, 2).join(' ').repeat(10)] },
     ] });
-    const idea = (familyKey: string, evidence: string) => ({
-      familyKey, evidence, score: 86, chosenProfileId: RESEARCH_AUDIENCE_ONLY_PROFILE_ID,
-      profileFit: 'A bounded product workflow decision fits the saved general audience.',
+    const idea = (familyKey: string, evidence: string, suppliedProfiles: Array<{ id: string; groupName: string }>) => ({
+      familyKey, evidence, claimBasis: 'described_method',
+      profileChecks: Object.fromEntries(suppliedProfiles.map(profile => [profile.id, {
+        fits: profile.id === 'personal-linkedin', relevance: profile.id === 'personal-linkedin' ? 27 : profile.groupName === 'company' ? 30 : 8,
+        reason: profile.id === 'personal-linkedin' ? 'A concrete independent product-builder decision fits this personal profile.' : 'This specific decision does not fit this profile’s captured selection remit.',
+      }])),
+      qualityComponents: { sourceSupport: 22, usefulDecision: 25, scopeHonesty: 14 },
       summary: familyKey, contentAngle: `Inspect ${familyKey} before adopting this workflow.`,
       whyItMatters: 'A separate practical product-team decision.', limitations: 'A practitioner account; no measured uplift.',
     });
@@ -1283,14 +1296,25 @@ describe("research persistence and team isolation", () => {
       expect(String(url)).toBe('https://api.anthropic.com/v1/messages');
       const request = JSON.parse(String(init?.body)), input = JSON.parse(request.messages[0].content);
       expect(input.items.map((item: { id: string }) => item.id)).toEqual([itemId]);
-      const primary = ++calls === 1 ? idea('consent-review', quotes[0]) : idea('publication-confirmation', quotes[2]);
-      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify({ findings: [{ itemId, ...primary, additionalIdeas: [idea('preview-before-connection', quotes[1])] }] }) }] }] });
+      expect(input.publishingProfiles.map((profile: { id: string }) => profile.id)).toEqual(profiles.map(profile => profile.id));
+      for (const profile of input.publishingProfiles) {
+        expect(profile.selectionInstructions).toBe(profiles.find(captured => captured.id === profile.id)?.systemPrompt);
+        expect(profile).not.toHaveProperty('systemPrompt');
+      }
+      expect(request.output_config.format.schema.$defs.profileChecks.required).toEqual(profiles.map(profile => profile.id));
+      const primary = ++calls === 1 ? idea('consent-review', quotes[0], input.publishingProfiles) : idea('publication-confirmation', quotes[2], input.publishingProfiles);
+      const additional = idea('preview-before-connection', quotes[1], input.publishingProfiles);
+      for (const assessment of [primary, additional]) {
+        for (const derived of ['score', 'chosenProfileId', 'profileFit']) expect(assessment).not.toHaveProperty(derived);
+      }
+      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify({ findings: { [itemId]: { ...primary, additionalIdeas: [additional] } } }) }] }] });
     });
     try {
       await finishResearchRankJob(runIds[0]);
       const firstId = await researchHash(`${team}:${itemId}`), secondId = await researchHash(`${team}:${itemId}:angle:preview-before-connection`);
       const first = await getRunResearchFindings(team, runIds[0]);
       expect(first.map(finding => finding.id).sort()).toEqual([firstId, secondId].sort());
+      expect(first.map(finding => finding.score)).toEqual([88, 88]);
       expect(first.map(finding => finding.evidence).sort()).toEqual(quotes.slice(0, 2).sort());
       expect((await processResearchJob({ operation: 'rank', runId: runIds[0] }))).toEqual({ sourceIds: [], done: true });
       expect(calls).toBe(1);
@@ -1313,6 +1337,7 @@ describe("research persistence and team isolation", () => {
       const newPrimaryId = await researchHash(`${team}:${itemId}:angle:publication-confirmation`);
       const second = await getRunResearchFindings(team, runIds[1]);
       expect(second.map(finding => finding.id).sort()).toEqual([newPrimaryId, secondId].sort());
+      expect(second.map(finding => finding.score)).toEqual([88, 88]);
       expect(second.find(finding => finding.id === newPrimaryId)).toMatchObject({ status: 'new', idea_id: null, family_key: 'publication-confirmation' });
       expect(second.find(finding => finding.id === secondId)?.created_at).toBe(first.find(finding => finding.id === secondId)?.created_at);
       expect(execute({ queries: [
@@ -1323,6 +1348,12 @@ describe("research persistence and team isolation", () => {
       ] }).map((result: { results: unknown[] }) => result.results)).toEqual(prior);
       expect((await getRunResearchFindings(team, runIds[0])).map(finding => finding.id).sort()).toEqual([firstId, secondId].sort());
       expect(execute({ queries: [{ sql: 'PRAGMA foreign_key_check' }] })[0].results).toEqual([]);
+      const cached = execute({ queries: [{ sql: "SELECT value FROM research_cache WHERE team_id=? AND length(id)=64 AND json_type(value,'$.findings')='object'", params: [team] }] })[0].results;
+      expect(cached).toHaveLength(2);
+      const normalized = cached.flatMap((row: { value: string }) => researchEvidenceSchema.parse(JSON.parse(row.value)).findings)
+        .flatMap((finding: ReturnType<typeof researchEvidenceSchema.parse>['findings'][number]) => [finding, ...(finding.additionalIdeas || [])]);
+      expect(normalized).toHaveLength(4);
+      for (const assessment of normalized) expect(assessment).toMatchObject({ chosenProfileId: 'personal-linkedin', score: 88, profileFit: 'A concrete independent product-builder decision fits this personal profile.' });
       expect(calls).toBe(2);
     } finally {
       fetcher.mockRestore();

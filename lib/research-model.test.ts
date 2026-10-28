@@ -19,17 +19,43 @@ const finding = {
 };
 const items = [{ id: "study", content: `The research suggests policy has not kept pace with practice. ${quote}, while others have no policy.` }];
 
-describe("v15 chosen-profile evidence protocol", () => {
-  it("requires profile choice and rationale before claim and score, including in Anthropic's wire schema", () => {
+describe("profile-specific rubric components",()=>{
+  const checks={company:{fits:false,relevance:8,reason:"No direct company adoption decision."},personal:{fits:true,relevance:27,reason:"A concrete product leadership decision for the personal audience."}};
+  const assessed={...finding,claimBasis:"reasoned_position",profileChecks:checks,qualityComponents:{sourceSupport:22,usefulDecision:25,scopeHonesty:14}};
+  it("selects the fitting personal audience and computes the unchanged rubric without a company veto",()=>{
+    const parsed=researchEvidenceSchema.parse({findings:[assessed]}).findings;
+    expect(parsed[0]).toMatchObject({chosenProfileId:"personal",profileFit:checks.personal.reason,score:88});
+    expect(validateResearchEvidenceProfiles(parsed,["company","personal"])).toEqual(parsed);
+    expect(validateResearchEvidence(parsed,items)).toHaveLength(1);
+  });
+  it("keeps no-fit material rejected even when non-relevance components or a supplied legacy score are high",()=>{
+    const rejected={...assessed,score:99,profileChecks:{company:{...checks.company},personal:{...checks.personal,fits:false}},qualityComponents:{sourceSupport:25,usefulDecision:30,scopeHonesty:15},familyKey:""};
+    const parsed=researchEvidenceSchema.parse({findings:[rejected]}).findings;
+    expect(parsed[0]).toMatchObject({score:0,chosenProfileId:null});
+    expect(validateResearchEvidence(parsed,items)).toEqual([]);
+  });
+  it("requires complete components, bounded scores and every actual profile",()=>{
+    expect(()=>researchEvidenceSchema.parse({findings:[{...finding,profileChecks:checks}]})).toThrow("must be supplied together");
+    expect(()=>researchEvidenceSchema.parse({findings:[{...assessed,qualityComponents:{...assessed.qualityComponents,sourceSupport:26}}]})).toThrow();
+    const parsed=researchEvidenceSchema.parse({findings:[{...assessed,profileChecks:{personal:checks.personal}}]}).findings;
+    expect(()=>validateResearchEvidenceProfiles(parsed,["company","personal"])).toThrow("every supplied");
+  });
+});
+
+describe("independent profile checks and claim-based evidence", () => {
+  it("requires every profile check before claim scoring, including in Anthropic's wire schema", () => {
     const wire = evidenceJsonSchemaForItems(["study"], ["company", "personal"]);
     const schema = wire.$defs.sourceAssessment;
     expect(wire.properties.findings.properties.study).toEqual({ $ref: "#/$defs/sourceAssessment" });
-    expect(Object.keys(schema.properties)).toEqual(["chosenProfileId", "profileFit", "summary", "evidence", "contentAngle", "whyItMatters", "limitations", "familyKey", "score", "additionalIdeas"]);
-    expect(schema.required.slice(0, 2)).toEqual(["chosenProfileId", "profileFit"]);
-    expect(schema.properties.chosenProfileId).toEqual({ anyOf: [{ type: "string", enum: ["company", "personal"] }, { type: "null" }] });
+    expect(Object.keys(schema.properties)).toEqual(["claimBasis", "profileChecks", "summary", "evidence", "contentAngle", "whyItMatters", "limitations", "familyKey", "qualityComponents", "additionalIdeas"]);
+    expect(schema.required.slice(0, 2)).toEqual(["claimBasis", "profileChecks"]);
+    expect(wire.$defs.profileChecks.required).toEqual(["company", "personal"]);
+    expect(wire.$defs.profileChecks.properties.company).toEqual({ $ref: "#/$defs/profileCheck" });
+    expect(schema.properties).not.toHaveProperty("chosenProfileId");
+    expect(schema.properties).not.toHaveProperty("score");
     const converted = anthropicResearchSchema(wire) as typeof wire;
     expect(Object.keys(converted.$defs.sourceAssessment.properties)).toEqual(Object.keys(schema.properties));
-    expect(converted.$defs.sourceAssessment.required).toContain("chosenProfileId");
+    expect(converted.$defs.sourceAssessment.required).toContain("profileChecks");
   });
   it("accepts a personal distribution decision independently and preserves a genuine no-fit rejection", () => {
     const decision = { ...finding, chosenProfileId: "personal", profileFit: "The personal profile covers distribution; inspect the effect on qualified website visits. Company onboarding scope is irrelevant to this choice." };
@@ -63,7 +89,7 @@ describe("distinct supported ideas from one public source", () => {
     let unions=0,arrays=0;
     function visit(value:unknown){if(!value||typeof value!=="object")return;const x=value as Record<string,unknown>;if(x.anyOf)unions++;if(x.type==="array")arrays++;for(const child of Object.values(x))if(Array.isArray(child))child.forEach(visit);else visit(child);}
     visit(schema);
-    expect(unions).toBe(2);expect(arrays).toBe(1);
+    expect(unions).toBe(0);expect(arrays).toBe(1);
     expect(schema.$defs.sourceAssessment.properties.additionalIdeas.items).toEqual({$ref:"#/$defs/idea"});
     expect(schema.$defs.idea).not.toHaveProperty("additionalIdeas");
     expect(Object.keys(schema.properties.findings.properties)).toHaveLength(6);

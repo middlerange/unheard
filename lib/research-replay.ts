@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { getDb } from './db/client';
 import { research_cache, research_runs, research_sources } from './schema';
 import { getFrozenResearchAudience, parseResearchAudience } from './research-audience';
+import { RESEARCH_SELECTION_VIEW_VERSION } from './research-selection-audience';
 import { retryResearchStorage } from './research-storage';
 import { RESEARCH_SOURCE_SEEDS } from './research-sources';
 import { assertPublicResearchUrl, canonicalResearchUrl } from './research-collectors';
@@ -77,7 +78,7 @@ async function contractHash() {
   return researchHash(JSON.stringify({ model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION,
     screen: RESEARCH_SCREEN_INSTRUCTIONS, evidence: RESEARCH_EVIDENCE_INSTRUCTIONS,
     screenSchema: screeningJsonSchemaForItems(['item']), evidenceSchema: evidenceJsonSchemaForItems(['item'], ['profile']),
-    score: RESEARCH_POST_MIN_SCORE, route: 'readable-500-pew-guard-v1' }));
+    score: RESEARCH_POST_MIN_SCORE, selectionViewVersion: RESEARCH_SELECTION_VIEW_VERSION, route: 'readable-500-pew-guard-v1' }));
 }
 export function researchReplayEligibility(item: ResearchReplayItem, config: Pick<Config, 'sourceIds' | 'windowStart' | 'windowEnd'> & Partial<Pick<Config, 'articleWatchUrls' | 'observationWindowStart' | 'observationWindowEnd'>>) {
   if (!config.sourceIds.includes(item.sourceId)) return 'source_not_in_frozen_roster';

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getDb } from "./db/client";
 import { retryResearchStorage } from "./research-storage";
 import { getFrozenResearchAudience } from "./research-audience";
+import { researchSelectionAudience } from "./research-selection-audience";
 import { researchFindingDates, researchItemSignalKind } from "./research-dates";
 import { getDraftResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
 import { hasUsablePewResearchBody, isPewResearchSource } from "./research-pew";
@@ -916,7 +917,7 @@ async function cachedModel(
   }
   const result = await callResearchModel(
     system,
-    { ...audience, items: input },
+    { ...researchSelectionAudience(audience), items: input },
     stage === "evidence" ? evidenceJsonSchemaForItems((input as Array<{ id: string }>).map(item => item.id), enabledProfileIds) : schema,
     outputTokens,
     { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? `replay_${stage}` : stage },

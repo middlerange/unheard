@@ -40,7 +40,8 @@ describe('recall evaluator production audience contract', () => {
   it('requires a real chosen-profile enum and validates it even for a cached structured response', () => {
     const schema = recallEvidenceSchema('current', ['source'], ['company', 'personal']);
     expect(schema.properties.findings).toMatchObject({ type: 'object', properties: { source: { $ref: '#/$defs/sourceAssessment' } } });
-    expect(schema.$defs.sourceAssessment).toMatchObject({ required: expect.arrayContaining(['chosenProfileId', 'profileFit']), properties: { chosenProfileId: { anyOf: [{ type: 'string', enum: ['company', 'personal'] }, { type: 'null' }] } } });
+    expect(schema.$defs.sourceAssessment.required).toEqual(expect.arrayContaining(['claimBasis', 'profileChecks', 'qualityComponents']));
+    expect(schema.$defs.profileChecks).toMatchObject({ required: ['company', 'personal'], properties: { company: { $ref: '#/$defs/profileCheck' }, personal: { $ref: '#/$defs/profileCheck' } } });
     expect(() => parseRecallEvidence('current', { findings: [assessment] }, ['source'], ['company', 'personal'])).toThrow('choose a supplied');
     expect(() => parseRecallEvidence('current', { findings: [{ ...assessment, chosenProfileId: 'invented', profileFit: 'Fits distribution.' }] }, ['source'], ['personal'])).toThrow();
     expect(() => parseRecallEvidence('current', { findings: [{ ...assessment, chosenProfileId: null, profileFit: 'No fit.' }] }, ['source'], ['personal'])).toThrow();
