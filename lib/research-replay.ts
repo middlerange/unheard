@@ -12,7 +12,7 @@ import { RESEARCH_POST_MIN_SCORE } from './research-policy';
 import type { EvidenceCacheValue, EvidenceFailure } from './research-evidence-cache';
 import { ResearchCoveragePending, RESEARCH_COVERAGE_VERSION, RESEARCH_WINDOW_SCOPE_INSTRUCTIONS } from './research-coverage';
 import { RESEARCH_SOURCE_REVIEW_INSTRUCTIONS, RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS, researchSourceReviewSchemaForItems } from './research-source-review-model';
-import { RESEARCH_SOURCE_DEPTH_PIPELINE_VERSION as RESEARCH_SOURCE_REVIEW_VERSION, RESEARCH_SOURCE_DEPTH_VERSION, RESEARCH_SOURCE_DEPTH_INSTRUCTIONS, researchSourceDepthSchema } from './research-source-depth-model';
+import { RESEARCH_SOURCE_DEPTH_PIPELINE_VERSION as RESEARCH_SOURCE_REVIEW_VERSION, RESEARCH_SOURCE_DEPTH_VERSION, RESEARCH_SOURCE_DEPTH_INSTRUCTIONS, RESEARCH_SOURCE_DEPTH_SONNET_INSTRUCTIONS, researchSourceDepthSchema } from './research-source-depth-model';
 import { RESEARCH_MODEL, RESEARCH_PROMPT_VERSION, RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS,
   RESEARCH_SCREEN_BATCH_SIZE, RESEARCH_EVIDENCE_BATCH_SIZE, RESEARCH_EVIDENCE_OUTPUT_TOKENS, RESEARCH_SECTION_COVERAGE_INSTRUCTIONS, researchHash, researchScreeningSchema,
   researchEvidenceSchema, screeningJsonSchemaForItems, evidenceJsonSchemaForItems, validateResearchScreening,
@@ -31,7 +31,7 @@ export const researchReplayItemSchema = z.object({
 const prepareSchema = z.object({ operation: z.literal('prepare'), runId: z.uuid(), audienceRunId: z.string().min(1).max(100),
   windowStart: timestamp, windowEnd: timestamp, inventorySha256: z.string().regex(/^[a-f0-9]{64}$/),
   inventoryCount: z.number().int().positive().max(100000), sourceIds: z.array(z.string().min(1).max(200)).min(1),
-  depthModel: z.literal('gpt-6-sol').optional(),
+  depthModel: z.enum(['gpt-6-sol', 'claude-sonnet-5-5']).optional(),
   freshnessWindowStart: timestamp.optional(), observationWindowStart: timestamp.optional(), observationWindowEnd: timestamp.optional(),
 }).strict().refine(input => input.windowStart < input.windowEnd, 'Window end must follow start')
   .refine(input => input.freshnessWindowStart === undefined || input.freshnessWindowStart >= input.windowStart && input.freshnessWindowStart < input.windowEnd, 'Freshness boundary must be inside the publication window')
@@ -85,7 +85,8 @@ async function contractHash(depthModel?: Config['depthModel']) {
     sourceReviewVersion: RESEARCH_SOURCE_REVIEW_VERSION, sourceReviewInstructions: RESEARCH_SOURCE_REVIEW_INSTRUCTIONS,
     sourceReviewConsistencyVersion: RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, sourceReviewConsistencyInstructions: RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS,
     sourceDepthVersion: RESEARCH_SOURCE_DEPTH_VERSION, sourceDepthInstructions: RESEARCH_SOURCE_DEPTH_INSTRUCTIONS,
-    sourceDepthModelOverrideCapability: 'replay-gpt-6-sol-v1', sourceDepthModel: depthModel ?? RESEARCH_MODEL,
+    sourceDepthSonnetInstructions: RESEARCH_SOURCE_DEPTH_SONNET_INSTRUCTIONS, sourceDepthModelOverrideCapabilityVersion: 'replay-depth-model-overrides-v2',
+    sourceDepthModelOverrideCapability: ['gpt-6-sol', 'claude-sonnet-5-5'], sourceDepthModel: depthModel ?? RESEARCH_MODEL,
     sourceDepthSchema: researchSourceDepthSchema({ id: 'item', content: '' }, ['profile']),
     sourceReviewSchema: researchSourceReviewSchemaForItems(['item'], ['profile']),
     screen: RESEARCH_SCREEN_INSTRUCTIONS, evidence: RESEARCH_EVIDENCE_INSTRUCTIONS,
@@ -119,7 +120,7 @@ async function loadConfig(run: Run): Promise<Config> {
   if (!row) throw new Error('Replay configuration not found');
   const config: Config = JSON.parse(row.value);
   if (config.runId !== run.id || config.icp !== run.icp || config.version !== RESEARCH_PROMPT_VERSION
-    || config.depthModel !== undefined && config.depthModel !== 'gpt-6-sol'
+    || config.depthModel !== undefined && config.depthModel !== 'gpt-6-sol' && config.depthModel !== 'claude-sonnet-5-5'
     || config.model !== RESEARCH_MODEL || config.coverageVersion !== RESEARCH_COVERAGE_VERSION || config.sourceReviewVersion !== RESEARCH_SOURCE_REVIEW_VERSION || config.contractHash !== await contractHash(config.depthModel)) throw new Error('Replay scoring contract changed; prepare a new replay');
   await getFrozenResearchAudience(run);
   return config;

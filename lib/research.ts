@@ -9,7 +9,7 @@ import { repairResearchCitation, RESEARCH_QUOTE_REPAIR_INSTRUCTIONS, sameContext
 import { coverResearchEvidence, ResearchCoveragePending, RESEARCH_COVERAGE_VERSION, type ResearchCoverageAccess } from "./research-coverage";
 import { reviewResearchSources, ResearchSourceReviewPending, RESEARCH_SOURCE_REVIEW_VERSION, type ResearchSourceReviewRequest } from "./research-source-review";
 import { RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS } from "./research-source-review-model";
-import { RESEARCH_SOURCE_DEPTH_VERSION, RESEARCH_SOURCE_DEPTH_INSTRUCTIONS, researchSourceDepthSchema, researchSourceDepthRequestMetadata, normalizeResearchSourceDepth } from "./research-source-depth-model";
+import { RESEARCH_SOURCE_DEPTH_VERSION, RESEARCH_SOURCE_DEPTH_INSTRUCTIONS, RESEARCH_SOURCE_DEPTH_SONNET_INSTRUCTIONS, researchSourceDepthSchema, researchSourceDepthRequestMetadata, normalizeResearchSourceDepth } from "./research-source-depth-model";
 import { researchFindingDates, researchItemSignalKind } from "./research-dates";
 import { getDraftResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
 import { hasUsablePewResearchBody, isPewResearchSource } from "./research-pew";
@@ -1175,17 +1175,17 @@ async function cachedModel(
     if (run.mode === "replay") {
       const config = await read(`research-replay:${run.id}:config`) as { depthModel?: unknown } | null;
       if (config?.depthModel !== undefined) {
-        if (config.depthModel !== "gpt-6-sol") throw new Error("Unknown frozen depth-review model");
+        if (config.depthModel !== "gpt-6-sol" && config.depthModel !== "claude-sonnet-5-5") throw new Error("Unknown frozen depth-review model");
         depthModel = config.depthModel;
       }
     }
     const expanded = await reviewResearchSources(sources, checked.value, reviewAccess, {
-      version: RESEARCH_SOURCE_DEPTH_VERSION, instructions: RESEARCH_SOURCE_DEPTH_INSTRUCTIONS,
+      version: RESEARCH_SOURCE_DEPTH_VERSION, instructions: depthModel === "claude-sonnet-5-5" ? RESEARCH_SOURCE_DEPTH_SONNET_INSTRUCTIONS : RESEARCH_SOURCE_DEPTH_INSTRUCTIONS,
       ...(depthModel ? { model: depthModel } : {}),
       sourceSchema: researchSourceDepthSchema,
       requestMetadata: async source => {
         const { groups, depth } = await researchSourceDepthRequestMetadata(source);
-        return { groups, depth };
+        return { groups, depth, ...(depthModel === "claude-sonnet-5-5" ? { reviewTransport: "anthropic-tool-v1" } : {}) };
       },
       normalize: normalizeResearchSourceDepth,
     });

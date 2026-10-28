@@ -112,3 +112,37 @@ describe('Anthropic research cost estimates', () => {
     ]) expect(value).toMatchObject({ costNanoUsd: null, costStatus: 'unknown' });
   });
 });
+
+describe('Sonnet research cost estimates', () => {
+  it('adds ordinary input, cache reads and mixed write lifetimes exactly once', () => {
+    const cost = priceResearchUsage('claude-sonnet-5-5', 'standard', {
+      input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 4000, cache_creation_input_tokens: 7000,
+      cache_creation: { ephemeral_5m_input_tokens: 3000, ephemeral_1h_input_tokens: 4000 },
+    });
+    expect(cost).toMatchObject({ input: 12000, output: 500, cached: 4000, writes: 7000, costNanoUsd: 30900000, costStatus: 'calculated' });
+    expect(JSON.parse(cost.rateCard!)).toEqual({ asOf: '2026-10-28', source: 'https://platform.claude.com/docs/en/models/sonnet-5-5/overview', input: 2, output: 10, cachedInput: 0.1, write5m: 2.5, write1h: 4 });
+  });
+  it.each([200000, 1000000])('keeps the same standard rates at %i total input tokens', input => {
+    const cost = priceResearchUsage('claude-sonnet-5-5-20261001', 'default', { input_tokens: input, output_tokens: 1000 });
+    expect(cost).toMatchObject({ input, costNanoUsd: input * 2000 + 10000000, costStatus: 'calculated' });
+    expect(JSON.parse(cost.rateCard!)).toMatchObject({ input: 2, output: 10, cachedInput: 0.1, write5m: 2.5, write1h: 4 });
+    expect(priceResearchUsage('claude-sonnet-5-5-2026-10-01', 'standard', { input_tokens: input, output_tokens: 1000 }).costNanoUsd).toBe(cost.costNanoUsd);
+  });
+  it('preserves estimated write lifetime handling and zero-cache accounting', () => {
+    expect(priceResearchUsage('claude-sonnet-5-5', 'standard', { input_tokens: 100, output_tokens: 20, cache_creation_input_tokens: 1000 }))
+      .toMatchObject({ input: 1100, costNanoUsd: 2900000, costStatus: 'estimated' });
+    expect(priceResearchUsage('claude-sonnet-5-5', 'default', { input_tokens: 0, output_tokens: 0 }))
+      .toMatchObject({ input: 0, cached: 0, writes: 0, costNanoUsd: 0, costStatus: 'calculated' });
+  });
+  it('rejects unsupported aliases, tiers and malformed cache counts', () => {
+    for (const model of ['claude-sonnet-5-5-preview', 'claude-sonnet-5-5-unknown', 'claude-sonnet-5-50'])
+      expect(priceResearchUsage(model, 'standard', { input_tokens: 100, output_tokens: 20 })).toMatchObject({ costNanoUsd: null, costStatus: 'unknown' });
+    for (const cost of [
+      priceResearchUsage('claude-sonnet-5-5', 'priority', { input_tokens: 100, output_tokens: 20 }),
+      priceResearchUsage('claude-sonnet-5-5', 'standard', { input_tokens: 100 }),
+      priceResearchUsage('claude-sonnet-5-5', 'standard', { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: -1 }),
+      priceResearchUsage('claude-sonnet-5-5', 'standard', { input_tokens: 100, output_tokens: 20, cache_creation_input_tokens: 1000, cache_creation: { ephemeral_5m_input_tokens: 500, ephemeral_1h_input_tokens: 100 } }),
+      priceResearchUsage('claude-sonnet-5-5', 'standard', { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 20, cache_creation_input_tokens: 1 }),
+    ]) expect(cost).toMatchObject({ costNanoUsd: null, costStatus: 'unknown', rateCard: null });
+  });
+});

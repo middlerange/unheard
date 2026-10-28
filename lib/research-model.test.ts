@@ -582,3 +582,25 @@ describe("OpenAI structured response phases", () => {
     }
   });
 });
+
+describe("explicit Anthropic review transport", () => {
+  it("selects tool submission only for the exact bound marker, passing the actual model to its parser", async () => {
+    const previousKey=process.env.ANTHROPIC_API_KEY;process.env.ANTHROPIC_API_KEY="test-review-transport";
+    const context={teamId:"transport-team",runId:"transport-run",stage:"research" as const,operation:"replay_review_evidence"};
+    const value={findings:{source:{wholeSource:{bounded:true},groups:{}}}},fetcher=vi.spyOn(globalThis,"fetch");
+    try{
+      for(const model of ["claude-haiku-5-5","claude-sonnet-5-5"]){
+        fetcher.mockResolvedValueOnce(Response.json({model,stop_reason:"tool_use",content:[...(model==="claude-sonnet-5-5"?[{type:"thinking",thinking:"Private transport reasoning"},{type:"text",text:"Submit bounded data"}]:[]),{type:"tool_use",name:"submit_research",input:value}]}));
+        expect((await callResearchModel("Submit the assessment once.",{items:[{id:"source",reviewTransport:"anthropic-tool-v1"}]},{type:"object"},16000,context,model)).value).toEqual(value);
+        const body=JSON.parse(String(fetcher.mock.calls.at(-1)![1]?.body));expect(body).not.toHaveProperty("output_config");expect(body.tools).toHaveLength(1);expect(body.tools[0]).not.toHaveProperty("strict");
+        expect(body.tool_choice.type).toBe(model==="claude-sonnet-5-5"?"auto":"tool");
+        for(const marker of [undefined,"anthropic-tool-v2"]){
+          fetcher.mockResolvedValueOnce(Response.json({model,stop_reason:"end_turn",content:[{type:"text",text:JSON.stringify(value)}]}));
+          expect((await callResearchModel("Review.",{items:[{id:"source",...(marker?{reviewTransport:marker}:{})}]},{type:"object"},16000,context,model)).value).toEqual(value);
+          const normal=JSON.parse(String(fetcher.mock.calls.at(-1)![1]?.body));expect(normal).toHaveProperty("output_config.format.type","json_schema");expect(normal).not.toHaveProperty("tools");
+        }
+      }
+      expect(fetcher).toHaveBeenCalledTimes(6);
+    }finally{fetcher.mockRestore();if(previousKey===undefined)delete process.env.ANTHROPIC_API_KEY;else process.env.ANTHROPIC_API_KEY=previousKey;}
+  });
+});

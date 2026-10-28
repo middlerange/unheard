@@ -19,6 +19,9 @@ Return findings keyed by the actual supplied source ID. Each source has wholeSou
 wholeSource may express a coherent comparison or workflow across groups. Independently inspect every group and return all useful cores inside it; do not omit a late group or stop after an early theme. A passing group claim's FIRST evidencePassageId, the legacy citation anchor, must be one of that group's selectablePassageIds. Other selected passages may supply context from elsewhere in this SAME source. Focal passages overlap the actual group body by at least20 trimmed characters; a heading or introduction alone is not focal support. Never reorder quotations or invent a new source ID/URL.
 
 A group may reject every frame. Each rejected group frame must explicitly explain the absence of a supported useful core in limitations, using no_useful_core where appropriate. Required group presence is a coverage requirement, not an acceptance quota. Do not upgrade scores, fabricate missing premises or merge unrelated cores. Keep the same evidence standard, categorical rubric and independent profile decisions.`;
+export const RESEARCH_SOURCE_DEPTH_SONNET_INSTRUCTIONS = `${RESEARCH_SOURCE_DEPTH_INSTRUCTIONS}
+
+Submit the completed assessment by calling submit_research exactly once. This tool only returns structured research data; it performs no external action. Include wholeSource and every required group in that call. Do not substitute a prose response for the assessment.`;
 
 export type ResearchSourceDepthSource = {
   id: string; content: string; passages?: ResearchSourceReviewPassage[]; [key: string]: unknown;

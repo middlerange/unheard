@@ -3,6 +3,8 @@ export const RESEARCH_PRICING_URL = 'https://developers.openai.com/api/docs/pric
 export const SOL_RESEARCH_PRICING_DATE = '2026-10-28';
 export const ANTHROPIC_RESEARCH_PRICING_DATE = '2026-10-27';
 export const ANTHROPIC_RESEARCH_PRICING_URL = 'https://platform.claude.com/docs/en/about-claude/pricing';
+export const SONNET_RESEARCH_PRICING_DATE = '2026-10-28';
+export const SONNET_RESEARCH_PRICING_URL = 'https://platform.claude.com/docs/en/models/sonnet-5-5/overview';
 
 export type ModelUsage = {
   input_tokens?: number;
@@ -25,7 +27,8 @@ export function tokenCount(value: unknown): number | null {
 }
 
 export function priceResearchUsage(model: string, tier: string, usage?: ModelUsage) {
-  if (/^claude-haiku-5-5(?:-|$)/.test(model)) return priceAnthropicResearchUsage(tier, usage);
+  const sonnet = /^claude-sonnet-5-5(?:-\d{8}|-\d{4}-\d{2}-\d{2})?$/.test(model);
+  if (sonnet || /^claude-haiku-5-5(?:-|$)/.test(model)) return priceAnthropicResearchUsage(tier, usage, sonnet);
   const input = tokenCount(usage?.input_tokens);
   const output = tokenCount(usage?.output_tokens);
   const cached = tokenCount(usage?.input_tokens_details?.cached_tokens);
@@ -67,7 +70,7 @@ export function priceResearchUsage(model: string, tier: string, usage?: ModelUsa
   return { input, output, cached, writes, costNanoUsd: Math.round(usd * 1_000_000_000), costStatus, rateCard: JSON.stringify(rates) };
 }
 
-function priceAnthropicResearchUsage(tier: string, usage?: ModelUsage) {
+function priceAnthropicResearchUsage(tier: string, usage?: ModelUsage, sonnet = false) {
   const ordinary = tokenCount(usage?.input_tokens);
   const output = tokenCount(usage?.output_tokens);
   const cached = tokenCount(usage?.cache_read_input_tokens ?? 0);
@@ -89,7 +92,10 @@ function priceAnthropicResearchUsage(tier: string, usage?: ModelUsage) {
     costStatus = 'estimated';
   }
   const long = input > 100_000;
-  const rates = {
+  const rates = sonnet ? {
+    asOf: SONNET_RESEARCH_PRICING_DATE, source: SONNET_RESEARCH_PRICING_URL,
+    input: 2, output: 10, cachedInput: 0.1, write5m: 2.5, write1h: 4,
+  } : {
     asOf: ANTHROPIC_RESEARCH_PRICING_DATE, source: ANTHROPIC_RESEARCH_PRICING_URL,
     input: long ? 0.5 : 0.1, output: long ? 2.5 : 0.5,
     cachedInput: long ? 0.05 : 0.01, write5m: long ? 0.625 : 0.125, write1h: long ? 1 : 0.2,

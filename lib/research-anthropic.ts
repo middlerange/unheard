@@ -20,15 +20,17 @@ export function anthropicResearchSchema(value: unknown): unknown {
 
 export type AnthropicResearchMode = 'schema' | 'tool';
 export const ANTHROPIC_RESEARCH_TOOL_NAME = 'submit_research';
+const sonnet55 = (model?: string) => /^claude-sonnet-5-5(?:-\d{8}|-\d{4}-\d{2}-\d{2})?$/.test(model || '');
 
 export function anthropicResearchRequest(model: string, system: string, data: unknown, schema: Record<string, unknown>, maxTokens: number, mode: AnthropicResearchMode = 'schema') {
   return {
     model, system, messages: [{ role: 'user', content: JSON.stringify(data) }],
-    max_tokens: maxTokens, service_tier: 'standard_only', thinking: { type: 'disabled' },
+    max_tokens: maxTokens, service_tier: 'standard_only', thinking: { type: sonnet55(model) ? 'between_tools' : 'disabled' },
     ...(mode === 'tool' ? {
       tools: [{ name: ANTHROPIC_RESEARCH_TOOL_NAME,
         description: 'Submit the research assessment data for application validation. This tool performs no external action.', input_schema: schema }],
-      tool_choice: { type: 'tool', name: ANTHROPIC_RESEARCH_TOOL_NAME, disable_parallel_tool_use: true },
+      tool_choice: sonnet55(model) ? { type: 'auto', disable_parallel_tool_use: true }
+        : { type: 'tool', name: ANTHROPIC_RESEARCH_TOOL_NAME, disable_parallel_tool_use: true },
     } : { output_config: { format: { type: 'json_schema', schema: anthropicResearchSchema(schema) } } }),
   };
 }
@@ -41,10 +43,14 @@ export type AnthropicResearchResponse = {
   usage?: ModelUsage & { service_tier?: string };
 };
 
-export function anthropicResearchOutput(result: AnthropicResearchResponse, mode: AnthropicResearchMode = 'schema') {
+export function anthropicResearchOutput(result: AnthropicResearchResponse, mode: AnthropicResearchMode = 'schema', model?: string) {
+  if (mode === 'tool' && sonnet55(model) && result.stop_reason !== 'tool_use') return '';
   if (mode === 'tool' && result.stop_reason === 'tool_use') {
-    const block = result.content?.[0];
-    if (result.content?.length !== 1 || block?.type !== 'tool_use' || block.name !== ANTHROPIC_RESEARCH_TOOL_NAME
+    const content = result.content || [];
+    const blocks = sonnet55(model) ? content.filter(block => block.type === 'tool_use') : content;
+    const block = blocks[0];
+    if (sonnet55(model) && content.some(block => !['tool_use', 'text', 'thinking', 'redacted_thinking'].includes(block.type))) return '';
+    if (blocks.length !== 1 || block?.type !== 'tool_use' || block.name !== ANTHROPIC_RESEARCH_TOOL_NAME
       || !block.input || typeof block.input !== 'object' || Array.isArray(block.input)) return '';
     return JSON.stringify(block.input);
   }

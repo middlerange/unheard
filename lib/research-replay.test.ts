@@ -35,8 +35,9 @@ it('rejects labels, expected outcomes, private URLs and unsupported inventory si
   expect(researchReplayItemSchema.safeParse({ ...item('x'), impressions: 12000 }).success).toBe(false);
   expect(researchReplayItemSchema.safeParse({ ...item('x'), url: 'https://127.0.0.1/private' }).success).toBe(false);
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), inventoryCount: Number.MAX_SAFE_INTEGER }).success).toBe(false);
-  expect(researchReplayRequestSchema.parse({ ...prepare(runIds[0]), depthModel: 'gpt-6-sol' })).toMatchObject({ depthModel: 'gpt-6-sol' });
-  for (const depthModel of ['claude-haiku-5-5', 'gpt-6-sol-latest', 'gpt-6-astra', null])
+  for (const depthModel of ['gpt-6-sol', 'claude-sonnet-5-5'])
+    expect(researchReplayRequestSchema.parse({ ...prepare(runIds[0]), depthModel })).toMatchObject({ depthModel });
+  for (const depthModel of ['claude-haiku-5-5', 'claude-sonnet-5-5-latest', 'gpt-6-sol-latest', 'gpt-6-astra', null])
     expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), depthModel }).success).toBe(false);
 });
 it('preserves complete captured source bodies beyond14k and rejects bodies beyond64k', () => {
@@ -110,22 +111,24 @@ describe('configured replay persistence and paid cache boundary', () => {
     }));
   });
   afterAll(()=>{fault=undefined;vi.unstubAllGlobals();globalThis.__contentHubResearchWorkflow__=undefined;sqlite.close();rmSync(folder,{recursive:true,force:true});});
-  it('freezes the optional depth-only model pin and preserves completed old replay status reads', async () => {
-    const defaultId='90909090-9090-4090-8090-909090909090',overrideId='91919191-9191-4191-8191-919191919191';
+  it.each(['gpt-6-sol','claude-sonnet-5-5'] as const)('freezes the optional depth-only model pin %s and preserves completed old replay status reads', async depthModel => {
+    const defaultId=depthModel==='gpt-6-sol'?'90909090-9090-4090-8090-909090909090':'96969696-9696-4696-8696-969696969696';
+    const overrideId=depthModel==='gpt-6-sol'?'91919191-9191-4191-8191-919191919191':'97979797-9797-4797-8797-979797979797';
     const ordinary=await researchReplayAction('team',prepare(defaultId));
     expect(ordinary).not.toHaveProperty('depthModel');
-    const request={...prepare(overrideId),depthModel:'gpt-6-sol'};
+    const request={...prepare(overrideId),depthModel};
     const opted=await researchReplayAction('team',request);
-    expect(opted).toMatchObject({model:'claude-haiku-5-5',depthModel:'gpt-6-sol'});
+    expect(opted).toMatchObject({model:'claude-haiku-5-5',depthModel});
     expect(await researchReplayAction('team',request)).toEqual(opted);
     await expect(researchReplayAction('team',prepare(overrideId))).rejects.toThrow('differs');
-    await expect(researchReplayAction('team',{...prepare(defaultId),depthModel:'gpt-6-sol'})).rejects.toThrow('differs');
+    await expect(researchReplayAction('team',{...prepare(defaultId),depthModel})).rejects.toThrow('differs');
+    await expect(researchReplayAction('team',{...prepare(overrideId),depthModel:depthModel==='gpt-6-sol'?'claude-sonnet-5-5':'gpt-6-sol'})).rejects.toThrow('differs');
     const configId=`research-replay:${overrideId}:config`;
     const saved=JSON.parse(query('SELECT value FROM research_cache WHERE id=?',[configId])[0].value);
     const defaultConfig=JSON.parse(query('SELECT value FROM research_cache WHERE id=?',[`research-replay:${defaultId}:config`])[0].value);
     expect(saved.model).toBe(defaultConfig.model);expect(saved.contractHash).not.toBe(defaultConfig.contractHash);
-    for(const depthModel of ['gpt-6-astra',undefined]){
-      query('UPDATE research_cache SET value=? WHERE id=?',[JSON.stringify({...saved,depthModel}),configId]);
+    for(const changedModel of ['gpt-6-astra',undefined,depthModel==='gpt-6-sol'?'claude-sonnet-5-5':'gpt-6-sol']){
+      query('UPDATE research_cache SET value=? WHERE id=?',[JSON.stringify({...saved,depthModel:changedModel}),configId]);
       await expect(researchReplayAction('team',{operation:'upload',runId:overrideId,chunkIndex:0,items:[item('pin-tamper')]})).rejects.toThrow('contract changed');
     }
     query('UPDATE research_cache SET value=? WHERE id=?',[JSON.stringify({...saved,contractHash:'prior-completed-contract'}),configId]);
@@ -134,9 +137,10 @@ describe('configured replay persistence and paid cache boundary', () => {
     expect(historical.run.status).toBe('completed');
     expect(historical.records.find(row=>row.id===configId)?.value.contractHash).toBe('prior-completed-contract');
   });
-  it('uses the replay depth canary model only for depth and reuses both provider caches', async () => {
-    const id='92929292-9292-4292-8292-929292929292',later='93939393-9393-4393-8393-939393939393';
-    const source=item('mixed-provider-depth-canary');
+  it.each(['gpt-6-sol','claude-sonnet-5-5'] as const)('uses the replay depth canary model %s only for depth and reuses both provider caches', async depthModel => {
+    const id=depthModel==='gpt-6-sol'?'92929292-9292-4292-8292-929292929292':'94949494-9494-4494-8494-949494949494';
+    const later=depthModel==='gpt-6-sol'?'93939393-9393-4393-8393-939393939393':'95959595-9595-4595-8595-959595959595';
+    const source=item('mixed-provider-depth-canary-'+depthModel);
     const requests:Array<{model:string;catalog:boolean;depth:boolean}>=[];
     const previousKey=process.env.OPENAI_API_KEY;process.env.OPENAI_API_KEY='mock-depth-canary-key';
     const fetcher=vi.spyOn(globalThis,'fetch').mockImplementation(async(url,init)=>{
@@ -145,18 +149,26 @@ describe('configured replay persistence and paid cache boundary', () => {
       const payload=JSON.parse(openai?request.input:request.messages[0].content),input=payload.items[0];
       const catalog=Array.isArray(input.passages),depth=Boolean(input.depth||input.groups);
       requests.push({model:request.model,catalog,depth});
-      expect(openai).toBe(depth);expect(request.model).toBe(depth?'gpt-6-sol':'claude-haiku-5-5');
+      expect(openai).toBe(depth&&depthModel==='gpt-6-sol');expect(request.model).toBe(depth?depthModel:'claude-haiku-5-5');
       if(openai){expect(request.reasoning).toEqual({effort:'none'});expect(request.text.format).toMatchObject({type:'json_schema',strict:true});}
+      if(depth&&depthModel==='claude-sonnet-5-5'){
+        expect(input.reviewTransport).toBe('anthropic-tool-v1');
+        expect(request.tool_choice).toEqual({type:'auto',disable_parallel_tool_use:true});
+        expect(request.thinking).toEqual({type:'between_tools'});
+        expect(request.tools[0].name).toBe('submit_research');expect(request.tools[0].input_schema).toHaveProperty('properties.findings');
+        expect(request).not.toHaveProperty('output_config');
+      }else if(!openai){expect(request).toHaveProperty('output_config');expect(request).not.toHaveProperty('tools');}
       const value=catalog?rejectedSourceReview(payload):{findings:{[input.id]:{
         claimBasis:'described_method',profileChecks:payload.publishingProfiles.map((profile:any)=>({profileId:profile.id,fits:profile.id==='personal',relevance:profile.id==='personal'?25:0,reason:'An inspectable product-entry workflow.'})),
         claim:{summary:'A practitioner checks user entry routes before choosing an onboarding requirement.',evidence:body.slice(0,100),contentAngle:'Inspect the route before adding the requirement.',whyItMatters:'Different routes can need different setup steps.',limitations:'A described workflow without measured outcomes.'},
         familyKey:'mixed-provider-route-check',qualityComponents:{sourceSupport:'supported_bounded_claim',usefulDecision:'concrete_decision',scopeHonesty:'accurately_bounded'},additionalIdeas:[],sectionChecks:[],
       }}};
+      if(depth&&depthModel==='claude-sonnet-5-5')return Response.json({id:'sonnet-depth-canary',model:depthModel,stop_reason:'tool_use',content:[{type:'tool_use',name:'submit_research',input:value}],usage:{input_tokens:10,output_tokens:10}});
       return openai?Response.json({id:'sol-depth-canary',model:'gpt-6-sol',status:'completed',output:[{type:'message',phase:'final_answer',content:[{type:'output_text',text:JSON.stringify(value)}]}],usage:{input_tokens:10,output_tokens:10}}):modelResponse(value,'haiku-canary-'+requests.length);
     });
     try{
       const run=async(runId:string)=>{
-        await researchReplayAction('team',{...prepare(runId),depthModel:'gpt-6-sol'});
+        await researchReplayAction('team',{...prepare(runId),depthModel});
         await researchReplayAction('team',{operation:'upload',runId,chunkIndex:0,items:[source]});
         await researchReplayAction('team',{operation:'start',runId});
         let steps=0;while(await rankPending(runId))if(++steps>20)throw Error('Mixed-provider replay did not finish');
@@ -164,10 +176,10 @@ describe('configured replay persistence and paid cache boundary', () => {
       };
       const first=await run(id);
       expect(first.run.status).toBe('completed');expect(first.run.findings_count).toBe(1);
-      expect(requests).toEqual([{model:'claude-haiku-5-5',catalog:false,depth:false},{model:'claude-haiku-5-5',catalog:true,depth:false},{model:'claude-haiku-5-5',catalog:true,depth:false},{model:'gpt-6-sol',catalog:true,depth:true}]);
+      expect(requests).toEqual([{model:'claude-haiku-5-5',catalog:false,depth:false},{model:'claude-haiku-5-5',catalog:true,depth:false},{model:'claude-haiku-5-5',catalog:true,depth:false},{model:depthModel,catalog:true,depth:true}]);
       const replay=await run(later);expect(replay.run.status).toBe('completed');expect(replay.run.findings_count).toBe(1);expect(requests).toHaveLength(4);
       expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[later])[0].n).toBe(0);
-      expect(query('SELECT model,COUNT(*) n FROM research_usage WHERE run_id=? GROUP BY model ORDER BY model',[id])).toEqual([{model:'claude-haiku-5-5',n:3},{model:'gpt-6-sol',n:1}]);
+      expect(query('SELECT model,COUNT(*) n FROM research_usage WHERE run_id=? GROUP BY model ORDER BY model',[id])).toEqual([{model:'claude-haiku-5-5',n:3},{model:depthModel,n:1}]);
     }finally{fetcher.mockRestore();if(previousKey===undefined)delete process.env.OPENAI_API_KEY;else process.env.OPENAI_API_KEY=previousKey;}
   },60000);
   it('keeps real SQLite errors, foreign keys and batch rollback across persistent requests', () => {

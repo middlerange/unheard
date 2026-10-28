@@ -28,6 +28,37 @@ function mockMessage(overrides: Record<string, unknown> = {}) {
 describe('Claude research transport', () => {
   const submitted = { findings: { source: { claim: { summary: 'Submitted assessment data' } } } };
   const toolBlock = { type: 'tool_use', id: 'tool-test', name: ANTHROPIC_RESEARCH_TOOL_NAME, input: submitted };
+  it('uses Sonnet between-tool thinking and automatic nonparallel submission without strict grammar', () => {
+    const schema={type:'object',properties:{findings:{type:'object'}},required:['findings'],additionalProperties:false};
+    for(const model of ['claude-sonnet-5-5','claude-sonnet-5-5-2026-10-28']){
+      const request=anthropicResearchRequest(model,'system',{items:[{id:'source'}]},schema,16000,'tool');
+      expect(request).toMatchObject({model,thinking:{type:'between_tools'},tool_choice:{type:'auto',disable_parallel_tool_use:true}});
+      if(!('tools' in request))throw new Error('Sonnet tool request missing tools');
+      expect(request.tool_choice).not.toHaveProperty('name');expect(request).not.toHaveProperty('output_config');
+      expect(request.tools).toHaveLength(1);expect(request.tools![0].input_schema).toBe(schema);expect(request.tools![0]).not.toHaveProperty('strict');
+    }
+  });
+  it('retains byte-compatible Haiku request formatting in both existing modes', () => {
+    const schema={type:'object',properties:{}},prefix={model:RESEARCH_MODEL,system:'system',messages:[{role:'user',content:'{"id":"source"}'}],max_tokens:100,service_tier:'standard_only',thinking:{type:'disabled'}};
+    expect(JSON.stringify(anthropicResearchRequest(RESEARCH_MODEL,'system',{id:'source'},schema,100))).toBe(JSON.stringify({...prefix,output_config:{format:{type:'json_schema',schema}}}));
+    expect(JSON.stringify(anthropicResearchRequest(RESEARCH_MODEL,'system',{id:'source'},schema,100,'tool'))).toBe(JSON.stringify({...prefix,tools:[{name:ANTHROPIC_RESEARCH_TOOL_NAME,description:'Submit the research assessment data for application validation. This tool performs no external action.',input_schema:schema}],tool_choice:{type:'tool',name:ANTHROPIC_RESEARCH_TOOL_NAME,disable_parallel_tool_use:true}}));
+  });
+  it('accepts one Sonnet tool input alongside transport text/thinking without extracting either', () => {
+    const response={stop_reason:'tool_use',content:[{type:'thinking',thinking:'private reasoning transport'},{type:'text',text:'Non-data explanation'},toolBlock,{type:'redacted_thinking',data:'private opaque transport'}]};
+    expect(anthropicResearchOutput(response,'tool','claude-sonnet-5-5')).toBe(JSON.stringify(submitted));
+    expect(anthropicResearchOutput(response,'tool',RESEARCH_MODEL)).toBe('');
+    expect(anthropicResearchOutput({...response,stop_reason:'max_tokens'},'tool','claude-sonnet-5-5')).toBe('');
+    const textOnly={stop_reason:'end_turn',content:[{type:'text',text:JSON.stringify(submitted)}]};
+    expect(anthropicResearchOutput(textOnly,'tool','claude-sonnet-5-5')).toBe('');
+    expect(anthropicResearchOutput(textOnly,'tool',RESEARCH_MODEL)).toBe(JSON.stringify(submitted));
+  });
+  it.each([
+    [toolBlock,toolBlock],[toolBlock,{...toolBlock,name:'foreign_tool'}],[{...toolBlock,name:'foreign_tool'}],
+    [toolBlock,{type:'server_tool_use'}],[toolBlock,{type:'unknown'}],[{type:'thinking'}],
+    [{...toolBlock,input:null}],[{...toolBlock,input:[]}],
+  ])('rejects unknown/multiple Sonnet tool blocks or missing structured input %j', (...content) => {
+    expect(anthropicResearchOutput({stop_reason:'tool_use',content},'tool','claude-sonnet-5-5')).toBe('');
+  });
   it('forces a data-only tool without strict grammar while default screening retains output_config', () => {
     const schema = { type: 'object', properties: { findings: { type: 'object' } }, required: ['findings'], additionalProperties: false };
     const request = anthropicResearchRequest(RESEARCH_MODEL, 'system', {}, schema, 16384, 'tool');
