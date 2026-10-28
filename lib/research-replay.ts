@@ -31,6 +31,7 @@ export const researchReplayItemSchema = z.object({
 const prepareSchema = z.object({ operation: z.literal('prepare'), runId: z.uuid(), audienceRunId: z.string().min(1).max(100),
   windowStart: timestamp, windowEnd: timestamp, inventorySha256: z.string().regex(/^[a-f0-9]{64}$/),
   inventoryCount: z.number().int().positive().max(100000), sourceIds: z.array(z.string().min(1).max(200)).min(1),
+  depthModel: z.literal('gpt-6-sol').optional(),
   freshnessWindowStart: timestamp.optional(), observationWindowStart: timestamp.optional(), observationWindowEnd: timestamp.optional(),
 }).strict().refine(input => input.windowStart < input.windowEnd, 'Window end must follow start')
   .refine(input => input.freshnessWindowStart === undefined || input.freshnessWindowStart >= input.windowStart && input.freshnessWindowStart < input.windowEnd, 'Freshness boundary must be inside the publication window')
@@ -78,12 +79,13 @@ async function immutable(teamId: string, id: string, value: unknown) {
   const saved = await read(teamId, id);
   if (!saved || saved.value !== serialized) throw new Error('Replay immutable snapshot differs from the saved input');
 }
-async function contractHash() {
+async function contractHash(depthModel?: Config['depthModel']) {
   return researchHash(JSON.stringify({ model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION,
     coverageVersion: RESEARCH_COVERAGE_VERSION, coverageScope: RESEARCH_WINDOW_SCOPE_INSTRUCTIONS,
     sourceReviewVersion: RESEARCH_SOURCE_REVIEW_VERSION, sourceReviewInstructions: RESEARCH_SOURCE_REVIEW_INSTRUCTIONS,
     sourceReviewConsistencyVersion: RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, sourceReviewConsistencyInstructions: RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS,
     sourceDepthVersion: RESEARCH_SOURCE_DEPTH_VERSION, sourceDepthInstructions: RESEARCH_SOURCE_DEPTH_INSTRUCTIONS,
+    sourceDepthModelOverrideCapability: 'replay-gpt-6-sol-v1', sourceDepthModel: depthModel ?? RESEARCH_MODEL,
     sourceDepthSchema: researchSourceDepthSchema({ id: 'item', content: '' }, ['profile']),
     sourceReviewSchema: researchSourceReviewSchemaForItems(['item'], ['profile']),
     screen: RESEARCH_SCREEN_INSTRUCTIONS, evidence: RESEARCH_EVIDENCE_INSTRUCTIONS,
@@ -117,7 +119,8 @@ async function loadConfig(run: Run): Promise<Config> {
   if (!row) throw new Error('Replay configuration not found');
   const config: Config = JSON.parse(row.value);
   if (config.runId !== run.id || config.icp !== run.icp || config.version !== RESEARCH_PROMPT_VERSION
-    || config.model !== RESEARCH_MODEL || config.coverageVersion !== RESEARCH_COVERAGE_VERSION || config.sourceReviewVersion !== RESEARCH_SOURCE_REVIEW_VERSION || config.contractHash !== await contractHash()) throw new Error('Replay scoring contract changed; prepare a new replay');
+    || config.depthModel !== undefined && config.depthModel !== 'gpt-6-sol'
+    || config.model !== RESEARCH_MODEL || config.coverageVersion !== RESEARCH_COVERAGE_VERSION || config.sourceReviewVersion !== RESEARCH_SOURCE_REVIEW_VERSION || config.contractHash !== await contractHash(config.depthModel)) throw new Error('Replay scoring contract changed; prepare a new replay');
   await getFrozenResearchAudience(run);
   return config;
 }
@@ -150,7 +153,7 @@ export async function researchReplayAction(teamId: string, input: unknown) {
     const existing = await db.select().from(research_runs).where(eq(research_runs.id, data.runId)).get();
     if (existing && (existing.team_id !== teamId || existing.mode !== 'replay')) throw new Error('Replay ID is already in use');
     const { operation: _, ...requested } = data;
-    const config: Config = { ...requested, model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION, contractHash: await contractHash(), coverageVersion: RESEARCH_COVERAGE_VERSION, sourceReviewVersion: RESEARCH_SOURCE_REVIEW_VERSION, icp: original.icp,
+    const config: Config = { ...requested, model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION, contractHash: await contractHash(requested.depthModel), coverageVersion: RESEARCH_COVERAGE_VERSION, sourceReviewVersion: RESEARCH_SOURCE_REVIEW_VERSION, icp: original.icp,
       articleWatchUrls: RESEARCH_SOURCE_SEEDS.filter(seed => data.sourceIds.includes(seed.id) && seed.pageMode === 'article').map(seed => canonicalResearchUrl(seed.url)) };
     const createdAt = Date.now(), configId = prefix(data.runId) + 'config';
     await retryResearchStorage(async () => db.batch([
@@ -160,7 +163,7 @@ export async function researchReplayAction(teamId: string, input: unknown) {
     ]));
     const run = await loadRun(teamId, data.runId), saved = await loadConfig(run);
     if (JSON.stringify(config) !== JSON.stringify(saved)) throw new Error('Replay preparation differs from the saved request');
-    return { runId: run.id, status: run.status, model: saved.model, version: saved.version, coverageVersion: saved.coverageVersion, sourceReviewVersion: saved.sourceReviewVersion, uploadChunkSize: 20 };
+    return { runId: run.id, status: run.status, model: saved.model, ...(saved.depthModel ? { depthModel: saved.depthModel } : {}), version: saved.version, coverageVersion: saved.coverageVersion, sourceReviewVersion: saved.sourceReviewVersion, uploadChunkSize: 20 };
   }
   const run = await loadRun(teamId, data.runId), config = await loadConfig(run);
   if (data.operation === 'upload') {

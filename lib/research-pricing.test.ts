@@ -29,6 +29,48 @@ describe('research cost estimates', () => {
   });
 });
 
+describe('Sol research cost estimates', () => {
+  it('prices ordinary input, reads and both write lifetimes without double counting', () => {
+    const cost = priceResearchUsage('gpt-6-sol', 'standard', {
+      input_tokens: 12000, output_tokens: 1000,
+      input_tokens_details: { cached_tokens: 4000, cache_write_tokens: 7000, cache_write_tokens_details: { ttl_30m_tokens: 3000, ttl_12h_tokens: 4000 } },
+    });
+    expect(cost).toMatchObject({ input: 12000, output: 1000, cached: 4000, writes: 7000, costNanoUsd: 40300000, costStatus: 'calculated' });
+    expect(JSON.parse(cost.rateCard!)).toEqual({ asOf: '2026-10-28', input: 2, output: 10, cachedInput: 0.2, write30m: 2.5, write12h: 5, multiplier: 1 });
+  });
+  it('uses the long-context card only above272k and applies the existing tier multipliers', () => {
+    const usage = { input_tokens: 300000, output_tokens: 1000, input_tokens_details: { cached_tokens: 40000, cache_write_tokens: 70000, cache_write_tokens_details: { ttl_30m_tokens: 30000, ttl_12h_tokens: 40000 } } };
+    const cost = priceResearchUsage('gpt-6-sol-2026-10-01', 'default', usage);
+    expect(cost).toMatchObject({ costNanoUsd: 1341000000, costStatus: 'calculated' });
+    expect(JSON.parse(cost.rateCard!)).toEqual({ asOf: '2026-10-28', input: 4, output: 15, cachedInput: 0.4, write30m: 5, write12h: 10, multiplier: 1 });
+    expect(priceResearchUsage('gpt-6-sol', 'priority', usage).costNanoUsd).toBe(2682000000);
+    expect(priceResearchUsage('gpt-6-sol', 'fast', usage).costNanoUsd).toBe(2682000000);
+    expect(priceResearchUsage('gpt-6-sol', 'flex', usage).costNanoUsd).toBe(670500000);
+    const uncached = { output_tokens: 1000, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } };
+    expect(priceResearchUsage('gpt-6-sol', 'standard', { ...uncached, input_tokens: 272000 }).costNanoUsd).toBe(554000000);
+    expect(priceResearchUsage('gpt-6-sol', 'standard', { ...uncached, input_tokens: 272001 }).costNanoUsd).toBe(1103004000);
+  });
+  it('preserves conservative missing-cache estimates and rejects unpriced aliases or invalid accounting', () => {
+    expect(priceResearchUsage('gpt-6-sol', 'default', { input_tokens: 2620, output_tokens: 12 })).toMatchObject({ costNanoUsd: 6670000, costStatus: 'estimated' });
+    expect(priceResearchUsage('gpt-6-sol', 'default', { input_tokens: 0, output_tokens: 0, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } })).toMatchObject({ costNanoUsd: 0, costStatus: 'calculated' });
+    for (const model of ['gpt-6-sol-preview', 'gpt-6-sol-20261001', 'gpt-6-solar', 'gpt-6.1-sol', 'unpriced-model'])
+      expect(priceResearchUsage(model, 'default', { input_tokens: 100, output_tokens: 10 })).toMatchObject({ costNanoUsd: null, costStatus: 'unknown', rateCard: null });
+    for (const cost of [
+      priceResearchUsage('gpt-6-sol', 'unpriced-tier', { input_tokens: 100, output_tokens: 10 }),
+      priceResearchUsage('gpt-6-sol', 'default'),
+      priceResearchUsage('gpt-6-sol', 'default', { input_tokens: 100, output_tokens: 10, input_tokens_details: { cached_tokens: 101, cache_write_tokens: 0 } }),
+      priceResearchUsage('gpt-6-sol', 'default', { input_tokens: 100, output_tokens: 10, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 80, cache_write_tokens_details: { ttl_30m_tokens: 30, ttl_12h_tokens: 40 } } }),
+    ]) expect(cost).toMatchObject({ costNanoUsd: null, costStatus: 'unknown', rateCard: null });
+  });
+  it('leaves the full Luna rate card and original pricing date unchanged', () => {
+    for (const [input, expected] of [[272000, { input: 0.1, output: 0.5, cachedInput: 0.01, write30m: 0.125, write12h: 0.25 }],
+      [272001, { input: 0.2, output: 0.75, cachedInput: 0.02, write30m: 0.25, write12h: 0.5 }]] as const) {
+      const cost = priceResearchUsage('gpt-6-luna', 'standard', { input_tokens: input, output_tokens: 0, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } });
+      expect(JSON.parse(cost.rateCard!)).toEqual({ asOf: '2026-10-23', ...expected, multiplier: 1 });
+    }
+  });
+});
+
 describe('Anthropic research cost estimates', () => {
   it('adds uncached input, cache reads and cache writes without double counting', () => {
     const cost = priceResearchUsage('claude-haiku-5-5', 'standard', {

@@ -1,5 +1,6 @@
 export const RESEARCH_PRICING_DATE = '2026-10-23';
 export const RESEARCH_PRICING_URL = 'https://developers.openai.com/api/docs/pricing';
+export const SOL_RESEARCH_PRICING_DATE = '2026-10-28';
 export const ANTHROPIC_RESEARCH_PRICING_DATE = '2026-10-27';
 export const ANTHROPIC_RESEARCH_PRICING_URL = 'https://platform.claude.com/docs/en/about-claude/pricing';
 
@@ -30,13 +31,16 @@ export function priceResearchUsage(model: string, tier: string, usage?: ModelUsa
   const cached = tokenCount(usage?.input_tokens_details?.cached_tokens);
   const writes = tokenCount(usage?.input_tokens_details?.cache_write_tokens);
   const unknown = { input, output, cached, writes, costNanoUsd: null, costStatus: 'unknown', rateCard: null };
-  if (input === null || output === null || !/^gpt-6-luna(?:-|$)/.test(model)) return unknown;
+  const sol = /^gpt-6-sol(?:-\d{4}-\d{2}-\d{2})?$/.test(model);
+  if (input === null || output === null || !sol && !/^gpt-6-luna(?:-|$)/.test(model)) return unknown;
   const multiplier = { default: 1, standard: 1, priority: 2, fast: 2, flex: 0.5 }[tier];
   if (multiplier === undefined) return unknown;
   const long = input > 272_000;
   const rates = {
-    asOf: RESEARCH_PRICING_DATE, input: long ? 0.2 : 0.1, output: long ? 0.75 : 0.5,
-    cachedInput: long ? 0.02 : 0.01, write30m: long ? 0.25 : 0.125, write12h: long ? 0.5 : 0.25,
+    asOf: sol ? SOL_RESEARCH_PRICING_DATE : RESEARCH_PRICING_DATE,
+    input: sol ? (long ? 4 : 2) : (long ? 0.2 : 0.1), output: sol ? (long ? 15 : 10) : (long ? 0.75 : 0.5),
+    cachedInput: sol ? (long ? 0.4 : 0.2) : (long ? 0.02 : 0.01),
+    write30m: sol ? (long ? 5 : 2.5) : (long ? 0.25 : 0.125), write12h: sol ? (long ? 10 : 5) : (long ? 0.5 : 0.25),
     multiplier,
   };
   if ((cached ?? 0) + (writes ?? 0) > input) return unknown;

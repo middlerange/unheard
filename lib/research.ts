@@ -1171,8 +1171,17 @@ async function cachedModel(
     });
     await recordPhase(activeReviewPhase.name, activeReviewPhase.version, [], checked.manifestIds, false);
     activeReviewPhase = { name: "source-depth", version: RESEARCH_SOURCE_DEPTH_VERSION };
+    let depthModel: string | undefined;
+    if (run.mode === "replay") {
+      const config = await read(`research-replay:${run.id}:config`) as { depthModel?: unknown } | null;
+      if (config?.depthModel !== undefined) {
+        if (config.depthModel !== "gpt-6-sol") throw new Error("Unknown frozen depth-review model");
+        depthModel = config.depthModel;
+      }
+    }
     const expanded = await reviewResearchSources(sources, checked.value, reviewAccess, {
       version: RESEARCH_SOURCE_DEPTH_VERSION, instructions: RESEARCH_SOURCE_DEPTH_INSTRUCTIONS,
+      ...(depthModel ? { model: depthModel } : {}),
       sourceSchema: researchSourceDepthSchema,
       requestMetadata: async source => {
         const { groups, depth } = await researchSourceDepthRequestMetadata(source);
