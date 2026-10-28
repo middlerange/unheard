@@ -53,7 +53,7 @@ describe("independent profile checks and claim-based evidence", () => {
     const schema = wire.$defs.sourceAssessment;
     expect(wire.properties.findings.properties.study).toEqual({ $ref: "#/$defs/sourceAssessment" });
     expect(wire.properties.findings.required).toEqual(["study"]);
-    expect(Object.keys(schema.properties)).toEqual(["claimBasis", "profileChecks", "summary", "evidence", "contentAngle", "whyItMatters", "limitations", "familyKey", "qualityComponents", "additionalIdeas"]);
+    expect(Object.keys(schema.properties)).toEqual(["claimBasis", "profileChecks", "claim", "familyKey", "qualityComponents", "additionalIdeas"]);
     expect(schema.required.slice(0, 2)).toEqual(["claimBasis", "profileChecks"]);
     expect(wire.$defs.profileCheck.properties.profileId.enum).toEqual(["company", "personal"]);
     expect(wire.$defs.profileChecks.items).toEqual({ $ref: "#/$defs/profileCheck" });
@@ -284,11 +284,78 @@ it("normalizes keyed evidence while retaining legacy cached arrays and quote val
 
 it("places the supported claim, exact evidence and limitations before the final evidence score", () => {
   const fields = ["summary", "evidence", "contentAngle", "whyItMatters", "limitations", "familyKey", "score"];
-  const schema = evidenceJsonSchemaForItems(["study"]).$defs.sourceAssessment;
-  expect(Object.keys(schema.properties)).toEqual([...fields, "additionalIdeas"]);
-  expect(schema.required).toEqual([...fields, "additionalIdeas"]);
+  const wire = evidenceJsonSchemaForItems(["study"]), schema = wire.$defs.sourceAssessment;
+  expect(Object.keys(wire.$defs.claim.properties)).toEqual(fields.slice(0, 5));
+  expect(Object.keys(schema.properties)).toEqual(["claim", "familyKey", "score", "additionalIdeas"]);
+  expect(schema.required).toEqual(["claim", "familyKey", "score", "additionalIdeas"]);
   expect(Object.keys(researchEvidenceSchema.parse({ findings: [finding] }).findings[0])).toEqual(["itemId", ...fields]);
   expect(validateResearchEvidence([{ ...finding, evidence: "Unverified efficacy that the source does not contain." }], items)).toEqual([]);
+});
+
+describe("compact nested claim wire normalization", () => {
+  const fields = ["summary", "evidence", "contentAngle", "whyItMatters", "limitations"] as const;
+  const checks = [{ profileId: "personal", fits: true, relevance: 27, reason: "A useful product leadership decision." },
+    { profileId: "company", fits: false, relevance: 0, reason: "Outside the company adoption remit." }];
+  const scored = { ...finding, claimBasis: "reasoned_position", profileChecks: checks, qualityComponents: { sourceSupport: 22, usefulDecision: 25, scopeHonesty: 14 } };
+  function compact(idea: typeof scored) {
+    const { summary, evidence, contentAngle, whyItMatters, limitations, ...rest } = idea;
+    return { ...rest, claim: { summary, evidence, contentAngle, whyItMatters, limitations } };
+  }
+  function payload(array: boolean) {
+    const primary = compact(scored), { itemId: _id, ...keyed } = primary;
+    const { itemId: _extraId, ...extra } = compact({ ...scored, familyKey: "second-decision" });
+    return { findings: array ? [{ ...primary, additionalIdeas: [extra], sectionChecks: [] }]
+      : { study: { ...keyed, additionalIdeas: [extra], sectionChecks: [] } } };
+  }
+  it.each([true, false])("normalizes primary/additional nested claims without changing flat stored fields (array=%s)", array => {
+    const input = payload(array), original = JSON.stringify(input);
+    const normalized = researchEvidenceSchema.parse(input).findings;
+    const { itemId: _id, ...flatExtra } = scored;
+    expect(normalized).toEqual(researchEvidenceSchema.parse({ findings: [{ ...scored,
+      additionalIdeas: [{ ...flatExtra, familyKey: "second-decision" }], sectionChecks: [],
+    }] }).findings);
+    expect(normalized[0]).toMatchObject({ ...finding, score: 88, chosenProfileId: "personal", sectionChecks: [] });
+    expect(normalized[0]).not.toHaveProperty("claim");
+    expect(normalized[0].additionalIdeas![0]).toMatchObject({ summary: finding.summary, evidence: quote, score: 88, chosenProfileId: "personal", familyKey: "second-decision" });
+    expect(normalized[0].additionalIdeas![0]).not.toHaveProperty("claim");
+    expect(validateResearchEvidenceProfiles(normalized, ["personal", "company"])).toBe(normalized);
+    expect(validateResearchEvidence(normalized, items)).toHaveLength(2);
+    expect(JSON.stringify(input)).toBe(original);
+  });
+  it.each(fields)("rejects missing nested %s and collisions even when the flat value agrees", field => {
+    for (const additional of [false, true]) {
+      const primary = compact(scored), { itemId: _id, ...extraBase } = primary;
+      const extra = { ...extraBase, familyKey: "second-decision" };
+      const target: Record<string, unknown> = additional ? extra : primary;
+      const originalClaim = { ...primary.claim }, claim = { ...originalClaim };
+      delete (claim as Record<string, unknown>)[field];
+      target.claim = claim;
+      expect(researchEvidenceSchema.safeParse({ findings: [{ ...primary, ...(additional ? { additionalIdeas: [extra] } : {}) }] }).success).toBe(false);
+      target.claim = originalClaim;
+      target[field] = scored[field];
+      expect(researchEvidenceSchema.safeParse({ findings: [{ ...primary, ...(additional ? { additionalIdeas: [extra] } : {}) }] }).success).toBe(false);
+    }
+  });
+  it.each([null, [], "invalid", { summary: "Only one field" }, { ...compact(scored).claim, hidden: "unknown" },
+    { ...compact(scored).claim, evidence: "x".repeat(601) }])("rejects malformed or unknown nested claim fields %j", claim => {
+    const primary = compact(scored), { itemId: _id, ...extraBase } = primary;
+    const extra = { ...extraBase, familyKey: "second-decision" };
+    expect(researchEvidenceSchema.safeParse({ findings: { study: { ...extraBase, claim } } }).success).toBe(false);
+    expect(researchEvidenceSchema.safeParse({ findings: { study: { ...extraBase, additionalIdeas: [{ ...extra, claim }] } } }).success).toBe(false);
+  });
+  it("shares a five-field claim definition and keeps source parents at seven fields with exact source keys and no unions", () => {
+    const ids = Array.from({ length: 6 }, (_, index) => `source-${index}`);
+    const wire = evidenceJsonSchemaForItems(ids, ["personal", "company"], { sectionCoverage: true });
+    expect(wire.$defs.claim.required).toEqual(fields);
+    expect(wire.$defs.claim.additionalProperties).toBe(false);
+    expect(Object.keys(wire.$defs.sourceAssessment.properties)).toEqual(["claimBasis", "profileChecks", "claim", "familyKey", "qualityComponents", "additionalIdeas", "sectionChecks"]);
+    expect(wire.$defs.sourceAssessment.required).toHaveLength(7);
+    expect(wire.$defs.sourceAssessment.properties.claim).toEqual({ $ref: "#/$defs/claim" });
+    expect(wire.$defs.idea.properties.claim).toEqual({ $ref: "#/$defs/claim" });
+    expect(Object.keys(wire.$defs.idea.properties)).toHaveLength(5);
+    expect(wire.properties.findings.required).toEqual(ids);
+    expect(JSON.stringify(anthropicResearchSchema(wire))).not.toMatch(/anyOf|oneOf|"null"/);
+  });
 });
 
 it("preserves original quote offsets after Unicode case expansion", () => {

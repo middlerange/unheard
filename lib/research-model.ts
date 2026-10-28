@@ -11,7 +11,7 @@ import { researchSectionInventory, type ResearchSourceSection } from "./research
 export { researchSourceSections } from "./research-sections";
 export { ResearchModelRateLimitError } from "./research-provider-error";
 export const RESEARCH_MODEL = "claude-haiku-5-5";
-export const RESEARCH_PROMPT_VERSION = "research-v22-complete-source-and-section-coverage";
+export const RESEARCH_PROMPT_VERSION = "research-v23-compact-claim-grammar";
 export const RESEARCH_SCREEN_BATCH_SIZE = 8;
 export const RESEARCH_EVIDENCE_BATCH_SIZE = 6;
 export const RESEARCH_EVIDENCE_OUTPUT_TOKENS = 16_384;
@@ -30,7 +30,7 @@ Separate the source fact from the editorial implication. summary and evidence mu
 
 Next declare claimBasis: measured_observation, reported_capability, described_method, reasoned_position, or no_useful_core. Match the evidence standard to the claim you actually propose. A public release supports an attributed description of the documented capability and availability, not independent business effectiveness. A concrete practitioner argument supports explaining that person's reasoning as a perspective, not proving its outcome. A described method, workflow or prompt supports its stated steps and tradeoffs, not unmeasured conversion gains. Measurements must retain definitions, population and uncertainty. Do not turn a supported description, method or position into a causal claim and then reject it for lacking the proof that invented claim would need.
 
-Complete summary, exact evidence, contentAngle, whyItMatters and limitations, then return qualityComponents. sourceSupport is 0-25: use20-25 when the supplied text clearly states and explains the chosen bounded claim, 10-19 when support for that specific claim is incomplete, and0-9 when absent or contradicted. Judge whether the CURRENT text supports the bounded claim with a concrete mechanism, example, instruction or explicit rationale appropriate to claimBasis. An attributed, specifically reasoned position or a clearly documented capability can earn strong support without an experiment, numerical outcome or independent replication. usefulDecision is 0-30: use23-30 for a specific, developed editorial decision, test, distinction or practical implication grounded in the source fact; 12-22 for a broad or underdeveloped implication; and0-11 when no usable decision is supplied. Judge usefulness for the best-fitting profile. A developed practical implication can be strong without a proven business result or an explicit recommendation by the publisher. Evaluate the actual contentAngle and whyItMatters you have constructed, rather than rating whether the publisher did that editorial work. scopeHonesty is 0-15: use12-15 when the proposed idea accurately attributes and bounds its claim, 6-11 when material limits remain unclear, and0-5 when misleading. Judge the proposed idea, not the publisher’s promotional tone. Missing outcome data limits an outcome claim; it does not invalidate a described capability, method or reasoned position. Do not subtract for unrelated promotional promises that the proposed idea explicitly excludes. The final score is the best fitting profile's relevance plus these three components. Below70 means no sufficiently useful grounded audience decision; 80-89 is clear, specific and useful, not necessarily exceptional research. Never inflate components because of creator popularity, engagement, presumed success or inclusion in a benchmark. No benchmark answers or desired examples are supplied.
+In the wire format, place summary, exact evidence, contentAngle, whyItMatters and limitations together inside the required claim object for every primary and additional idea; do not repeat those fields outside claim. Complete that claim, then return qualityComponents. sourceSupport is 0-25: use20-25 when the supplied text clearly states and explains the chosen bounded claim, 10-19 when support for that specific claim is incomplete, and0-9 when absent or contradicted. Judge whether the CURRENT text supports the bounded claim with a concrete mechanism, example, instruction or explicit rationale appropriate to claimBasis. An attributed, specifically reasoned position or a clearly documented capability can earn strong support without an experiment, numerical outcome or independent replication. usefulDecision is 0-30: use23-30 for a specific, developed editorial decision, test, distinction or practical implication grounded in the source fact; 12-22 for a broad or underdeveloped implication; and0-11 when no usable decision is supplied. Judge usefulness for the best-fitting profile. A developed practical implication can be strong without a proven business result or an explicit recommendation by the publisher. Evaluate the actual contentAngle and whyItMatters you have constructed, rather than rating whether the publisher did that editorial work. scopeHonesty is 0-15: use12-15 when the proposed idea accurately attributes and bounds its claim, 6-11 when material limits remain unclear, and0-5 when misleading. Judge the proposed idea, not the publisher’s promotional tone. Missing outcome data limits an outcome claim; it does not invalidate a described capability, method or reasoned position. Do not subtract for unrelated promotional promises that the proposed idea explicitly excludes. The final score is the best fitting profile's relevance plus these three components. Below70 means no sufficiently useful grounded audience decision; 80-89 is clear, specific and useful, not necessarily exceptional research. Never inflate components because of creator popularity, engagement, presumed success or inclusion in a benchmark. No benchmark answers or desired examples are supplied.
 
 Commercial framing, a sponsor or a CTA does not erase a concrete usable core. Consequential capabilities, workflows, leadership choices, product judgment and distribution can fit a personal builder or growth profile even when a company adoption profile would not publish them. A non-SaaS example needs a concrete transferable decision, rather than broad topic similarity. Reject pure offers, slogans, generic event or show introductions, personal milestones without a transferable core, unrelated material and unsupported hype. Do not invent a mechanism to rescue thin material. An old original may be a useful evergreen reference; age alone is not a quality rejection. An undated_reference has no verified publication date. Neither first observation nor a new social share makes it a new release.
 
@@ -103,7 +103,7 @@ const evidenceAssessment = z.object({
     notPostworthyReason: z.string().max(600),
   }).strict()).optional(),
 });
-export const researchEvidenceSchema = z.object({
+const flatResearchEvidenceSchema = z.object({
   findings: z.union([
     z.array(evidenceAssessment),
     z.record(z.string(), evidenceAssessment.omit({ itemId: true }).strict())
@@ -129,6 +129,36 @@ export const researchEvidenceSchema = z.object({
     });
   });
 });
+const claimFields = ["summary", "evidence", "contentAngle", "whyItMatters", "limitations"] as const;
+const wireClaimSchema = evidenceIdea.pick({ summary: true, evidence: true, contentAngle: true, whyItMatters: true, limitations: true }).strict();
+export const researchEvidenceSchema = z.preprocess((value, context) => {
+  if (!value || typeof value !== "object" || !("findings" in value)) return value;
+  function normalizeIdea(idea: unknown, path: Array<string | number>): unknown {
+    if (!idea || typeof idea !== "object" || !("claim" in idea)) return idea;
+    if (claimFields.some(field => Object.hasOwn(idea, field))) {
+      context.addIssue({ code: "custom", path, message: "Nested claim must not collide with flat claim fields" });
+      return idea;
+    }
+    const claim = wireClaimSchema.safeParse(idea.claim);
+    if (!claim.success) {
+      for (const issue of claim.error.issues) context.addIssue({ ...issue, path: [...path, "claim", ...issue.path] });
+      return idea;
+    }
+    const { claim: _claim, ...rest } = idea;
+    return { ...rest, ...claim.data };
+  }
+  function normalizeAssessment(assessment: unknown, path: Array<string | number>) {
+    const normalized = normalizeIdea(assessment, path);
+    if (!normalized || typeof normalized !== "object" || !("additionalIdeas" in normalized) || !Array.isArray(normalized.additionalIdeas)) return normalized;
+    return { ...normalized, additionalIdeas: normalized.additionalIdeas.map((idea, index) => normalizeIdea(idea, [...path, "additionalIdeas", index])) };
+  }
+  const findings = value.findings;
+  return { ...value, findings: Array.isArray(findings)
+    ? findings.map((assessment, index) => normalizeAssessment(assessment, ["findings", index]))
+    : findings && typeof findings === "object"
+      ? Object.fromEntries(Object.entries(findings).map(([id, assessment]) => [id, normalizeAssessment(assessment, ["findings", id])]))
+      : findings };
+}, flatResearchEvidenceSchema);
 export type ResearchEvidence = z.infer<
   typeof researchEvidenceSchema
 >["findings"][number];
@@ -432,17 +462,21 @@ export const evidenceJsonSchema = {
 export function evidenceJsonSchemaForItems(itemIds: string[], enabledProfileIds?: string[], options: { sectionCoverage?: boolean } = {}) {
   const { itemId: _itemId, ...properties } = evidenceJsonSchema.properties.findings.items.properties;
   const required = evidenceJsonSchema.properties.findings.items.required.filter(name => name !== "itemId");
-  const { score: _score, ...claimProperties } = properties;
+  const { summary, evidence, contentAngle, whyItMatters, limitations, ...decisionProperties } = properties;
+  const { score: _score, ...scoredDecisionProperties } = decisionProperties;
   const ideaProperties = enabledProfileIds ? {
     claimBasis: { type: "string", enum: ["measured_observation", "reported_capability", "described_method", "reasoned_position", "no_useful_core"] },
     profileChecks: { $ref: "#/$defs/profileChecks" },
-    ...claimProperties,
+    claim: { $ref: "#/$defs/claim" },
+    ...scoredDecisionProperties,
     qualityComponents: { $ref: "#/$defs/qualityComponents" },
-  } : properties;
-  const ideaRequired = enabledProfileIds ? ["claimBasis", "profileChecks", ...required.filter(x => x !== "score"), "qualityComponents"] : required;
+  } : { claim: { $ref: "#/$defs/claim" }, ...decisionProperties };
+  const decisionRequired = required.filter(name => !claimFields.some(field => field === name));
+  const ideaRequired = enabledProfileIds ? ["claimBasis", "profileChecks", "claim", ...decisionRequired.filter(x => x !== "score"), "qualityComponents"] : ["claim", ...decisionRequired];
   return {
     ...evidenceJsonSchema,
     $defs: {
+      claim: { type: "object", additionalProperties: false, properties: { summary, evidence, contentAngle, whyItMatters, limitations }, required: [...claimFields] },
       ...(options.sectionCoverage ? { sectionCheck: { type: "object", additionalProperties: false, properties: {
         sectionId: { type: "string" }, familyKeys: { type: "array", items: { type: "string", maxLength: 160 } },
         notPostworthyReason: { type: "string", maxLength: 600 },
