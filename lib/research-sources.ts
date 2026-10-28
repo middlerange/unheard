@@ -1401,6 +1401,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "wynter-ai-positioning-reference",
+    "artifactReview": { "enabled": false, "format": "inspectable_public_artifact" },
     "name": "Wynter — public AI positioning workshop outline",
     "url": "https://wynter.com/ai-positioning-workshop",
     "kind": "web",
@@ -1503,6 +1504,19 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "google-ads-dynamic-prospecting",
+    "referencePacket": {
+      "id": "google-advertising-prediction-references",
+      "enabled": false,
+      "sourceIds": [
+        "google-ads-dynamic-prospecting",
+        "google-analytics-predictive-audiences",
+        "reference-47f8905a46b4"
+      ],
+      "relationship": {
+        "type": "same_publisher",
+        "reason": "Google Ads and Analytics public references describe separate prediction and audience products. Preserve their individual prerequisites and documented account relationships; co-collection does not establish automatic interoperability between products."
+      }
+    },
     "name": "Google Ads — dynamic prospecting mechanics",
     "url": "https://support.google.com/google-ads/answer/2497941?hl=en",
     "kind": "web",
@@ -1750,6 +1764,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "reference-2843b8f34586",
+    "artifactReview": { "enabled": false, "format": "inspectable_public_artifact" },
     "name": "Reference — pricing",
     "url": "https://www.trendtrack.io/pricing",
     "kind": "web",

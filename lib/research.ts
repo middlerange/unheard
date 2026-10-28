@@ -14,6 +14,7 @@ import { researchAttributedQuoteRanges, researchSourceDepthQuotePolicy, research
   RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION, RESEARCH_SOURCE_DEPTH_QUOTES_VERSION, RESEARCH_SOURCE_DEPTH_QUOTES_SONNET_INSTRUCTIONS } from "./research-source-depth-quotes";
 import { reviewResearchSourcePackets, configuredResearchPacketDefinitions, researchPacketsFromDefinitions } from "./research-source-packets";
 import type { ResearchSourcePacket } from "./research-source-packet-model";
+import { researchSourceArtifactPolicy, researchSourceArtifactContract, RESEARCH_SOURCE_ARTIFACT_VERSION, RESEARCH_SOURCE_ARTIFACT_FORMAT } from "./research-source-artifact";
 import { researchFindingDates, researchItemSignalKind } from "./research-dates";
 import { getDraftResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
 import { hasUsablePewResearchBody, isPewResearchSource } from "./research-pew";
@@ -31,6 +32,7 @@ import {
   research_sources,
 } from "./schema";
 import { RESEARCH_SOURCE_SEEDS } from "./research-sources";
+import { researchWatchUrlAliases } from "./research-watch-urls";
 import { collectDiscoveredResearchSource, fetchDiscoveredResearchArticle, researchAbstractText, researchDiscoveryBlockedHosts, type DiscoveryArticleTarget } from "./research-discovery";
 import {
   isResearchDailyTime,
@@ -1166,7 +1168,8 @@ async function cachedModel(
       ...storage,
       generate: async (request: ResearchSourceReviewRequest) => (await callResearchModel(request.instructions, request.data, request.schema,
         typeof request.data.items[0]?.reviewOutputTokens === "number" ? request.data.items[0].reviewOutputTokens : outputTokens,
-        { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? "replay_review_evidence" : "review_evidence" }, request.model)).value,
+        { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? "replay_review_evidence" : "review_evidence" }, request.model,
+        request.data.items[0]?.reviewTimeoutMs === 240_000 ? { timeoutMs: 240_000 } : undefined)).value,
     };
     const reviewed = await reviewResearchSources(sources, { ...covered.value, coverageManifestIds: covered.manifestIds }, reviewAccess);
     await recordPhase("source-review", RESEARCH_SOURCE_REVIEW_VERSION, [], reviewed.manifestIds, false);
@@ -1176,9 +1179,9 @@ async function cachedModel(
     });
     await recordPhase(activeReviewPhase.name, activeReviewPhase.version, [], checked.manifestIds, false);
     activeReviewPhase = { name: "source-depth", version: RESEARCH_SOURCE_DEPTH_VERSION };
-    let depthModel: string | undefined, depthGroupingVersion: string | undefined;
+    let depthModel: string | undefined, depthGroupingVersion: string | undefined, artifactSourceIds: string[] = [];
     if (run.mode === "replay") {
-      const config = await read(`research-replay:${run.id}:config`) as { depthModel?: unknown; depthGroupingVersion?: unknown } | null;
+      const config = await read(`research-replay:${run.id}:config`) as { depthModel?: unknown; depthGroupingVersion?: unknown; artifactSourceIds?: unknown } | null;
       if (config?.depthModel !== undefined) {
         if (config.depthModel !== "gpt-6-sol" && config.depthModel !== "claude-sonnet-5-5") throw new Error("Unknown frozen depth-review model");
         depthModel = config.depthModel;
@@ -1187,16 +1190,38 @@ async function cachedModel(
         if (config.depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION) throw new Error("Unknown frozen quote grouping policy");
         depthGroupingVersion = config.depthGroupingVersion;
       }
+      if (config?.artifactSourceIds !== undefined) {
+        if (!Array.isArray(config.artifactSourceIds) || !config.artifactSourceIds.length || config.artifactSourceIds.some(id => typeof id !== "string" || !id)
+          || new Set(config.artifactSourceIds).size !== config.artifactSourceIds.length) throw new Error("Unknown frozen artifact source routing");
+        artifactSourceIds = config.artifactSourceIds;
+      }
     } else {
       const policyId = `research-depth-policy:${run.id}`;
-      let policy = await read(policyId) as { model?: string; groupingVersion?: string } | null;
+      let policy = await read(policyId) as { model?: string; groupingVersion?: string; artifactSourceIds?: string[]; artifactContractHash?: string } | null;
       if (!policy) {
         policy = { ...(process.env.RESEARCH_DEPTH_MODEL ? { model: process.env.RESEARCH_DEPTH_MODEL } : {}),
           ...(process.env.RESEARCH_DEPTH_GROUPING_VERSION ? { groupingVersion: process.env.RESEARCH_DEPTH_GROUPING_VERSION } : {}) };
+        const activeSourceIds = JSON.parse(run.source_ids) as string[];
+        const artifactSeeds = RESEARCH_SOURCE_SEEDS.filter(seed => seed.artifactReview?.enabled && activeSourceIds.includes(seed.id));
+        if (artifactSeeds.some(seed => seed.artifactReview!.format !== RESEARCH_SOURCE_ARTIFACT_FORMAT)) throw new Error("Unknown configured artifact format");
+        if (artifactSeeds.length) {
+          const watchedUrls = new Set(artifactSeeds.map(seed => canonicalResearchUrl(seed.url)));
+          const urls = researchWatchUrlAliases(artifactSeeds.map(seed => seed.url));
+          const items = await db.select({ id: research_items.id, url: research_items.canonical_url }).from(research_items).where(and(eq(research_items.team_id, run.team_id),
+            sql`${research_items.canonical_url} IN (SELECT value FROM json_each(${JSON.stringify(urls)}))`)).orderBy(research_items.id).all();
+          policy.artifactSourceIds = items.filter(item => watchedUrls.has(canonicalResearchUrl(item.url))).map(item => item.id);
+          policy.artifactContractHash = await researchHash(JSON.stringify(researchSourceArtifactContract(outputTokens)));
+        }
         await storage.writeImmutable(policyId, policy);
         policy = await read(policyId) as typeof policy;
       }
       depthModel = policy?.model; depthGroupingVersion = policy?.groupingVersion;
+      if (policy?.artifactSourceIds !== undefined) {
+        if (!Array.isArray(policy.artifactSourceIds) || policy.artifactSourceIds.some(id => typeof id !== "string" || !id)
+          || new Set(policy.artifactSourceIds).size !== policy.artifactSourceIds.length
+          || policy.artifactContractHash !== await researchHash(JSON.stringify(researchSourceArtifactContract(outputTokens)))) throw new Error("Frozen artifact review policy changed");
+        artifactSourceIds = policy.artifactSourceIds;
+      }
       if (depthModel !== undefined && depthModel !== "gpt-6-sol" && depthModel !== "claude-sonnet-5-5") throw new Error("Unknown configured depth-review model");
       if (depthGroupingVersion !== undefined && depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION) throw new Error("Unknown configured quote grouping policy");
     }
@@ -1219,10 +1244,17 @@ async function cachedModel(
           const { groups, depth } = await researchSourceQuoteDepthRequestMetadata(source);
           const reviewOutputTokens = Math.max(outputTokens, 1024 * (Object.keys(groups).length + 1) + 2048);
           if (reviewOutputTokens > 128_000) throw new Error("Required quote groups exceed the model output budget; no groups were dropped");
-          return { groups, depth, reviewTransport: "anthropic-tool-v1", reviewOutputTokens };
+          return { groups, depth, reviewTransport: "anthropic-tool-v1", reviewOutputTokens,
+            ...(reviewOutputTokens > RESEARCH_EVIDENCE_OUTPUT_TOKENS ? { reviewTimeoutMs: 240_000, reviewClaimLeaseMs: 270_000 } : {}) };
         },
       };
       depthPolicy.policyForSource = source => researchAttributedQuoteRanges(source.content).length ? quotePolicy : depthPolicy;
+    }
+    if (artifactSourceIds.length) {
+      const artifactIds = new Set(artifactSourceIds), otherwise = depthPolicy.policyForSource;
+      const artifactPolicy = researchSourceArtifactPolicy(outputTokens);
+      depthPolicy.policyForSource = source => artifactIds.has(source.id) ? artifactPolicy : otherwise?.(source) ?? depthPolicy;
+      if (sources.some(source => artifactIds.has(source.id))) activeReviewPhase.version = RESEARCH_SOURCE_ARTIFACT_VERSION;
     }
     const expanded = await reviewResearchSources(sources, checked.value, reviewAccess, depthPolicy);
     await recordPhase(activeReviewPhase.name, activeReviewPhase.version, [], expanded.manifestIds, false);
@@ -1432,7 +1464,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
     const sources = JSON.parse(run.source_ids) as string[];
     const discoveryCutoff = Date.now();
     const windowStart = run.created_at - run.days * 86_400_000;
-    const articleWatches = RESEARCH_SOURCE_SEEDS.filter(source => source.kind === "web" && source.pageMode === "article" && sources.includes(source.id)).map(source => canonicalResearchUrl(source.url));
+    const articleWatches = researchWatchUrlAliases(RESEARCH_SOURCE_SEEDS.filter(source => source.kind === "web" && source.pageMode === "article" && sources.includes(source.id)).map(source => source.url));
     const watchedUrls = sql`${research_items.canonical_url} IN (SELECT value FROM json_each(${JSON.stringify(articleWatches)}))`;
     const sourceRoster = or(sql`${research_items.source_id} IN (SELECT value FROM json_each(${JSON.stringify(sources)}))`, watchedUrls);
     const publishedWindowSources = RESEARCH_SOURCE_SEEDS.filter(source => source.hydratePublishedWindowOnly).map(source => source.id);
@@ -1625,8 +1657,11 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       const activeSourceIds = JSON.parse(run.source_ids) as string[];
       const configuredSeeds = RESEARCH_SOURCE_SEEDS.filter(seed => seed.referencePacket?.enabled && activeSourceIds.includes(seed.id));
       const memberSeedIds = [...new Set(configuredSeeds.flatMap(seed => [seed.id, ...seed.referencePacket!.sourceIds]))];
-      const urls = RESEARCH_SOURCE_SEEDS.filter(seed => memberSeedIds.includes(seed.id)).map(seed => canonicalResearchUrl(seed.url));
-      const contextItems = urls.length ? await db.select().from(research_items).where(and(eq(research_items.team_id, run.team_id), inArray(research_items.canonical_url, urls))).all() : [];
+      const referenceUrls = RESEARCH_SOURCE_SEEDS.filter(seed => memberSeedIds.includes(seed.id)).map(seed => seed.url);
+      const canonicalUrls = new Set(referenceUrls.map(url => canonicalResearchUrl(url))), urls = researchWatchUrlAliases(referenceUrls);
+      const rows = urls.length ? await db.select().from(research_items).where(and(eq(research_items.team_id, run.team_id),
+        sql`${research_items.canonical_url} IN (SELECT value FROM json_each(${JSON.stringify(urls)}))`)).all() : [];
+      const contextItems = rows.filter(item => canonicalUrls.has(canonicalResearchUrl(item.canonical_url)));
       const packetItems = contextItems.map(item => ({ id: item.id, sourceId: item.source_id, url: item.canonical_url, publishedAt: item.published_at,
         discoveredAt: item.collected_at, content: item.content, contentChangedAt: item.content_changed_at }));
       const definitionPlan = configuredResearchPacketDefinitions(RESEARCH_SOURCE_SEEDS, packetItems, candidateIds, activeSourceIds, progress.discoveryCutoff ?? run.created_at);

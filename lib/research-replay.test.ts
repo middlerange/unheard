@@ -9,6 +9,7 @@ import { processResearchJob, createResearchRun } from './research';
 import { createSyncResearchSqlite } from './research-test-sqlite';
 import { researchHash } from './research-model';
 import { RESEARCH_SOURCE_SEEDS } from './research-sources';
+import { RESEARCH_SOURCE_ARTIFACT_VERSION } from './research-source-artifact';
 const state = vi.hoisted(() => ({ db: null as unknown }));
 vi.mock('./db/client', () => ({ getDb: async () => state.db }));
 const body = 'A practitioner describes checking each user entry route before adding an onboarding requirement. '.repeat(8);
@@ -33,6 +34,8 @@ function modelResponse(value: unknown, id: string) {
 const runIds = ['11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-222222222222','33333333-3333-4333-8333-333333333333','44444444-4444-4444-8444-444444444444'];
 it('rejects labels, expected outcomes, private URLs and unsupported inventory sizes before preparation', () => {
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), expectedGrade: 90 }).success).toBe(false);
+  expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), artifactSourceIds: [] }).success).toBe(false);
+  expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), artifactSourceIds: ['same', 'same'] }).success).toBe(false);
   expect(researchReplayItemSchema.safeParse({ ...item('x'), impressions: 12000 }).success).toBe(false);
   expect(researchReplayItemSchema.safeParse({ ...item('x'), url: 'https://127.0.0.1/private' }).success).toBe(false);
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), inventoryCount: Number.MAX_SAFE_INTEGER }).success).toBe(false);
@@ -475,17 +478,19 @@ describe('configured replay persistence and paid cache boundary', () => {
       expect(query('SELECT COUNT(*) n FROM research_findings')[0].n).toBe(0);expect(query('SELECT COUNT(*) n FROM research_drafts')[0].n).toBe(0);
     }finally{vi.stubGlobal('fetch',originalFetch);}
   },60000);
-  it('uses configured references in the normal rank path and freezes every cited document in its finding snapshot',async()=>{
+  it('finds targeted slash-URL packet watches owned by inactive archives and freezes every cited document',async()=>{
     const primarySeed={id:'test-packet-primary',name:'Primary public watch',url:'https://publisher.example/primary',kind:'web' as const,category:'practitioner' as const,enabled:true,priority:1 as const,notes:'Public reference',pageMode:'article' as const,
       referencePacket:{id:'normal-public-workflow',enabled:true,sourceIds:['test-packet-reference'],relationship:{type:'same_publisher' as const,reason:'Two original documentation references describe the same product workflow.'}}};
     const referenceSeed={...primarySeed,id:'test-packet-reference',name:'Reference public watch',url:'https://publisher.example/reference',referencePacket:undefined};
     RESEARCH_SOURCE_SEEDS.push(primarySeed,referenceSeed);
+    const primaryUrl=primarySeed.url+'/',referenceUrl=referenceSeed.url+'/';
     const now=Date.now(),old=now-30*86400000,icp=query("SELECT icp FROM research_runs WHERE id='saved-audience'")[0].icp;
     query("INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('normal-packet','Normal packet','normal-packet',?,?)",[now,now]);
     query("INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp,source_count,source_ids) VALUES('normal-packet-run','normal-packet','scan','ranking',7,?,?,2,?)",[now,icp,JSON.stringify([primarySeed.id,referenceSeed.id])]);
     for(const seed of[primarySeed,referenceSeed])query("INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,'normal-packet-run',?,'completed')",[seed.id,seed.id]);
-    query("INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES('normal-primary','normal-packet','earlier-archive',?,'Primary workflow',?,?,?,?,'public_feed')",[primarySeed.url,body.slice(0,300),now-2000,now-1000,body]);
-    query("INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES('normal-reference','normal-packet','earlier-reference',?,'Reference workflow',?,NULL,?,?,'public_feed')",[referenceSeed.url,body.slice(0,300),old,body]);
+    query("INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES('normal-primary','normal-packet','earlier-archive',?,'Primary workflow',?,?,?,?,'public_feed')",[primaryUrl,body.slice(0,300),now-2000,now-1000,body]);
+    query("INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES('normal-reference','normal-packet','earlier-reference',?,'Reference workflow',?,NULL,?,?,'public_feed')",[referenceUrl,body.slice(0,300),old,body]);
+    query("INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES('normal-neighbor','normal-packet','earlier-archive',?,'Neighbor must not match',?,?,?,?,'public_feed')",[primarySeed.url+'-other',body.slice(0,300),now-2000,now-1000,body]);
     const originalFetch=globalThis.fetch;let packetCalls=0;
     vi.stubGlobal('fetch',vi.fn(async(_url:string,init:RequestInit)=>{
       const request=JSON.parse(String(init.body)),payload=JSON.parse(request.messages[0].content),input=payload.items[0];
@@ -501,9 +506,11 @@ describe('configured replay persistence and paid cache boundary', () => {
     try{
       let steps=0;while(await rankPending('normal-packet-run'))if(++steps>15)throw Error('Normal packet rank did not finish');
       expect(packetCalls).toBe(1);
-      const finding=query("SELECT * FROM research_findings WHERE team_id='normal-packet' AND family_key='packet-normal-public-workflow-route-check'")[0];expect(finding.source_id).toBe('earlier-archive');expect(finding.limitations).toContain(referenceSeed.url);
+      const frozen=JSON.parse(query("SELECT value FROM research_cache WHERE id='rank-progress:normal-packet-run'")[0].value);expect(frozen.candidateIds).toEqual(['normal-primary']);
+      expect(JSON.parse(query("SELECT source_ids FROM research_runs WHERE id='normal-packet-run'")[0].source_ids)).toEqual([primarySeed.id,referenceSeed.id]);
+      const finding=query("SELECT * FROM research_findings WHERE team_id='normal-packet' AND family_key='packet-normal-public-workflow-route-check'")[0];expect(finding.source_id).toBe('earlier-archive');expect(finding.url).toBe(primaryUrl);expect(finding.limitations).toContain(referenceSeed.url);
       const snapshot=JSON.parse(query('SELECT value FROM research_cache WHERE id=?',[`research-finding-snapshot:normal-packet-run:${finding.id}`])[0].value);
-      expect(snapshot.source_packet_id).toBe('normal-public-workflow');expect(snapshot.source_packet_model_family).toBe('route-check');expect(query("SELECT COUNT(*) n FROM research_findings WHERE team_id='normal-packet'")[0].n).toBe(2);expect(snapshot.source_packet_proofs[0].sources).toHaveLength(2);expect(snapshot.source_packet_proofs[0].sources[1]).toMatchObject({sourceId:'normal-reference',url:referenceSeed.url,publishedAt:null,firstSeen:old});
+      expect(snapshot.source_packet_proofs[0].sources[0]).toMatchObject({sourceId:'normal-primary',url:primaryUrl});expect(snapshot.source_packet_id).toBe('normal-public-workflow');expect(snapshot.source_packet_model_family).toBe('route-check');expect(query("SELECT COUNT(*) n FROM research_findings WHERE team_id='normal-packet'")[0].n).toBe(2);expect(snapshot.source_packet_proofs[0].sources).toHaveLength(2);expect(snapshot.source_packet_proofs[0].sources[1]).toMatchObject({sourceId:'normal-reference',url:referenceUrl,publishedAt:null,firstSeen:old});
       expect(query("SELECT COUNT(*) n FROM research_drafts WHERE team_id='normal-packet'")[0].n).toBe(0);
       expect(JSON.parse(query("SELECT value FROM research_cache WHERE id='research-depth-policy:normal-packet-run'")[0].value)).toEqual({});
       await rankPending('normal-packet-run');expect(packetCalls).toBe(1);
@@ -511,6 +518,76 @@ describe('configured replay persistence and paid cache boundary', () => {
       vi.stubGlobal('fetch',originalFetch);RESEARCH_SOURCE_SEEDS.splice(RESEARCH_SOURCE_SEEDS.indexOf(primarySeed),2);
       for(const table of['research_findings','research_cache','research_items','research_runs','research_sources','teams'])query(`DELETE FROM ${table} WHERE ${table==='teams'?'id':'team_id'}='normal-packet'`);
     }
+  },60000);
+  it('routes an opt-in artifact cohort through the same final policy with four new calls and leaves other caches unchanged',async()=>{
+    const baselineId='a4000000-0000-4000-8000-000000000001',artifactId='a4000000-0000-4000-8000-000000000002',repeatId='a4000000-0000-4000-8000-000000000003',invalidId='a4000000-0000-4000-8000-000000000004';
+    const sources=['public-card','public-options','public-invitation','public-welcome','ordinary-reference'].map(id=>item('artifact-'+id));
+    const routed=sources.slice(0,4).map(source=>source.id),originalFetch=globalThis.fetch;
+    const calls:Array<{id:string;artifact:boolean;model:string}>=[];
+    vi.stubGlobal('fetch',vi.fn(async(_url:string,init:RequestInit)=>{
+      const request=JSON.parse(String(init.body)),payload=JSON.parse(request.messages[0].content),source=payload.items[0],artifact=source.artifact?.version===RESEARCH_SOURCE_ARTIFACT_VERSION;
+      calls.push({id:source.id,artifact,model:request.model});
+      if(Array.isArray(source.passages)){
+        const value=rejectedSourceReview(payload);
+        if(artifact){
+          expect(source.artifact.format).toBe('inspectable_public_artifact');expect(source.reviewOutputTokens).toBe(16384);expect(request.model).toBe('claude-sonnet-5-5');
+          if(routed.slice(0,2).includes(source.id)){
+            const frame=value.findings[source.id].wholeSource;
+            frame.claimBasis='described_method';frame.familyKey='observed-entry-route';
+            frame.profileChecks=payload.publishingProfiles.map((profile:any)=>({profileId:profile.id,fits:profile.id==='personal',relevance:profile.id==='personal'?22:0,reason:'A bounded inspectable entry-route decision.'}));
+            frame.claim={summary:'The publisher describes checking user entry routes before adding an onboarding requirement.',evidencePassageIds:[0],contentAngle:'Proposed inspection: compare the entry routes before changing a requirement.',whyItMatters:'The captured workflow supports a bounded product inspection.',limitations:'Publisher-described behavior; no measured outcome is supplied.'};
+            frame.qualityComponents={sourceSupport:'supported_bounded_claim',usefulDecision:'concrete_decision',scopeHonesty:'accurately_bounded'};
+          }
+          return Response.json({id:'artifact-message',model:request.model,stop_reason:'tool_use',content:[{type:'tool_use',name:'submit_research',input:value}],usage:{input_tokens:10,output_tokens:10}});
+        }
+        return modelResponse(value,'ordinary-review');
+      }
+      const frame={claimBasis:'no_useful_core',profileChecks:payload.publishingProfiles.map((profile:any)=>({profileId:profile.id,fits:false,relevance:0,reason:'No independently useful core is selected in this baseline fixture.'})),
+        claim:{summary:'No selected core in this baseline fixture.',evidence:'',contentAngle:'',whyItMatters:'',limitations:'No supported useful distinction is selected.'},familyKey:'',qualityComponents:{sourceSupport:'unsupported',usefulDecision:'none',scopeHonesty:'accurately_bounded'},additionalIdeas:[]};
+      return modelResponse({findings:Object.fromEntries(payload.items.map((source:any)=>[source.id,frame]))},'artifact-base');
+    }));
+    try{
+      for(const [runId,opted]of[[baselineId,false],[artifactId,true],[repeatId,true]]as const){
+        const before=calls.length,prepared=await researchReplayAction('team',{...prepare(runId,sources.length),...(opted?{artifactSourceIds:routed}:{})});
+        if(opted)expect(prepared).toMatchObject({artifactReviewVersion:RESEARCH_SOURCE_ARTIFACT_VERSION,artifactSourceCount:4,sourceReviewVersion:'research-source-review-v1+consistency-v1+depth-artifact-routed-v1'});
+        await researchReplayAction('team',{operation:'upload',runId,chunkIndex:0,items:sources});await researchReplayAction('team',{operation:'start',runId});
+        let steps=0;while(await rankPending(runId))if(++steps>35)throw Error('Artifact replay did not finish');
+        const status=await researchReplayStatus('team',runId);
+        if(runId===artifactId){expect(calls.slice(before)).toHaveLength(4);expect(calls.slice(before).every(call=>call.artifact)).toBe(true);expect(new Set(calls.slice(before).map(call=>call.id))).toEqual(new Set(routed));}
+        if(runId===repeatId)expect(calls.slice(before)).toEqual([]);
+        expect(status.run.findings_count).toBe(opted?2:0);
+        if(opted){const accepted=status.records.flatMap(row=>row.value.acceptedIdeas??[]);expect(accepted.map((idea:any)=>idea.itemId).sort()).toEqual(routed.slice(0,2).sort());expect(accepted.every((idea:any)=>idea.score===92)).toBe(true);}
+      }
+      const configId=`research-replay:${artifactId}:config`,saved=JSON.parse(query('SELECT value FROM research_cache WHERE id=?',[configId])[0].value);
+      query('UPDATE research_cache SET value=? WHERE id=?',[JSON.stringify({...saved,artifactSourceIds:routed.slice(0,3)}),configId]);query("UPDATE research_runs SET status='ranking' WHERE id=?",[artifactId]);
+      await expect(rankPending(artifactId)).rejects.toThrow('contract changed');query('UPDATE research_cache SET value=? WHERE id=?',[JSON.stringify(saved),configId]);query("UPDATE research_runs SET status='completed' WHERE id=?",[artifactId]);
+      await researchReplayAction('team',{...prepare(invalidId,sources.length),artifactSourceIds:['missing-item']});await researchReplayAction('team',{operation:'upload',runId:invalidId,chunkIndex:0,items:sources});
+      const before=calls.length;await expect(researchReplayAction('team',{operation:'start',runId:invalidId})).rejects.toThrow('eligible captured readable');expect(calls.length).toBe(before);
+      expect(query('SELECT COUNT(*) n FROM research_findings')[0].n).toBe(0);expect(query('SELECT COUNT(*) n FROM research_drafts')[0].n).toBe(0);
+    }finally{vi.stubGlobal('fetch',originalFetch);}
+  },60000);
+  it('freezes a trailing-slash artifact watch by actual item ID without rewriting its query or archive identity',async()=>{
+    const seed={id:'test-artifact-watch',name:'Public artifact',url:'https://publisher.example/artifact?view=public',kind:'web' as const,category:'practitioner' as const,enabled:true,priority:1 as const,notes:'Public artifact reference',pageMode:'article' as const,artifactReview:{enabled:true,format:'inspectable_public_artifact' as const}};
+    const storedUrl='https://publisher.example/artifact/?view=public',archiveId='saastr-practitioner-cases';
+    RESEARCH_SOURCE_SEEDS.push(seed);const now=Date.now(),icp=query("SELECT icp FROM research_runs WHERE id='saved-audience'")[0].icp;
+    query("INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('normal-artifact','Normal artifact','normal-artifact',?,?)",[now,now]);
+    query("INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp,source_count,source_ids) VALUES('normal-artifact-run','normal-artifact','scan','ranking',7,?,?,1,?)",[now,icp,JSON.stringify([seed.id])]);
+    for(const id of[seed.id])query("INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,'normal-artifact-run',?,'completed')",['normal-artifact-step-'+id,id]);
+    query("INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES('normal-artifact-item','normal-artifact',?,?,'Inspectable artifact',?,?,?,?,'public_feed')",[archiveId,storedUrl,body.slice(0,300),now-2000,now-1000,body]);
+    const originalFetch=globalThis.fetch;let artifactCalls=0;
+    vi.stubGlobal('fetch',vi.fn(async(_url:string,init:RequestInit)=>{
+      const request=JSON.parse(String(init.body)),payload=JSON.parse(request.messages[0].content),source=payload.items[0];
+      if(!source.artifact)return originalFetch(_url,init);artifactCalls++;expect(request.model).toBe('claude-sonnet-5-5');
+      return Response.json({id:'normal-artifact-message',model:request.model,stop_reason:'tool_use',content:[{type:'tool_use',name:'submit_research',input:rejectedSourceReview(payload)}],usage:{input_tokens:10,output_tokens:10}});
+    }));
+    try{
+      let steps=0;while(await rankPending('normal-artifact-run'))if(++steps>15)throw Error('Normal artifact routing did not finish');
+      expect(artifactCalls).toBe(1);expect(JSON.parse(query("SELECT source_ids FROM research_runs WHERE id='normal-artifact-run'")[0].source_ids)).toEqual([seed.id]);
+      const policy=JSON.parse(query("SELECT value FROM research_cache WHERE id='research-depth-policy:normal-artifact-run'")[0].value);
+      expect(policy.artifactSourceIds).toEqual(['normal-artifact-item']);expect(policy.artifactContractHash).toMatch(/^[a-f0-9]{64}$/);expect(policy.model).toBeUndefined();
+      expect(query("SELECT source_id,canonical_url FROM research_items WHERE id='normal-artifact-item'")[0]).toEqual({source_id:archiveId,canonical_url:storedUrl});
+      expect(query("SELECT COUNT(*) n FROM research_drafts WHERE team_id='normal-artifact'")[0].n).toBe(0);
+    }finally{vi.stubGlobal('fetch',originalFetch);RESEARCH_SOURCE_SEEDS.splice(RESEARCH_SOURCE_SEEDS.indexOf(seed),1);for(const table of['research_findings','research_cache','research_items','research_runs','research_sources','teams'])query(`DELETE FROM ${table} WHERE ${table==='teams'?'id':'team_id'}='normal-artifact'`);}
   },60000);
   it('screens only incomplete bodies in packed batches and never scores short evidence',async()=>{
     const id=runIds[3],items=Array.from({length:20},(_,n)=>({...item('mixed-'+n),content:n%2?'Short partial text.':body}));

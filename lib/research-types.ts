@@ -25,6 +25,7 @@ export type ResearchSourceSeed = {
   discoveryProvider?: "treg" | "hackernews";
   discoverySearchType?: "web" | "news";
   discoveryBlockedHosts?: string[];
+  artifactReview?: { enabled: boolean; format: 'inspectable_public_artifact' };
   referencePacket?: {
     id: string;
     enabled: boolean;

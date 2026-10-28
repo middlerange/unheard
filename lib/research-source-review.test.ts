@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reviewResearchSources, ResearchSourceReviewPending, type ResearchSourceReviewAccess, type ResearchSourceReviewInput, type ResearchSourceReviewRequest, type ResearchSourceReviewPolicy } from "./research-source-review";
+import { reviewResearchSources, researchSourceReviewDeadlines, ResearchSourceReviewPending, type ResearchSourceReviewAccess, type ResearchSourceReviewInput, type ResearchSourceReviewRequest, type ResearchSourceReviewPolicy } from "./research-source-review";
 import { RESEARCH_SOURCE_REVIEW_INSTRUCTIONS, researchSourceReviewPassages, normalizeResearchSourceReview } from "./research-source-review-model";
 import { RESEARCH_SOURCE_DEPTH_VERSION, RESEARCH_SOURCE_DEPTH_INSTRUCTIONS, researchSourceDepthSchema, researchSourceDepthRequestMetadata, normalizeResearchSourceDepth } from "./research-source-depth-model";
 import { ResearchCoveragePending } from "./research-coverage";
@@ -78,6 +78,37 @@ describe("source-led whole-capture review with real SQLite checkpoints", () => {
     const item=source("policy"),h=await harness();
     await reviewResearchSources([item],baseGrade(item),h.access);
     expect((await h.records("research-source-review-plan:"))[0].id).toBe("research-source-review-plan:v1:7685a0d73c641df63ff512c7b367f322fa64df2a0762279a8b6cdfd2715fa792");
+  });
+  it("requires the exact paired long deadline before storing a plan or requesting a grade", async () => {
+    expect(researchSourceReviewDeadlines({})).toEqual({ timeoutMs: 90_000, claimLeaseMs: 120_000 });
+    expect(researchSourceReviewDeadlines({ reviewTimeoutMs: 240_000, reviewClaimLeaseMs: 270_000 })).toEqual({ timeoutMs: 240_000, claimLeaseMs: 270_000 });
+    const item=source("invalid-deadline"),h=await harness();
+    for(const metadata of [{reviewTimeoutMs:240_000},{reviewClaimLeaseMs:270_000},{reviewTimeoutMs:240_000,reviewClaimLeaseMs:120_000},{reviewTimeoutMs:90_000,reviewClaimLeaseMs:270_000},{reviewTimeoutMs:240_001,reviewClaimLeaseMs:270_000}]){
+      await expect(reviewResearchSources([item],baseGrade(item),h.access,{version:"deadline-fixture",instructions:"Frozen fixture instructions.",requestMetadata:()=>metadata})).rejects.toThrow("paired timeout and claim lease");
+    }
+    expect(h.generate).not.toHaveBeenCalled();expect(await h.records("research-source-review-plan:")).toEqual([]);
+  });
+  it("keeps a declared long review active past120 seconds and expires only at270 seconds without retry or late overwrite", async () => {
+    const item=source("long-deadline"),h=await harness(),base=baseGrade(item);
+    const policy:ResearchSourceReviewPolicy={version:"long-deadline-fixture",instructions:"Frozen fixture instructions.",requestMetadata:()=>({reviewTimeoutMs:240_000,reviewClaimLeaseMs:270_000})};
+    let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+    h.generate.mockImplementation(async request=>{await gate;return rawReview(request);});
+    const first=reviewResearchSources([item],base,h.access,policy);
+    for(let i=0;i<50&&!h.generate.mock.calls.length;i++)await new Promise(resolve=>setTimeout(resolve,0));
+    expect(h.generate).toHaveBeenCalledTimes(1);
+    const plan=(await h.records("research-source-review-plan:"))[0],started=(await h.records("research-source-review-attempt:"))[0];
+    expect(plan.value.request.data.items[0]).toMatchObject({reviewTimeoutMs:240_000,reviewClaimLeaseMs:270_000});
+    h.clock.value+=120_001;
+    await expect(reviewResearchSources([item],base,h.access,policy)).rejects.toMatchObject({activeSources:1});
+    expect((await h.read(started.id)).state).toBe("started");expect(h.generate).toHaveBeenCalledTimes(1);
+    await h.put(started.id,{...started.value,state:"indeterminate",completedAt:h.clock.value,reason:"A premature expiry must not be trusted."});
+    await expect(reviewResearchSources([item],base,h.access,policy)).rejects.toThrow("expired claim");
+    await h.put(started.id,started.value);h.clock.value+=149_999;
+    const expired=await reviewResearchSources([item],base,h.access,policy);
+    expect((await h.read(started.id)).state).toBe("indeterminate");expect((await h.read(started.id)).reason).toContain("270 seconds");
+    release();expect(await first).toEqual(expired);
+    expect(await reviewResearchSources([item],base,h.access,policy)).toEqual(expired);
+    expect(h.generate).toHaveBeenCalledTimes(1);expect(expired.value.multiProofs).toEqual([]);
   });
   it("uses grouped policy hooks with one provider call and preserves both earlier policy chains on resume", async () => {
     const item={...source("depth-chain"),publishedAt:123456,discoveredAt:456789},h=await harness(),base=baseGrade(item);

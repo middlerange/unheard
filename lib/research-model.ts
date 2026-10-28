@@ -343,7 +343,13 @@ export async function callResearchModel(
   maxOutputTokens = 4000,
   usageContext: ResearchUsageContext,
   model = RESEARCH_MODEL,
+  transport: { timeoutMs?: 90_000 | 240_000 } = {},
 ) {
+  if (!transport || typeof transport !== "object" || Array.isArray(transport)
+    || Object.keys(transport).some(key => key !== "timeoutMs")
+    || transport.timeoutMs !== undefined && ![90_000, 240_000].includes(transport.timeoutMs))
+    throw new Error("Unsupported research transport timeout");
+  const timeoutMs = transport.timeoutMs ?? 90_000;
   const anthropic = model.startsWith("claude-");
   const evidenceOperation = usageContext.operation === "evidence" || usageContext.operation === "replay_evidence";
   const singleSource = data && typeof data === "object" && "items" in data && Array.isArray(data.items) && data.items.length === 1;
@@ -359,7 +365,7 @@ export async function callResearchModel(
     const provider = anthropic ? "Anthropic" : "OpenAI";
     const response = await fetch(anthropic ? "https://api.anthropic.com/v1/messages" : "https://api.openai.com/v1/responses", {
       method: "POST",
-      signal: AbortSignal.timeout(90_000),
+      signal: AbortSignal.timeout(timeoutMs),
       headers: anthropic ? {
         "x-api-key": key, "anthropic-version": "2026-10-21", "Content-Type": "application/json",
       } : { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },

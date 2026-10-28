@@ -31,6 +31,13 @@ export class ResearchSourceReviewPending extends ResearchCoveragePending {
     this.message = `Whole-source review checkpoint pending (${pendingSources} sources, ${activeSources} in flight)`;
   }
 }
+export function researchSourceReviewDeadlines(metadata: Record<string, unknown>) {
+  if (!Object.hasOwn(metadata, "reviewTimeoutMs") && !Object.hasOwn(metadata, "reviewClaimLeaseMs"))
+    return { timeoutMs: 90_000 as const, claimLeaseMs: 120_000 as const };
+  if (metadata.reviewTimeoutMs !== 240_000 || metadata.reviewClaimLeaseMs !== 270_000)
+    throw new Error("Source review requires the supported paired timeout and claim lease");
+  return { timeoutMs: 240_000 as const, claimLeaseMs: 270_000 as const };
+}
 type FailureParent = { failure: EvidenceFailure; receipt: NonNullable<Parameters<typeof verifyResearchEvidenceFailure>[4]> };
 type Receipt = { version: string; planId: string; planHash: string; sourceId: string; bodyHash: string; nonce: string; startedAt: number } & (
   { state: "started" } | { state: "completed"; completedAt: number; raw: unknown; rawHash: string; resultHash: string }
@@ -87,6 +94,7 @@ export async function reviewResearchSources(items: ResearchSourceReviewInput[], 
     const sourceView = effectivePolicy.version === policy.version ? view : { ...view, sourceReviewVersion: effectivePolicy.version };
     const extraMetadata = effectivePolicy.requestMetadata ? await effectivePolicy.requestMetadata(catalogSource) : {};
     if (!extraMetadata || typeof extraMetadata !== "object" || Array.isArray(extraMetadata)) throw new Error("Source review policy metadata must be an object");
+    const deadlines = researchSourceReviewDeadlines(extraMetadata);
     const protectedKeys = new Set([...Object.keys(source), "id", "content", "excerpt", "publicText", "passages", "sourceSections"]);
     if (Object.keys(extraMetadata).some(key => protectedKeys.has(key))) throw new Error("Source review policy metadata cannot shadow captured source fields");
     const request: ResearchSourceReviewRequest = { model: effectivePolicy.model ?? access.context.model, instructions: effectivePolicy.instructions,
@@ -100,7 +108,7 @@ export async function reviewResearchSources(items: ResearchSourceReviewInput[], 
       fullFrozenAudience: audience, researchView: sourceView, baseCoveredHash, parentValue, parentFailure: failure || null, catalogSource, request };
     const planHash = await researchHash(json(plan)), planId = `research-source-review-plan:v1:${planHash}`, receiptId = `research-source-review-attempt:v1:${planHash}`;
     await immutable(planId, plan);
-    return { source, parent, failure, catalogSource, request, policy: effectivePolicy, plan, planHash, planId, receiptId, bodyHash, parentValue };
+    return { source, parent, failure, catalogSource, request, policy: effectivePolicy, deadlines, plan, planHash, planId, receiptId, bodyHash, parentValue };
   }));
   type Work = (typeof work)[number];
   async function readReceipt(item: Work): Promise<Receipt | null> {
@@ -112,7 +120,7 @@ export async function reviewResearchSources(items: ResearchSourceReviewInput[], 
     if (receipt.state !== "started" && (!Number.isFinite(receipt.completedAt) || receipt.completedAt < receipt.startedAt)) throw new Error("Source review terminal receipt has an invalid time");
     if (receipt.state === "completed" && (!Object.hasOwn(receipt, "raw") || !receipt.rawHash || !receipt.resultHash)) throw new Error("Source review completed receipt has no raw result binding");
     if ((receipt.state === "failed" || receipt.state === "indeterminate") && !receipt.reason) throw new Error("Source review terminal failure has no reason");
-    if (receipt.state === "indeterminate" && receipt.completedAt - receipt.startedAt < 120_000) throw new Error("Source review indeterminate receipt has no expired claim");
+    if (receipt.state === "indeterminate" && receipt.completedAt - receipt.startedAt < item.deadlines.claimLeaseMs) throw new Error("Source review indeterminate receipt has no expired claim");
     return receipt;
   }
   async function normalize(item: Work, raw: unknown): Promise<ResearchSourceReviewResult> {
@@ -153,7 +161,7 @@ export async function reviewResearchSources(items: ResearchSourceReviewInput[], 
   }
   for (const item of work) {
     const receipt = await readReceipt(item);
-    if (receipt?.state === "started" && now() - receipt.startedAt >= 120_000) await save(item, receipt, { ...receipt, state: "indeterminate", completedAt: now(), reason: "Declared source review exceeded120 seconds; provider outcome is indeterminate and will not be retried." });
+    if (receipt?.state === "started" && now() - receipt.startedAt >= item.deadlines.claimLeaseMs) await save(item, receipt, { ...receipt, state: "indeterminate", completedAt: now(), reason: `Declared source review exceeded${item.deadlines.claimLeaseMs / 1000} seconds; provider outcome is indeterminate and will not be retried.` });
   }
   const waiting: Array<{ item: Work; active: boolean }> = [];
   for (const item of work) { const receipt = await readReceipt(item); if (!receipt || receipt.state === "started") waiting.push({ item, active: Boolean(receipt) }); }

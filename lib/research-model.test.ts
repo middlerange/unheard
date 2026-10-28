@@ -13,6 +13,31 @@ vi.mock("./research-usage", () => ({
   finishResearchUsage: vi.fn(async () => undefined),
 }));
 
+describe("bounded research transport deadline", () => {
+  it("keeps the default request body and selects240 seconds only through the explicit transport option", async () => {
+    const previous=process.env.OPENAI_API_KEY;process.env.OPENAI_API_KEY="fixture-deadline-key";
+    const signal=new AbortController().signal,timeout=vi.spyOn(AbortSignal,"timeout").mockReturnValue(signal);
+    const fetcher=vi.spyOn(globalThis,"fetch").mockImplementation(async()=>Response.json({status:"completed",output:[{type:"message",phase:"final_answer",content:[{type:"output_text",text:'{"findings":[]}'}]}]}));
+    const context={teamId:"deadline-team",runId:"deadline-run",stage:"research" as const,operation:"replay_review_evidence"};
+    try{
+      await callResearchModel("Frozen policy",{items:[]},{type:"object"},100,context,"gpt-6-sol");
+      await callResearchModel("Frozen policy",{items:[]},{type:"object"},100,context,"gpt-6-sol",{timeoutMs:240_000});
+      expect(timeout.mock.calls).toEqual([[90_000],[240_000]]);
+      expect(fetcher.mock.calls[0][1]?.body).toBe(fetcher.mock.calls[1][1]?.body);
+      expect(fetcher.mock.calls.every(call=>call[1]?.signal===signal)).toBe(true);
+    }finally{fetcher.mockRestore();timeout.mockRestore();if(previous===undefined)delete process.env.OPENAI_API_KEY;else process.env.OPENAI_API_KEY=previous;}
+  });
+  it("rejects unknown deadline options before usage accounting or a provider request", async () => {
+    const usage=await import("./research-usage"),before=vi.mocked(usage.beginResearchUsage).mock.calls.length,fetcher=vi.spyOn(globalThis,"fetch");
+    const context={teamId:"deadline-team",runId:"deadline-run",stage:"research" as const,operation:"replay_review_evidence"};
+    try{
+      for(const option of [{timeoutMs:0},{timeoutMs:240_001},{timeoutMs:120_000},{timeoutMs:NaN},{timeoutMs:240_000,other:true},90_000,null])
+        await expect(callResearchModel("Frozen policy",{}, {},100,context,"gpt-6-sol",option as never)).rejects.toThrow("Unsupported research transport timeout");
+      expect(vi.mocked(usage.beginResearchUsage).mock.calls).toHaveLength(before);expect(fetcher).not.toHaveBeenCalled();
+    }finally{fetcher.mockRestore();}
+  });
+});
+
 const quote = "Only 35% of projects have a formal policy permitting GenAI use";
 const finding = {
   itemId: "study", score: 82, summary: "Policy adoption lags usage",

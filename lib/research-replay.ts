@@ -16,6 +16,7 @@ import { RESEARCH_SOURCE_DEPTH_PIPELINE_VERSION as RESEARCH_SOURCE_REVIEW_VERSIO
 import { RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION, RESEARCH_SOURCE_DEPTH_QUOTES_VERSION, RESEARCH_SOURCE_DEPTH_QUOTES_INSTRUCTIONS, RESEARCH_SOURCE_DEPTH_QUOTES_SONNET_INSTRUCTIONS } from './research-source-depth-quotes';
 import { RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS, researchSourcePacketSchema } from './research-source-packet-model';
 import { researchPacketsFromDefinitions } from './research-source-packets';
+import { RESEARCH_SOURCE_ARTIFACT_VERSION, RESEARCH_SOURCE_ARTIFACT_INSTRUCTIONS, RESEARCH_SOURCE_ARTIFACT_MODEL, RESEARCH_SOURCE_ARTIFACT_FORMAT } from './research-source-artifact';
 import { RESEARCH_MODEL, RESEARCH_PROMPT_VERSION, RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS,
   RESEARCH_SCREEN_BATCH_SIZE, RESEARCH_EVIDENCE_BATCH_SIZE, RESEARCH_EVIDENCE_OUTPUT_TOKENS, RESEARCH_SECTION_COVERAGE_INSTRUCTIONS, researchHash, researchScreeningSchema,
   researchEvidenceSchema, screeningJsonSchemaForItems, evidenceJsonSchemaForItems, validateResearchScreening,
@@ -40,6 +41,7 @@ const prepareSchema = z.object({ operation: z.literal('prepare'), runId: z.uuid(
   inventoryCount: z.number().int().positive().max(100000), sourceIds: z.array(z.string().min(1).max(200)).min(1),
   depthModel: z.enum(['gpt-6-sol', 'claude-sonnet-5-5']).optional(),
   depthGroupingVersion: z.literal(RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION).optional(),
+  artifactSourceIds: z.array(z.string().min(1).max(200)).min(1).refine(ids => new Set(ids).size === ids.length, 'Artifact source IDs must be unique').optional(),
   sourcePackets: z.array(sourcePacketDefinitionSchema).min(1).optional(),
   freshnessWindowStart: timestamp.optional(), observationWindowStart: timestamp.optional(), observationWindowEnd: timestamp.optional(),
 }).strict().refine(input => input.windowStart < input.windowEnd, 'Window end must follow start')
@@ -90,10 +92,11 @@ async function immutable(teamId: string, id: string, value: unknown) {
   const saved = await read(teamId, id);
   if (!saved || saved.value !== serialized) throw new Error('Replay immutable snapshot differs from the saved input');
 }
-function sourceReviewVersion(grouping?: Config['depthGroupingVersion']) {
+function sourceReviewVersion(grouping?: Config['depthGroupingVersion'], artifacts?: Config['artifactSourceIds']) {
+  if (artifacts) return RESEARCH_SOURCE_REVIEW_VERSION.replace(/depth-v1$/, 'depth-artifact-routed-v1');
   return grouping ? RESEARCH_SOURCE_REVIEW_VERSION.replace(/depth-v1$/, 'depth-quotes-v2') : RESEARCH_SOURCE_REVIEW_VERSION;
 }
-async function contractHash(depthModel?: Config['depthModel'], extensions?: Pick<Config, 'depthGroupingVersion' | 'sourcePackets'>) {
+async function contractHash(depthModel?: Config['depthModel'], extensions?: Pick<Config, 'depthGroupingVersion' | 'sourcePackets' | 'artifactSourceIds'>) {
   const contract = { model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION,
     coverageVersion: RESEARCH_COVERAGE_VERSION, coverageScope: RESEARCH_WINDOW_SCOPE_INSTRUCTIONS,
     sourceReviewVersion: RESEARCH_SOURCE_REVIEW_VERSION, sourceReviewInstructions: RESEARCH_SOURCE_REVIEW_INSTRUCTIONS,
@@ -107,15 +110,21 @@ async function contractHash(depthModel?: Config['depthModel'], extensions?: Pick
     sectionInstructions: RESEARCH_SECTION_COVERAGE_INSTRUCTIONS, evidenceOutputTokens: RESEARCH_EVIDENCE_OUTPUT_TOKENS,
     screenSchema: screeningJsonSchemaForItems(['item']), evidenceSchema: evidenceJsonSchemaForItems(['item'], ['profile'], { sectionCoverage: true }),
     score: RESEARCH_POST_MIN_SCORE, selectionViewVersion: RESEARCH_SELECTION_VIEW_VERSION, route: 'readable-500-pew-guard-v1' };
-  return researchHash(JSON.stringify(extensions?.depthGroupingVersion || extensions?.sourcePackets ? { ...contract,
+  return researchHash(JSON.stringify(extensions?.depthGroupingVersion || extensions?.sourcePackets || extensions?.artifactSourceIds ? { ...contract,
     extensions: { ...(extensions.depthGroupingVersion ? { depthGroupingVersion: extensions.depthGroupingVersion, quotePolicy: RESEARCH_SOURCE_DEPTH_QUOTES_VERSION,
-      quoteInstructions: RESEARCH_SOURCE_DEPTH_QUOTES_INSTRUCTIONS, quoteSonnetInstructions: RESEARCH_SOURCE_DEPTH_QUOTES_SONNET_INSTRUCTIONS, outputBudgetVersion: 'group-count-1024-plus2048-v1' } : {}),
+      quoteInstructions: RESEARCH_SOURCE_DEPTH_QUOTES_INSTRUCTIONS, quoteSonnetInstructions: RESEARCH_SOURCE_DEPTH_QUOTES_SONNET_INSTRUCTIONS, outputBudgetVersion: 'group-count-1024-plus2048-v1',
+      transportBudgetVersion: 'quote-output-over16384-declared240000-lease270000-v1' } : {}),
       ...(extensions.sourcePackets ? { packetVersion: RESEARCH_SOURCE_PACKET_VERSION, packetInstructions: RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
         packetModel: 'claude-sonnet-5-5', packetOutputTokens: RESEARCH_EVIDENCE_OUTPUT_TOKENS,
         packetSchema: researchSourcePacketSchema({ id: 'packet', primarySourceId: 'primary',
           relationship: { type: 'same_publisher', reason: 'Two original public documentation references from one publisher.', sourceIds: ['primary', 'reference'] },
           sources: ['primary', 'reference'].map(id => ({ id, url: `https://publisher.example/${id}`, publishedAt: null, firstSeen: null, content: 'A public documentation reference describes a bounded workflow.' })),
-        }, ['profile']), sourcePackets: extensions.sourcePackets } : {}) } } : contract));
+        }, ['profile']), sourcePackets: extensions.sourcePackets } : {}),
+      ...(extensions.artifactSourceIds ? { artifactSourceIds: extensions.artifactSourceIds,
+        artifactPolicy: RESEARCH_SOURCE_ARTIFACT_VERSION, artifactFormat: RESEARCH_SOURCE_ARTIFACT_FORMAT,
+        artifactInstructions: RESEARCH_SOURCE_ARTIFACT_INSTRUCTIONS, artifactModel: RESEARCH_SOURCE_ARTIFACT_MODEL,
+        artifactSchema: researchSourceDepthSchema({ id: 'item', content: '' }, ['profile']), artifactOutputTokens: RESEARCH_EVIDENCE_OUTPUT_TOKENS,
+        artifactRouting: 'explicit-artifact-before-attributed-quote-before-depth-v1' } : {}) } } : contract));
 }
 export function researchReplayEligibility(item: ResearchReplayItem, config: Pick<Config, 'sourceIds' | 'windowStart' | 'windowEnd'> & Partial<Pick<Config, 'articleWatchUrls' | 'observationWindowStart' | 'observationWindowEnd'>>) {
   if (!config.sourceIds.includes(item.sourceId)) return 'source_not_in_frozen_roster';
@@ -145,7 +154,8 @@ async function loadConfig(run: Run): Promise<Config> {
   if (config.runId !== run.id || config.icp !== run.icp || config.version !== RESEARCH_PROMPT_VERSION
     || config.depthModel !== undefined && config.depthModel !== 'gpt-6-sol' && config.depthModel !== 'claude-sonnet-5-5'
     || config.depthGroupingVersion !== undefined && config.depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION
-    || config.model !== RESEARCH_MODEL || config.coverageVersion !== RESEARCH_COVERAGE_VERSION || config.sourceReviewVersion !== sourceReviewVersion(config.depthGroupingVersion)
+    || config.artifactSourceIds !== undefined && (!Array.isArray(config.artifactSourceIds) || !config.artifactSourceIds.length || new Set(config.artifactSourceIds).size !== config.artifactSourceIds.length)
+    || config.model !== RESEARCH_MODEL || config.coverageVersion !== RESEARCH_COVERAGE_VERSION || config.sourceReviewVersion !== sourceReviewVersion(config.depthGroupingVersion, config.artifactSourceIds)
     || config.contractHash !== await contractHash(config.depthModel, config)) throw new Error('Replay scoring contract changed; prepare a new replay');
   await getFrozenResearchAudience(run);
   return config;
@@ -179,7 +189,7 @@ export async function researchReplayAction(teamId: string, input: unknown) {
     const existing = await db.select().from(research_runs).where(eq(research_runs.id, data.runId)).get();
     if (existing && (existing.team_id !== teamId || existing.mode !== 'replay')) throw new Error('Replay ID is already in use');
     const { operation: _, ...requested } = data;
-    const config: Config = { ...requested, model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION, contractHash: await contractHash(requested.depthModel, requested), coverageVersion: RESEARCH_COVERAGE_VERSION, sourceReviewVersion: sourceReviewVersion(requested.depthGroupingVersion), icp: original.icp,
+    const config: Config = { ...requested, model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION, contractHash: await contractHash(requested.depthModel, requested), coverageVersion: RESEARCH_COVERAGE_VERSION, sourceReviewVersion: sourceReviewVersion(requested.depthGroupingVersion, requested.artifactSourceIds), icp: original.icp,
       articleWatchUrls: RESEARCH_SOURCE_SEEDS.filter(seed => data.sourceIds.includes(seed.id) && seed.pageMode === 'article').map(seed => canonicalResearchUrl(seed.url)) };
     const createdAt = Date.now(), configId = prefix(data.runId) + 'config';
     await retryResearchStorage(async () => db.batch([
@@ -191,6 +201,7 @@ export async function researchReplayAction(teamId: string, input: unknown) {
     if (JSON.stringify(config) !== JSON.stringify(saved)) throw new Error('Replay preparation differs from the saved request');
     return { runId: run.id, status: run.status, model: saved.model, ...(saved.depthModel ? { depthModel: saved.depthModel } : {}),
       ...(saved.depthGroupingVersion ? { depthGroupingVersion: saved.depthGroupingVersion } : {}), ...(saved.sourcePackets ? { sourcePacketVersion: RESEARCH_SOURCE_PACKET_VERSION, sourcePacketCount: saved.sourcePackets.length } : {}),
+      ...(saved.artifactSourceIds ? { artifactReviewVersion: RESEARCH_SOURCE_ARTIFACT_VERSION, artifactSourceCount: saved.artifactSourceIds.length } : {}),
       version: saved.version, coverageVersion: saved.coverageVersion, sourceReviewVersion: saved.sourceReviewVersion, uploadChunkSize: 20 };
   }
   const run = await loadRun(teamId, data.runId), config = await loadConfig(run);
@@ -213,6 +224,8 @@ export async function researchReplayAction(teamId: string, input: unknown) {
   }));
   const eligibleIds = items.filter(item => !researchReplayEligibility(item, config))
     .sort((a, b) => b.publishedAt! - a.publishedAt! || a.id.localeCompare(b.id)).map(item => item.id);
+  if (config.artifactSourceIds?.some(id => !eligibleIds.includes(id) || researchReplayRoute(items.find(item => item.id === id)!) !== 'direct_evidence'))
+    throw new Error('Artifact review requires eligible captured readable item IDs from the frozen inventory');
   if (config.sourcePackets) {
     researchPacketsFromDefinitions(config.sourcePackets, items);
     for (const packet of config.sourcePackets) {
