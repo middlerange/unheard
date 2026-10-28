@@ -12,7 +12,7 @@ import { RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, RESEARCH_SOURCE_REVIEW_CONS
 import { RESEARCH_SOURCE_DEPTH_VERSION, RESEARCH_SOURCE_DEPTH_INSTRUCTIONS, RESEARCH_SOURCE_DEPTH_SONNET_INSTRUCTIONS, researchSourceDepthSchema, researchSourceDepthRequestMetadata, normalizeResearchSourceDepth } from "./research-source-depth-model";
 import { researchAttributedQuoteRanges, researchSourceDepthQuotePolicy, researchSourceQuoteDepthRequestMetadata,
   RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION, RESEARCH_SOURCE_DEPTH_QUOTES_VERSION, RESEARCH_SOURCE_DEPTH_QUOTES_SONNET_INSTRUCTIONS } from "./research-source-depth-quotes";
-import { reviewResearchSourcePackets, configuredResearchPacketDefinitions, researchPacketsFromDefinitions } from "./research-source-packets";
+import { reviewResearchSourcePackets, configuredResearchPacketDefinitions, researchPacketsFromDefinitions, researchSourcePacketPolicy, researchSourcePacketPolicyContract } from "./research-source-packets";
 import type { ResearchSourcePacket } from "./research-source-packet-model";
 import { researchSourceArtifactPolicy, researchSourceArtifactContract, RESEARCH_SOURCE_ARTIFACT_VERSION, RESEARCH_SOURCE_ARTIFACT_FORMAT } from "./research-source-artifact";
 import { researchFindingDates, researchItemSignalKind } from "./research-dates";
@@ -1268,18 +1268,40 @@ async function cachedModel(
 export { cachedModel as cachedResearchModel, baseCachedModel as cachedResearchBaseModel };
 export async function cachedResearchSourcePackets(run: typeof research_runs.$inferSelect, packets: ResearchSourcePacket[], budget = { remaining: 2 }) {
   const db = await getDb(), audience = await getFrozenResearchAudience(run);
+  const read = async (id: string) => { const row = await db.select().from(research_cache).where(and(eq(research_cache.id, id), eq(research_cache.team_id, run.team_id))).get(); return row ? JSON.parse(row.value) : null; };
+  let reviewVersion: string | undefined;
+  if (run.mode === "replay") {
+    const config = await read(`research-replay:${run.id}:config`) as { sourcePacketReviewVersion?: string } | null;
+    reviewVersion = config?.sourcePacketReviewVersion;
+  } else {
+    const id = `research-packet-policy:${run.id}`;
+    let saved = await read(id) as { reviewVersion?: string; contractHash?: string } | null;
+    if (!saved) {
+      const configured = process.env.RESEARCH_PACKET_POLICY;
+      researchSourcePacketPolicy(configured);
+      const value = configured ? { reviewVersion: configured,
+        contractHash: await researchHash(JSON.stringify(researchSourcePacketPolicyContract(configured, RESEARCH_EVIDENCE_OUTPUT_TOKENS))) } : {};
+      await db.insert(research_cache).values({ id, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now() }).onConflictDoNothing();
+      saved = await read(id) as typeof saved;
+    }
+    if (!saved) throw new Error("Packet research policy was not frozen");
+    reviewVersion = saved.reviewVersion;
+    if (reviewVersion && saved.contractHash !== await researchHash(JSON.stringify(researchSourcePacketPolicyContract(reviewVersion, RESEARCH_EVIDENCE_OUTPUT_TOKENS))))
+      throw new Error("Frozen packet research policy changed");
+  }
+  const packetPolicy = researchSourcePacketPolicy(reviewVersion);
   return reviewResearchSourcePackets(packets, {
     context: { teamId: run.team_id, model: RESEARCH_MODEL, promptVersion: RESEARCH_PROMPT_VERSION,
       system: RESEARCH_EVIDENCE_INSTRUCTIONS, audience, selectionViewVersion: RESEARCH_SELECTION_VIEW_VERSION,
       selectionAudience: researchSelectionAudience(audience), schemaForItem: id => evidenceJsonSchemaForItems([id], audience.publishingProfiles.map(profile => profile.id)) },
     budget, model: "claude-sonnet-5-5", outputTokens: RESEARCH_EVIDENCE_OUTPUT_TOKENS,
-    read: async id => { const row = await db.select().from(research_cache).where(and(eq(research_cache.id, id), eq(research_cache.team_id, run.team_id))).get(); return row ? JSON.parse(row.value) : null; },
+    read,
     claim: async (id, value) => (await db.insert(research_cache).values({ id, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now() }).onConflictDoNothing().returning({ id: research_cache.id })).length === 1,
     save: async (id, expected, value) => (await db.update(research_cache).set({ value: JSON.stringify(value) }).where(and(eq(research_cache.id, id), eq(research_cache.team_id, run.team_id), eq(research_cache.value, JSON.stringify(expected)))).returning({ id: research_cache.id })).length === 1,
     writeImmutable: async (id, value) => { await db.insert(research_cache).values({ id, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now() }).onConflictDoNothing(); },
     generate: async (request, outputTokens) => (await callResearchModel(request.instructions, request.data, request.schema, outputTokens,
       { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? "replay_packet_evidence" : "packet_evidence" }, request.model)).value,
-  });
+  }, packetPolicy);
 }
 type ResearchRankDiagnostics = ResearchRunDiagnostics & Required<Pick<ResearchRunDiagnostics, "evidenceCount" | "rejectedStories" | "screenedCount">>;
 type ResearchRankProgress = {

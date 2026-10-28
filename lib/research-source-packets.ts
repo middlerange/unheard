@@ -10,6 +10,8 @@ import { canonicalResearchUrl } from './research-collectors';
 import {
   RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
   researchSourcePacketMetadata, researchSourcePacketSchema, normalizeResearchSourcePacket,
+  RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS,
+  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2,
   type ResearchSourcePacket,
 } from './research-source-packet-model';
 
@@ -60,6 +62,35 @@ export function configuredResearchPacketDefinitions(seeds: ResearchSourceSeed[],
 }
 
 type PacketResult = Awaited<ReturnType<typeof normalizeResearchSourcePacket>>;
+export const RESEARCH_SOURCE_PACKET_V2_REVIEW = 'coherent-synthesis-v2';
+export const RESEARCH_SOURCE_PACKET_V2_NORMALIZER = 'structured-inference-v2';
+export type ResearchSourcePacketPolicy = {
+  version: string; instructions: string; normalizerVersion?: string;
+  qualificationPolicyVersion?: typeof RESEARCH_SOURCE_PACKET_V2_VERSION;
+  metadata: typeof researchSourcePacketMetadata; schema: typeof researchSourcePacketSchema;
+  normalize: typeof normalizeResearchSourcePacket;
+};
+const defaultPolicy: ResearchSourcePacketPolicy = {
+  version: RESEARCH_SOURCE_PACKET_VERSION, instructions: RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
+  metadata: researchSourcePacketMetadata, schema: researchSourcePacketSchema, normalize: normalizeResearchSourcePacket,
+};
+export function researchSourcePacketPolicy(reviewVersion?: string): ResearchSourcePacketPolicy {
+  if (reviewVersion === undefined) return defaultPolicy;
+  if (reviewVersion !== RESEARCH_SOURCE_PACKET_V2_REVIEW) throw new Error('Unknown source packet review policy');
+  return { version: RESEARCH_SOURCE_PACKET_V2_VERSION, instructions: RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS,
+    normalizerVersion: RESEARCH_SOURCE_PACKET_V2_NORMALIZER, qualificationPolicyVersion: RESEARCH_SOURCE_PACKET_V2_VERSION,
+    metadata: researchSourcePacketMetadataV2, schema: researchSourcePacketSchemaV2, normalize: normalizeResearchSourcePacketV2 };
+}
+export function researchSourcePacketPolicyContract(reviewVersion: string, outputTokens: number) {
+  const policy = researchSourcePacketPolicy(reviewVersion);
+  const schema = policy.schema({ id: 'packet', primarySourceId: 'primary',
+    relationship: { type: 'same_publisher', reason: 'Two original public documentation references from one publisher.', sourceIds: ['primary', 'reference'] },
+    sources: ['primary', 'reference'].map(id => ({ id, url: `https://publisher.example/${id}`, publishedAt: null, firstSeen: null, content: 'A public documentation reference describes a bounded workflow.' })),
+  }, ['profile']);
+  return { reviewVersion, policyVersion: policy.version, normalizerVersion: policy.normalizerVersion,
+    sourceBindingVersion: RESEARCH_SOURCE_PACKET_VERSION, instructions: policy.instructions, schema,
+    model: 'claude-sonnet-5-5', outputTokens, scoreThreshold: RESEARCH_POST_MIN_SCORE, rubric: 'source_qualification_v1' };
+}
 type Receipt = { version: string; planId: string; planHash: string; packetId: string; packetHash: string; nonce: string; startedAt: number } & (
   { state: 'started' } | { state: 'completed'; completedAt: number; raw: unknown; rawHash: string; resultHash: string }
   | { state: 'failed' | 'indeterminate'; completedAt: number; reason: string }
@@ -70,7 +101,7 @@ export type ResearchPacketAccess = Omit<ResearchSourceReviewAccess, 'generate'> 
 export class ResearchSourcePacketPending extends ResearchCoveragePending {
   constructor(planIds: string[], manifestIds: string[], pending: number, active: number) { super(planIds, manifestIds, pending, active); this.name = 'ResearchSourcePacketPending'; }
 }
-export async function reviewResearchSourcePackets(packets: ResearchSourcePacket[], access: ResearchPacketAccess) {
+export async function reviewResearchSourcePackets(packets: ResearchSourcePacket[], access: ResearchPacketAccess, policy = defaultPolicy) {
   const audience = access.context.audience as ResearchAudience, profileIds = audience.publishingProfiles.map(profile => profile.id);
   if (!profileIds.length || new Set(profileIds).size !== profileIds.length) throw Error('Packet research requires the full frozen publishing profiles');
   const now = access.now ?? Date.now, budget = access.budget ?? { remaining: 2 };
@@ -81,11 +112,12 @@ export async function reviewResearchSourcePackets(packets: ResearchSourcePacket[
   }
   const view = researchSourceReviewAudience(audience);
   const work = await Promise.all(packets.map(async packet => {
-    const metadata = await researchSourcePacketMetadata(packet);
-    const request: ResearchSourceReviewRequest = { model: access.model, instructions: RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
-      schema: researchSourcePacketSchema(packet, profileIds), data: { ...view, items: [{ ...metadata, reviewTransport: 'anthropic-tool-v1' }] } };
-    const plan = { version: RESEARCH_SOURCE_PACKET_VERSION, teamId: access.context.teamId, packet,
-      packetHash: metadata.packetHash, audience, request, outputTokens: access.outputTokens };
+    const metadata = await policy.metadata(packet);
+    const request: ResearchSourceReviewRequest = { model: access.model, instructions: policy.instructions,
+      schema: policy.schema(packet, profileIds), data: { ...view, items: [{ ...metadata, reviewTransport: 'anthropic-tool-v1' }] } };
+    const plan = { version: policy.version, teamId: access.context.teamId, packet,
+      packetHash: metadata.packetHash, audience, request, outputTokens: access.outputTokens,
+      ...(policy.normalizerVersion ? { normalizerVersion: policy.normalizerVersion } : {}) };
     const planHash = await researchHash(json(plan)), planId = `research-source-packet-plan:v1:${planHash}`, attemptId = `research-source-packet-attempt:v1:${planHash}`;
     await immutable(planId, plan);
     return { packet, metadata, request, plan, planHash, planId, attemptId };
@@ -94,7 +126,7 @@ export async function reviewResearchSourcePackets(packets: ResearchSourcePacket[
   async function receipt(job: Work) {
     const value = await access.read(job.attemptId) as Receipt | null;
     if (!value) return null;
-    if (value.version !== RESEARCH_SOURCE_PACKET_VERSION || value.planId !== job.planId || value.planHash !== job.planHash
+    if (value.version !== policy.version || value.planId !== job.planId || value.planHash !== job.planHash
       || value.packetId !== job.packet.id || value.packetHash !== job.metadata.packetHash || !value.nonce
       || !Number.isFinite(value.startedAt) || value.startedAt < 0 || value.startedAt > now()
       || !['started', 'completed', 'failed', 'indeterminate'].includes(value.state)) throw Error('Packet attempt differs from its frozen context');
@@ -118,31 +150,32 @@ export async function reviewResearchSourcePackets(packets: ResearchSourcePacket[
   for (const job of work) {
     if (!budget.remaining || await receipt(job)) continue;
     budget.remaining--;
-    const started: Receipt = { version: RESEARCH_SOURCE_PACKET_VERSION, planId: job.planId, planHash: job.planHash,
+    const started: Receipt = { version: policy.version, planId: job.planId, planHash: job.planHash,
       packetId: job.packet.id, packetHash: job.metadata.packetHash, nonce: crypto.randomUUID(), startedAt: now(), state: 'started' };
     if (!await retryResearchStorage(() => access.claim(job.attemptId, started))) { budget.remaining++; continue; }
     jobs.push((async () => {
       let terminal: Receipt;
       try {
         const raw = await access.generate(job.request, access.outputTokens) ?? null;
-        const result = await normalizeResearchSourcePacket(raw, [job.packet], profileIds);
+        const result = await policy.normalize(raw, [job.packet], profileIds);
         terminal = { ...started, state: 'completed', completedAt: now(), raw, rawHash: await researchHash(json(raw)), resultHash: await researchHash(stable(result)) };
       } catch (error) { terminal = { ...started, state: 'failed', completedAt: now(), reason: (error instanceof Error ? error.message : 'Packet qualification failed').slice(0, 600) }; }
       await finish(job, started, terminal);
     })());
   }
   await Promise.all(jobs);
-  const manifestIds: string[] = [], pending: Work[] = [], result: PacketResult = { findings: [], packetProofs: [], diagnostics: [], bindings: [] };
+  const manifestIds: string[] = [], pending: Work[] = [], result: PacketResult = { findings: [], packetProofs: [], diagnostics: [], bindings: [],
+    ...(policy.qualificationPolicyVersion ? { qualificationPolicyVersion: policy.qualificationPolicyVersion } : {}) };
   for (const job of work) {
     const terminal = await receipt(job);
     if (!terminal || terminal.state === 'started') { pending.push(job); continue; }
     let normalized: PacketResult | null = null;
     if (terminal.state === 'completed') {
       if (terminal.rawHash !== await researchHash(json(terminal.raw))) throw Error('Packet raw response changed');
-      normalized = await normalizeResearchSourcePacket(terminal.raw, [job.packet], profileIds);
+      normalized = await policy.normalize(terminal.raw, [job.packet], profileIds);
       if (terminal.resultHash !== await researchHash(stable(normalized))) throw Error('Packet normalized response changed');
     }
-    const manifest = { version: RESEARCH_SOURCE_PACKET_VERSION, teamId: access.context.teamId, packetId: job.packet.id,
+    const manifest = { version: policy.version, teamId: access.context.teamId, packetId: job.packet.id,
       packetHash: job.metadata.packetHash, planId: job.planId, planHash: job.planHash, attemptId: job.attemptId,
       attemptHash: await researchHash(json(terminal)), terminalState: terminal.state, result: normalized,
       ...(terminal.state === 'failed' || terminal.state === 'indeterminate' ? { terminalReason: terminal.reason } : {}) };

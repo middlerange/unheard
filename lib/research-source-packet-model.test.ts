@@ -4,6 +4,8 @@ import { researchSourceReviewPassages } from './research-source-review-model';
 import {
   RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
   researchSourcePacketMetadata, researchSourcePacketSchema, normalizeResearchSourcePacket,
+  RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS,
+  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2,
   type ResearchSourcePacket,
 } from './research-source-packet-model';
 
@@ -38,6 +40,16 @@ const response = (primary: unknown = frame(), additionalIdeas: unknown[] = []) =
 } });
 
 describe('explicit original-document research packets', () => {
+  it('preserves the original v1 source-binding and normalized-result bytes', async () => {
+    const stable = (value: unknown) => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
+      ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
+    const metadata = await researchSourcePacketMetadata(packet());
+    const result = await normalizeResearchSourcePacket(response(), [packet()], profiles);
+    expect(metadata.packetHash).toBe('3b11ad3ea804caa5cdf52d8a6bc769a7d524af616635407b09a925e780670967');
+    expect(await researchHash(stable(result))).toBe('f30df75ec46e065361c051b985c88b611034a8d582761f805bb7dcc34afc4dd6');
+    expect(metadata).not.toHaveProperty('qualificationPolicyVersion'); expect(result).not.toHaveProperty('qualificationPolicyVersion');
+    expect(result.packetProofs[0]).not.toHaveProperty('qualificationPolicyVersion');
+  });
   it('emits each original literal catalog once and binds body, URL, date and relationship metadata', async () => {
     const input = packet(), before = JSON.stringify(input), metadata = await researchSourcePacketMetadata(input);
     expect(JSON.stringify(input)).toBe(before); expect(metadata).not.toHaveProperty('content');
@@ -199,5 +211,80 @@ describe('explicit original-document research packets', () => {
     expect((await researchSourcePacketMetadata(configured)).relationship.type).toBe('configured_reference');
     const invalidDate = packet(); invalidDate.sources[1].publishedAt = Number.NaN;
     await expect(researchSourcePacketMetadata(invalidDate)).rejects.toThrow('timestamps or null');
+  });
+});
+
+describe('opt-in structured packet qualification v2', () => {
+  function inference() {
+    const idea = frame(); idea.relationshipSupport = 'bounded_inference';
+    idea.relationshipExplanation = 'The same-product documents describe complementary operations; their use in one workflow is an editorial connection rather than observed deployment.';
+    idea.claim.contentAngle = 'Our proposed comparison: evaluate the permission boundary before attempting this workflow.';
+    idea.claim.limitations = 'The connection is a bounded inference from separate documented capabilities, not proof of a shared implementation or a successful deployment.';
+    return idea;
+  }
+
+  it('keeps v1 source/catalog hashes while separately versioning the opt-in qualifier', async () => {
+    const input = packet(), first = await researchSourcePacketMetadata(input), next = await researchSourcePacketMetadataV2(input);
+    const { qualificationPolicyVersion, ...sourceBinding } = next;
+    expect(qualificationPolicyVersion).toBe(RESEARCH_SOURCE_PACKET_V2_VERSION); expect(sourceBinding).toEqual(first);
+    expect(next.version).toBe(RESEARCH_SOURCE_PACKET_VERSION); expect(next.packetHash).toBe(first.packetHash);
+    expect(researchSourcePacketSchemaV2(input, profiles)).toEqual(researchSourcePacketSchema(input, profiles));
+    expect(RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS).not.toContain('Return the primary core plus every other independently useful core');
+    expect(RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS).toContain('Do not enumerate single-document components');
+    expect(RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS).toContain('Editorial synthesis is allowed');
+    expect(RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS).toContain('it need not repeat relationshipExplanation verbatim');
+  });
+
+  it('recovers only the disclosure-format failure without changing actual model claims, categories, profiles, quotes or limitations', async () => {
+    const idea = inference(), raw = response(idea), before = JSON.stringify(raw), input = packet();
+    const first = await normalizeResearchSourcePacket(raw, [input], profiles), next = await normalizeResearchSourcePacketV2(raw, [input], profiles);
+    expect(first.findings).toEqual([]); expect(first.diagnostics[0].reason).toContain('explicit in selected limitations');
+    expect(next.diagnostics).toEqual([]); expect(next.findings).toHaveLength(1); expect(JSON.stringify(raw)).toBe(before);
+    const finding = next.findings[0];
+    for (const key of ['summary', 'contentAngle', 'whyItMatters', 'limitations'] as const) expect(finding[key]).toBe(idea.claim[key]);
+    expect(finding.score).toBe(92); expect(finding.profileChecks?.personal.relevance).toBe(22);
+    expect(finding.supportingEvidence).toEqual([connectorText, creationText]); expect(finding.evidenceCitations).toEqual(idea.evidenceCitations);
+    expect(next.packetProofs[0]).toMatchObject({ version: RESEARCH_SOURCE_PACKET_VERSION, qualificationPolicyVersion: RESEARCH_SOURCE_PACKET_V2_VERSION,
+      relationshipSupport: idea.relationshipSupport, relationshipExplanation: idea.relationshipExplanation });
+    const strict = frame(); strict.relationshipSupport = idea.relationshipSupport; strict.relationshipExplanation = idea.relationshipExplanation;
+    strict.claim = { ...idea.claim, limitations: idea.relationshipExplanation + ' This is a bounded inference.' };
+    const baseline = await normalizeResearchSourcePacket(response(strict), [input], profiles);
+    expect(finding.qualityComponents).toEqual(baseline.findings[0].qualityComponents);
+    expect(next.packetProofs[0].sources).toEqual(baseline.packetProofs[0].sources);
+    expect(next.bindings).toEqual(baseline.bindings);
+  });
+
+  it('still rejects unmarked inference, unsupported bridges, one-document frames and borrowed primary anchors', async () => {
+    const unmarked = inference(); unmarked.claim.limitations = 'These documents describe capabilities and do not establish an observed deployment.';
+    const unsupported = inference(); unsupported.relationshipSupport = 'unsupported_bridge';
+    const one = inference(); one.evidenceCitations.pop();
+    const borrowed = inference(); borrowed.evidenceCitations.reverse();
+    const result = await normalizeResearchSourcePacketV2(response(unmarked, [unsupported, one, borrowed]), [packet()], profiles);
+    expect(result.findings).toEqual([]); expect(result.diagnostics).toHaveLength(4);
+    expect(result.diagnostics.map(item => item.reason)).toEqual(expect.arrayContaining([
+      expect.stringContaining('explicit in selected limitations'), expect.stringContaining('unsupported necessary relationship'),
+      expect.stringContaining('at least two distinct'), expect.stringContaining('first citation'),
+    ]));
+  });
+
+  it('does not upgrade incomplete support or relevance through the new disclosure policy', async () => {
+    const incomplete = inference(); incomplete.qualityComponents.sourceSupport = 'incomplete_support';
+    const weak = inference(); weak.familyKey = 'weak-profile'; weak.profileChecks[0].relevance = 10;
+    const result = await normalizeResearchSourcePacketV2(response(incomplete, [weak]), [packet()], profiles);
+    expect(result.diagnostics).toEqual([]); expect(result.findings.map(idea => idea.score)).toEqual([69, 69]);
+    expect(result.findings[0].qualityComponents?.sourceSupport).toBe(12); expect(result.findings[1].profileChecks?.personal.relevance).toBe(10);
+    expect(result.findings.every(idea => idea.score < 70)).toBe(true);
+  });
+
+  it('strips only an empty structural additionalIdeas field on children and preserves raw data', async () => {
+    const child = { ...frame('second-coherent-synthesis'), additionalIdeas: [] }, raw = response(frame(), [child]), before = JSON.stringify(raw);
+    expect((await normalizeResearchSourcePacket(raw, [packet()], profiles)).findings).toHaveLength(1);
+    const next = await normalizeResearchSourcePacketV2(raw, [packet()], profiles);
+    expect(next.findings).toHaveLength(2); expect(next.diagnostics).toEqual([]); expect(JSON.stringify(raw)).toBe(before);
+    const nested = { ...child, additionalIdeas: [frame('hidden-third')] };
+    const unknown = { ...child, score: 100 };
+    const malformed = { ...child, additionalIdeas: 'not-an-array' };
+    const rejected = await normalizeResearchSourcePacketV2(response(frame(), [nested, unknown, malformed]), [packet()], profiles);
+    expect(rejected.findings).toHaveLength(1); expect(rejected.diagnostics).toHaveLength(3);
   });
 });

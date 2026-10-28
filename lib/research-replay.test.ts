@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { drizzle } from 'drizzle-orm/d1';
 import * as schema from './schema';
 import { researchReplayAction, researchReplayStatus, researchReplayRequestSchema, researchReplayItemSchema, researchReplayEligibility, researchReplayRoute, readResearchReplayRequest, researchReplaySignalKind } from './research-replay';
-import { processResearchJob, createResearchRun } from './research';
+import { processResearchJob, createResearchRun, cachedResearchSourcePackets } from './research';
 import { createSyncResearchSqlite } from './research-test-sqlite';
 import { researchHash } from './research-model';
 import { RESEARCH_SOURCE_SEEDS } from './research-sources';
@@ -35,6 +35,8 @@ const runIds = ['11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-
 it('rejects labels, expected outcomes, private URLs and unsupported inventory sizes before preparation', () => {
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), expectedGrade: 90 }).success).toBe(false);
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), artifactSourceIds: [] }).success).toBe(false);
+  expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), sourcePacketReviewVersion: 'coherent-synthesis-v2' }).success).toBe(false);
+  expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), sourcePacketReviewVersion: 'unknown' }).success).toBe(false);
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), artifactSourceIds: ['same', 'same'] }).success).toBe(false);
   expect(researchReplayItemSchema.safeParse({ ...item('x'), impressions: 12000 }).success).toBe(false);
   expect(researchReplayItemSchema.safeParse({ ...item('x'), url: 'https://127.0.0.1/private' }).success).toBe(false);
@@ -449,7 +451,7 @@ describe('configured replay persistence and paid cache boundary', () => {
     }finally{vi.stubGlobal('fetch',originalFetch);}
   },60000);
   it('qualifies a packet after all source batches and reuses its exact proof without editorial writes',async()=>{
-    const firstId='a2000000-0000-4000-8000-000000000001',secondId='a2000000-0000-4000-8000-000000000002';
+    const firstId='a2000000-0000-4000-8000-000000000001',secondId='a2000000-0000-4000-8000-000000000002',v2Id='a2000000-0000-4000-8000-000000000003',v2RepeatId='a2000000-0000-4000-8000-000000000004';
     const sources=Array.from({length:7},(_,index)=>item('packet-source-'+index));
     const packet={id:'configured-public-workflow',primarySourceId:sources[0].id,sourceIds:[sources[0].id,sources[6].id],relationship:{type:'same_publisher',reason:'Two original documentation pages for one documented workflow.'}};
     const originalFetch=globalThis.fetch;let packetCalls=0;
@@ -466,15 +468,23 @@ describe('configured replay persistence and paid cache boundary', () => {
       return Response.json({id:'packet-transport',model:request.model,stop_reason:'tool_use',content:[{type:'tool_use',name:'submit_research',input:value}],usage:{input_tokens:10,output_tokens:10}});
     }));
     try{
-      for(const runId of[firstId,secondId]){
-        await researchReplayAction('team',{...prepare(runId,sources.length),sourcePackets:[packet]});
+      for(const runId of[firstId,secondId,v2Id,v2RepeatId]){
+        const upgraded=runId===v2Id||runId===v2RepeatId;
+        const prepared=await researchReplayAction('team',{...prepare(runId,sources.length),sourcePackets:[packet],...(upgraded?{sourcePacketReviewVersion:'coherent-synthesis-v2'}:{})});
+        expect(prepared).toMatchObject({sourcePacketVersion:upgraded?'research-source-packet-v2':'research-source-packet-v1'});
         await researchReplayAction('team',{operation:'upload',runId,chunkIndex:0,items:sources});await researchReplayAction('team',{operation:'start',runId});
         let steps=0;while(await rankPending(runId))if(++steps>35)throw Error('Packet replay failed to finish');
         const status=await researchReplayStatus('team',runId),joined=status.records.find(row=>row.id.endsWith(':source-packets'))!.value;
         expect(status.run.findings_count).toBe(8);expect(joined.acceptedIdeas).toHaveLength(1);expect(joined.packetProofs[0].sources.map((source:any)=>source.sourceId)).toEqual(packet.sourceIds);
         expect(joined.packetProofs[0].sources[1]).toMatchObject({url:sources[6].url,publishedAt:1500,firstSeen:2200});
+        if(upgraded)expect(joined.packetProofs[0]).toMatchObject({version:'research-source-packet-v1',qualificationPolicyVersion:'research-source-packet-v2'});
       }
-      expect(packetCalls).toBe(1);expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[secondId])[0].n).toBe(0);
+      expect(packetCalls).toBe(2);expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[secondId])[0].n).toBe(0);
+      expect(query('SELECT operation,COUNT(*) n FROM research_usage WHERE run_id=? GROUP BY operation',[v2Id])).toEqual([{operation:'replay_packet_evidence',n:1}]);
+      expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[v2RepeatId])[0].n).toBe(0);
+      const configId=`research-replay:${v2Id}:config`,saved=JSON.parse(query('SELECT value FROM research_cache WHERE id=?',[configId])[0].value);
+      query('UPDATE research_cache SET value=? WHERE id=?',[JSON.stringify({...saved,sourcePacketReviewVersion:undefined}),configId]);query("UPDATE research_runs SET status='ranking' WHERE id=?",[v2Id]);
+      await expect(rankPending(v2Id)).rejects.toThrow('contract changed');query('UPDATE research_cache SET value=? WHERE id=?',[JSON.stringify(saved),configId]);query("UPDATE research_runs SET status='completed' WHERE id=?",[v2Id]);
       expect(query('SELECT COUNT(*) n FROM research_findings')[0].n).toBe(0);expect(query('SELECT COUNT(*) n FROM research_drafts')[0].n).toBe(0);
     }finally{vi.stubGlobal('fetch',originalFetch);}
   },60000);
@@ -491,7 +501,7 @@ describe('configured replay persistence and paid cache boundary', () => {
     query("INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES('normal-primary','normal-packet','earlier-archive',?,'Primary workflow',?,?,?,?,'public_feed')",[primaryUrl,body.slice(0,300),now-2000,now-1000,body]);
     query("INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES('normal-reference','normal-packet','earlier-reference',?,'Reference workflow',?,NULL,?,?,'public_feed')",[referenceUrl,body.slice(0,300),old,body]);
     query("INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES('normal-neighbor','normal-packet','earlier-archive',?,'Neighbor must not match',?,?,?,?,'public_feed')",[primarySeed.url+'-other',body.slice(0,300),now-2000,now-1000,body]);
-    const originalFetch=globalThis.fetch;let packetCalls=0;
+    const originalFetch=globalThis.fetch,previousPacketPolicy=process.env.RESEARCH_PACKET_POLICY;delete process.env.RESEARCH_PACKET_POLICY;let packetCalls=0;
     vi.stubGlobal('fetch',vi.fn(async(_url:string,init:RequestInit)=>{
       const request=JSON.parse(String(init.body)),payload=JSON.parse(request.messages[0].content),input=payload.items[0];
       if(!Array.isArray(input.sources))return originalFetch(_url,init);
@@ -514,8 +524,19 @@ describe('configured replay persistence and paid cache boundary', () => {
       expect(query("SELECT COUNT(*) n FROM research_drafts WHERE team_id='normal-packet'")[0].n).toBe(0);
       expect(JSON.parse(query("SELECT value FROM research_cache WHERE id='research-depth-policy:normal-packet-run'")[0].value)).toEqual({});
       await rankPending('normal-packet-run');expect(packetCalls).toBe(1);
+      expect(JSON.parse(query("SELECT value FROM research_cache WHERE id='research-packet-policy:normal-packet-run'")[0].value)).toEqual({});
+      const packets=JSON.parse(query("SELECT value FROM research_cache WHERE id='research-reference-packets:normal-packet-run:plan'")[0].value).packets;
+      process.env.RESEARCH_PACKET_POLICY='coherent-synthesis-v2';
+      const originalRun=query("SELECT * FROM research_runs WHERE id='normal-packet-run'")[0];
+      expect((await cachedResearchSourcePackets(originalRun,packets,{remaining:0})).qualificationPolicyVersion).toBeUndefined();expect(packetCalls).toBe(1);
+      query("INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp) VALUES('normal-packet-v2-run','normal-packet','scan','ranking',7,?,?)",[now,icp]);
+      const nextRun=query("SELECT * FROM research_runs WHERE id='normal-packet-v2-run'")[0];
+      expect((await cachedResearchSourcePackets(nextRun,packets)).qualificationPolicyVersion).toBe('research-source-packet-v2');expect(packetCalls).toBe(2);
+      const frozenV2=JSON.parse(query("SELECT value FROM research_cache WHERE id='research-packet-policy:normal-packet-v2-run'")[0].value);expect(frozenV2.reviewVersion).toBe('coherent-synthesis-v2');expect(frozenV2.contractHash).toMatch(/^[a-f0-9]{64}$/);
+      delete process.env.RESEARCH_PACKET_POLICY;
+      expect((await cachedResearchSourcePackets(nextRun,packets,{remaining:0})).qualificationPolicyVersion).toBe('research-source-packet-v2');expect(packetCalls).toBe(2);
     }finally{
-      vi.stubGlobal('fetch',originalFetch);RESEARCH_SOURCE_SEEDS.splice(RESEARCH_SOURCE_SEEDS.indexOf(primarySeed),2);
+      vi.stubGlobal('fetch',originalFetch);if(previousPacketPolicy===undefined)delete process.env.RESEARCH_PACKET_POLICY;else process.env.RESEARCH_PACKET_POLICY=previousPacketPolicy;RESEARCH_SOURCE_SEEDS.splice(RESEARCH_SOURCE_SEEDS.indexOf(primarySeed),2);
       for(const table of['research_findings','research_cache','research_items','research_runs','research_sources','teams'])query(`DELETE FROM ${table} WHERE ${table==='teams'?'id':'team_id'}='normal-packet'`);
     }
   },60000);
