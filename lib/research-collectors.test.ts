@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   articleResearchDate,
   articleResearchSection,
+  articleResearchTimestampSection,
   articleResearchText,
   collectResearchSource,
   discoverResearchLinks,
@@ -15,6 +16,7 @@ import {
 } from "./research-collectors";
 import { matchResearchQuote } from "./research-model";
 import type { ResearchSourceSeed } from "./research-types";
+import { RESEARCH_SOURCE_SEEDS } from "./research-sources";
 
 const NOW = Date.parse("2026-10-23T12:00:00Z");
 const source: ResearchSourceSeed = {
@@ -26,6 +28,82 @@ const evidence = "A public research finding about customer adoption and product 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("public research evidence and publication dates", () => {
+  it("collects an entire late timestamp interval over14k without widening ordinary article capture", async () => {
+    const range = { start: "0:23:12", end: "0:35:01" };
+    const selected = `<p>Guest [0:23:12]: A contrast begins here. ${"The original explanation remains intact. ".repeat(400).trim()}</p><p>Guest [0:34:22]: The later complete mechanism remains in the same public interval.</p>`;
+    const html = `<meta property="article:published_time" content="2026-04-07T00:00:00Z"><title>A complete public interview | Publisher</title><main><h1>A complete public interview</h1><p>${"Earlier interview context. ".repeat(1000)}</p>${selected}<p>Host [0:35:01]: The next topic is excluded.</p></main>`;
+    const fullSelected = articleResearchTimestampSection(html, range);
+    expect(articleResearchText(html)).toHaveLength(14_000);
+    expect(articleResearchText(html)).not.toContain("A contrast begins here");
+    expect(fullSelected.content.length).toBeGreaterThan(14_000);
+    expect(fullSelected.content).toBe(selected.replace(/<\/p><p>/g, "\n\n").replace(/<\/?p>/g, ""));
+    expect(fullSelected.content).toContain("Guest [0:23:12]");
+    expect(fullSelected.content).toContain("Guest [0:34:22]");
+    expect(fullSelected.content).not.toContain("Earlier interview context");
+    expect(fullSelected.content).not.toContain("The next topic");
+    expect(articleResearchDate(html.replace(/<meta[^>]+>/, ""), source.url)).toBeNull();
+    const fetcher = vi.fn(async () => new Response(html));
+    vi.stubGlobal("fetch", fetcher);
+    const [item] = await collectResearchSource({ ...source, pageMode: "article", articleTimestampRange: range });
+    expect(item).toMatchObject({ url: source.url, title: "A complete public interview — 0:23:12–0:35:01",
+      publishedAt: Date.parse("2026-04-07T00:00:00Z"), contentProvenance: "public_section", transcriptStatus: "available", content: fullSelected.content });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains consecutive equal timestamps and excludes the end speaker rather than stitching text", () => {
+    const html = '<main><h1>A public conversation</h1><p>Host [0:10:00]: First question. Guest [0:10:00]: Same-time answer.</p><p>Guest [0:10:01]: The rest of the answer.</p><p>Host [0:11:00]: A new topic.</p></main>';
+    expect(articleResearchTimestampSection(html, { start: "0:10:00", end: "0:11:00" }).content)
+      .toBe('Host [0:10:00]: First question. Guest [0:10:00]: Same-time answer.\n\nGuest [0:10:01]: The rest of the answer.');
+  });
+
+  it("fails closed for missing, TOC-only, reversed and ambiguous timestamp ranges", () => {
+    const range = { start: "0:10:00", end: "0:11:00" };
+    const transcript = '<p>Host [0:10:00]: The selected source words.</p><p>Host [0:11:00]: The next topic.</p>';
+    const page = (body: string) => `<main><h1>A public conversation</h1>${body}</main>`;
+    expect(() => articleResearchTimestampSection(page('<p>(0:10:00) Selected topic</p><p>(0:11:00) Next topic</p>'), range)).toThrow("not found");
+    expect(() => articleResearchTimestampSection(page(transcript.replace('[0:11:00]', '[0:12:00]')), range)).toThrow("not found");
+    expect(() => articleResearchTimestampSection(page(transcript), { start: "0:11:00", end: "0:10:00" })).toThrow("end after");
+    expect(() => articleResearchTimestampSection(page(transcript), { start: "10:00", end: "11:00" })).toThrow("H:MM:SS");
+    expect(() => articleResearchTimestampSection(page(transcript + transcript), range)).toThrow("ambiguous");
+    expect(() => articleResearchTimestampSection(`<nav>${transcript}</nav>${page('<p>No transcript here.</p>')}`, range)).toThrow("not found");
+    expect(() => articleResearchTimestampSection(page(`<article>${transcript}</article>`), range)).toThrow("not found");
+    expect(() => articleResearchTimestampSection(`<h1>Unscoped interview</h1>${transcript}`, range)).toThrow("no confident article");
+    expect(() => articleResearchTimestampSection(page(transcript.replace('The selected source words.', 'x'.repeat(64_001))), range)).toThrow("complete section body limit");
+  });
+
+  it("keeps timestamp watch identity stable and rejects conflicting or non-article selectors before fetching", async () => {
+    const configured = RESEARCH_SOURCE_SEEDS.find(seed => seed.id === "reference-268173540fbd")!;
+    expect(configured).toMatchObject({ id: "reference-268173540fbd",
+      url: "https://exitfive.com/podcast/the-6-types-of-ownable-ideas-and-how-to-find-yours-with-katelyn-bourgoin-founder-of-unignorable/",
+      articleTimestampRange: { start: "0:23:12", end: "0:35:01" } });
+    const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+    await expect(collectResearchSource({ ...configured, articleSectionHeading: "An invented heading" })).rejects.toThrow("one section selector");
+    await expect(collectResearchSource({ ...configured, feedUrl: "https://example.com/feed" })).rejects.toThrow("without a feed");
+    await expect(collectResearchSource({ ...configured, pageMode: "index" })).rejects.toThrow("explicit web article");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("targets Google's observed dynamic-prospecting heading beyond the audience-page body cap", () => {
+    const configured = RESEARCH_SOURCE_SEEDS.find(seed => seed.id === "google-ads-dynamic-prospecting")!;
+    expect(configured).toMatchObject({
+      url: "https://support.google.com/google-ads/answer/2497941?hl=en", kind: "web", pageMode: "article",
+      articleSectionHeading: "About dynamic prospecting",
+    });
+    // Minimal DOM fixture from the public heading hierarchy, not a downloaded HTML snapshot.
+    const observedSentence = "Dynamic prospecting uses Google AI to predict which feed items prospective buyers are looking for.";
+    const html = `<title>About audience segments - Google Ads Help</title><main><h1>About audience segments</h1><h2>Different audience segment options</h2><p>${"Earlier audience definitions. ".repeat(1000)}</p><h2>About dynamic prospecting</h2><h3>How it works</h3><p>${observedSentence}</p><h4>Example</h4><p>A publisher example belongs to this section.</p><h2>About Target frequency</h2><p>This is a different mechanism.</p></main>`;
+    expect(articleResearchText(html)).not.toContain(observedSentence);
+    const selected = articleResearchSection(html, configured.articleSectionHeading!);
+    expect(selected.title).toBe("About audience segments — About dynamic prospecting");
+    expect(selected.content).toContain(observedSentence);
+    expect(selected.content).toContain("How it works\n\n");
+    expect(selected.content).toContain("Example\n\n");
+    expect(selected.content).not.toContain("Earlier audience definitions");
+    expect(selected.content).not.toContain("About Target frequency");
+    expect(articleResearchDate(html, configured.url)).toBeNull();
+    expect(() => articleResearchSection(html.replaceAll("About dynamic prospecting", "Removed public heading"), configured.articleSectionHeading!)).toThrow("not found");
+  });
+
   it("reads a late public chapter before applying the body cap and preserves its source wording", () => {
     const chapter = '<h4>Evidence &amp; decisions</h4><p>The customer said “not yet”; keep that uncertainty.</p><ul><li>Observe the actual use.</li><li>Retain the contradictory result.</li></ul>';
     const html = `<title>An original interview | Publisher</title><main><h1>An original interview</h1><p>${"Earlier source material. ".repeat(2000)}</p>${chapter}<h4>Another chapter</h4><p>Unrelated later answer.</p></main>`;

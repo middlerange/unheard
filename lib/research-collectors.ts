@@ -163,7 +163,7 @@ export function plainResearchText(raw: string) {
     .replace(/\s+/g, " ")
     .trim();
 }
-export function readableResearchText(raw: string) {
+function fullReadableResearchText(raw: string) {
   return decodedResearchMarkup(raw)
     .replace(/<\/?(?:h[1-6]|p|div|section|article|main|blockquote|ul|ol|dl|table|tr)\b(?:"[^"]*"|'[^']*'|[^'">])*>/gi, "\n\n")
     .replace(/<\/?(?:li|dt|dd)\b(?:"[^"]*"|'[^']*'|[^'">])*>|<br\b[^>]*>/gi, "\n")
@@ -171,8 +171,10 @@ export function readableResearchText(raw: string) {
     .replace(/[^\S\n]+/g, " ")
     .replace(/ *\n */g, "\n")
     .replace(/\n{3,}/g, "\n\n")
-    .trim()
-    .slice(0, 14_000);
+    .trim();
+}
+export function readableResearchText(raw: string) {
+  return fullReadableResearchText(raw).slice(0, 14_000);
 }
 export function parseResearchDate(
   raw: unknown,
@@ -333,14 +335,14 @@ export class ResearchArticleSectionError extends Error {
 }
 
 export function assertResearchArticleSectionWatch(source: ResearchSourceSeed) {
-  if (source.articleSectionHeading !== undefined && (source.kind !== "web" || source.pageMode !== "article" || source.feedUrl))
+  if ((source.articleSectionHeading !== undefined || source.articleTimestampRange !== undefined)
+    && (source.kind !== "web" || source.pageMode !== "article" || source.feedUrl))
     throw new ResearchArticleSectionError("Public chapter watches require an explicit web article source without a feed");
+  if (source.articleSectionHeading !== undefined && source.articleTimestampRange !== undefined)
+    throw new ResearchArticleSectionError("Public chapter watches must choose one section selector");
 }
 
-export function articleResearchSection(html: string, requestedHeading: string) {
-  const normalize = (text: string) => plainResearchText(text).normalize("NFKC").replace(/\s+/g, " ").trim();
-  const requested = normalize(requestedHeading);
-  if (!requested) throw new ResearchArticleSectionError("Public chapter watch requires a nonempty publisher heading");
+function sectionArticle(html: string) {
   let region = articleRegion(html, true);
   if (!region) throw new ResearchArticleSectionError("Public chapter watch has no confident article heading");
   const pageTitle = plainResearchText(html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "").toLowerCase();
@@ -356,6 +358,14 @@ export function articleResearchSection(html: string, requestedHeading: string) {
   const children = htmlElements(region, "article");
   for (const child of children.filter(candidate => !children.some(parent => parent.start < candidate.start && parent.end >= candidate.end)).sort((a, b) => b.start - a.start))
     region = region.slice(0, child.start) + " " + region.slice(child.end);
+  return { region, title };
+}
+
+export function articleResearchSection(html: string, requestedHeading: string) {
+  const normalize = (text: string) => plainResearchText(text).normalize("NFKC").replace(/\s+/g, " ").trim();
+  const requested = normalize(requestedHeading);
+  if (!requested) throw new ResearchArticleSectionError("Public chapter watch requires a nonempty publisher heading");
+  const { region, title } = sectionArticle(html);
   const headings = [1, 2, 3, 4, 5, 6].flatMap(level => htmlElements(region, `h${level}`).map(heading => ({ ...heading, level }))).sort((a, b) => a.start - b.start);
   const matches = headings.filter(heading => heading.level >= 2 && normalize(heading.content) === requested);
   if (matches.length !== 1)
@@ -365,6 +375,41 @@ export function articleResearchSection(html: string, requestedHeading: string) {
   const heading = plainResearchText(selected.content);
   const content = readableResearchText(region.slice(selected.start, end));
   return { title: `${title} — ${heading}`.slice(0, 300), heading, content };
+}
+
+export function articleResearchTimestampSection(html: string, range: { start: string; end: string }) {
+  const time = (value: string) => {
+    if (typeof value !== "string" || !/^\d{1,3}:[0-5]\d:[0-5]\d$/.test(value))
+      throw new ResearchArticleSectionError("Public transcript range requires exact H:MM:SS timestamps");
+    const [hours, minutes, seconds] = value.split(":").map(Number);
+    return hours * 3600 + minutes * 60 + seconds;
+  };
+  if (!range || time(range.start) >= time(range.end))
+    throw new ResearchArticleSectionError("Public transcript range must end after it starts");
+  const { region, title } = sectionArticle(html), text = fullReadableResearchText(region);
+  const marks = [...text.matchAll(/\[(\d{1,3}:[0-5]\d:[0-5]\d)\]\s*:/g)];
+  let block = 0, previous = -1;
+  const indexed = marks.map(mark => {
+    const seconds = time(mark[1]);
+    if (seconds < previous) block++;
+    previous = seconds;
+    return { label: mark[1], index: mark.index, block };
+  });
+  const starts = indexed.filter(mark => mark.label === range.start), ends = indexed.filter(mark => mark.label === range.end);
+  if (!starts.length || !ends.length) throw new ResearchArticleSectionError("Public transcript timestamp was not found in the article");
+  if (new Set([...starts, ...ends].map(mark => mark.block)).size !== 1)
+    throw new ResearchArticleSectionError("Public transcript timestamps are ambiguous across clock blocks");
+  const start = starts[0], end = ends[0];
+  if (start.index >= end.index) throw new ResearchArticleSectionError("Public transcript timestamps are out of order");
+  const withSpeaker = (index: number) => {
+    const prefix = text.slice(Math.max(0, index - 120), index);
+    const label = prefix.match(/(?:^|[^\p{L}\p{M}])((?:\p{Lu}[\p{L}\p{M}'’.-]*)(?:[ \t]+(?:\p{Lu}[\p{L}\p{M}'’.-]*|de|van|von|da|del)){0,7})[ \t]+$/u);
+    return label ? index - label[0].length + label[0].indexOf(label[1]) : index;
+  };
+  const content = text.slice(withSpeaker(start.index), withSpeaker(end.index)).trim();
+  if (content.length > 64_000) throw new ResearchArticleSectionError("Public transcript range exceeds the complete section body limit");
+  if (!content) throw new ResearchArticleSectionError("Public transcript range has no captured text");
+  return { title: `${title} — ${range.start}–${range.end}`.slice(0, 300), content };
 }
 
 function publisherBylineDate(html: string, articleUrl: string | undefined, now: number): number | null {
@@ -546,14 +591,16 @@ export async function collectResearchSource(
   source: ResearchSourceSeed,
 ): Promise<CollectedItem[]> {
   assertResearchArticleSectionWatch(source);
-  if (source.articleSectionHeading !== undefined) {
+  if (source.articleSectionHeading !== undefined || source.articleTimestampRange !== undefined) {
     const html = await fetchResearchText(source.url, sourceHosts(source));
-    const section = articleResearchSection(html, source.articleSectionHeading);
+    const section = source.articleTimestampRange !== undefined
+      ? articleResearchTimestampSection(html, source.articleTimestampRange)
+      : articleResearchSection(html, source.articleSectionHeading!);
     return [{
       url: canonicalResearchUrl(source.url), title: section.title, excerpt: section.content.slice(0, 1600),
       publishedAt: articleResearchDate(html, source.url),
       ...(section.content.length >= 500 ? { content: section.content } : {}),
-      contentProvenance: "public_section", contentType: "article", transcriptStatus: "not_applicable",
+      contentProvenance: "public_section", contentType: "article", transcriptStatus: source.articleTimestampRange ? "available" : "not_applicable",
     }];
   }
   if (source.feedUrl)

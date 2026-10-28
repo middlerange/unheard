@@ -11,7 +11,7 @@ import { hasUsablePewResearchBody } from './research-pew';
 import { RESEARCH_POST_MIN_SCORE } from './research-policy';
 import type { EvidenceCacheValue, EvidenceFailure } from './research-evidence-cache';
 import { ResearchCoveragePending, RESEARCH_COVERAGE_VERSION, RESEARCH_WINDOW_SCOPE_INSTRUCTIONS } from './research-coverage';
-import { RESEARCH_SOURCE_REVIEW_VERSION, RESEARCH_SOURCE_REVIEW_INSTRUCTIONS, researchSourceReviewSchemaForItems } from './research-source-review-model';
+import { RESEARCH_SOURCE_REVIEW_PIPELINE_VERSION as RESEARCH_SOURCE_REVIEW_VERSION, RESEARCH_SOURCE_REVIEW_INSTRUCTIONS, RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS, researchSourceReviewSchemaForItems } from './research-source-review-model';
 import { RESEARCH_MODEL, RESEARCH_PROMPT_VERSION, RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS,
   RESEARCH_SCREEN_BATCH_SIZE, RESEARCH_EVIDENCE_BATCH_SIZE, RESEARCH_EVIDENCE_OUTPUT_TOKENS, RESEARCH_SECTION_COVERAGE_INSTRUCTIONS, researchHash, researchScreeningSchema,
   researchEvidenceSchema, screeningJsonSchemaForItems, evidenceJsonSchemaForItems, validateResearchScreening,
@@ -22,7 +22,7 @@ const publicUrl = z.string().max(4000).refine(value => { try { assertPublicResea
 export const researchReplayItemSchema = z.object({
   id: z.string().min(1).max(200), sourceId: z.string().min(1).max(200), url: publicUrl,
   title: z.string().min(1).max(4000), excerpt: z.string().max(14000),
-  publishedAt: timestamp.nullable(), discoveredAt: timestamp.nullable(), content: z.string().max(14000).nullable(),
+  publishedAt: timestamp.nullable(), discoveredAt: timestamp.nullable(), content: z.string().max(64000).nullable(),
   contentProvenance: z.string().min(1).max(100).nullable(),
   contentType: z.enum(['article', 'video']), transcriptStatus: z.enum(['not_applicable', 'available', 'unavailable', 'pending']),
   bodyCapturedAt: timestamp.optional(), bodyOrigin: z.enum(['inventory', 'saved_public_hydration']).optional(),
@@ -81,6 +81,7 @@ async function contractHash() {
   return researchHash(JSON.stringify({ model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION,
     coverageVersion: RESEARCH_COVERAGE_VERSION, coverageScope: RESEARCH_WINDOW_SCOPE_INSTRUCTIONS,
     sourceReviewVersion: RESEARCH_SOURCE_REVIEW_VERSION, sourceReviewInstructions: RESEARCH_SOURCE_REVIEW_INSTRUCTIONS,
+    sourceReviewConsistencyVersion: RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, sourceReviewConsistencyInstructions: RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS,
     sourceReviewSchema: researchSourceReviewSchemaForItems(['item'], ['profile']),
     screen: RESEARCH_SCREEN_INSTRUCTIONS, evidence: RESEARCH_EVIDENCE_INSTRUCTIONS,
     sectionInstructions: RESEARCH_SECTION_COVERAGE_INSTRUCTIONS, evidenceOutputTokens: RESEARCH_EVIDENCE_OUTPUT_TOKENS,

@@ -103,7 +103,6 @@ import {
   updateResearchSource,
   cachedResearchBaseModel,
 } from "./research";
-import { RESEARCH_SOURCE_REVIEW_INSTRUCTIONS } from "./research-source-review-model";
 async function finishResearchDraftJob(runId: string) {
   let result = await processResearchDraftJob(runId);
   while ("pending" in result && result.pending) result = await processResearchDraftJob(runId);
@@ -452,7 +451,6 @@ describe("research persistence and team isolation", () => {
       expect([...choices].sort()).toEqual(["audience-company", "audience-personal"]);
       if (Array.isArray(input.items[0].passages)) {
         reviewCalls++;
-        expect(request.system).toBe(RESEARCH_SOURCE_REVIEW_INSTRUCTIONS);
         expect(input.items[0]).not.toHaveProperty("content");
         expect(input.items[0]).not.toHaveProperty("excerpt");
         expect(input.items[0].passages.some((passage: { text: string }) => passage.text.includes(quote))).toBe(true);
@@ -485,11 +483,11 @@ describe("research persistence and team isolation", () => {
           && query.params.some(param => typeof param === "string" && param.includes('"nextOffset":1')))) throw new Error("Network connection lost.");
       };
       await expect(processResearchJob({ operation: "rank", runId: run.id })).rejects.toThrow("Network connection lost");
-      expect({ sourceCalls, reviewCalls }).toEqual({ sourceCalls: 1, reviewCalls: 1 });
+      expect({ sourceCalls, reviewCalls }).toEqual({ sourceCalls: 1, reviewCalls: 2 });
       storageFault = undefined;
       await finishResearchRankJob(run.id);
-      expect({ sourceCalls, reviewCalls }).toEqual({ sourceCalls: 1, reviewCalls: 1 });
-      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect({ sourceCalls, reviewCalls }).toEqual({ sourceCalls: 1, reviewCalls: 2 });
+      expect(fetcher).toHaveBeenCalledTimes(3);
       expect(execute({ queries: [{ sql: "SELECT findings_count,cache_hits FROM research_runs WHERE id=?", params: [run.id] }] })[0].results[0]).toMatchObject({ findings_count: 1, cache_hits: 1 });
       expect((await getRunResearchFindings(team, run.id))[0]).toMatchObject({ score: 82, evidence: quote, family_key: "observed-search-referrals" });
       const saved = execute({ queries: [{ sql: "SELECT * FROM research_runs WHERE id=?", params: [run.id] }] })[0].results[0];

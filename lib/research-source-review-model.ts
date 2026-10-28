@@ -37,6 +37,18 @@ export function researchSourceReviewAudience(audience: ResearchAudience) {
   };
 }
 
+export const RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION = 'research-source-review-consistency-v1';
+export const RESEARCH_SOURCE_REVIEW_PIPELINE_VERSION = `${RESEARCH_SOURCE_REVIEW_VERSION}+consistency-v1`;
+export const RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS = `${RESEARCH_SOURCE_REVIEW_INSTRUCTIONS}
+
+Keep the following judgments separate. Profile relevance asks whether the actual reader's job or decision fits the claim. It does not measure credibility: a product-management workflow is directly relevant to product managers, and distribution, acquisition, pricing and go-to-market workflows can directly fit growth leads and product marketers. Do not lower topical relevance because a source is commercial, self-reported, an opinion, undated or lacks outcome data. Keep the configured company and personal remits distinct.
+
+Finalize the smallest complete useful, attributed claim BEFORE evaluating its support. Remove incidental outcome numbers or effectiveness promises when they are unnecessary to explain a documented capability, method or rationale. Judge textual support for that final claim. A publisher describing its own specific behavior supports a reported capability; a practitioner describing a bounded experience supports an attributed account. Neither establishes independent effectiveness. Preserve that distinction in limitations instead of rejecting the description for failing to establish a stronger claim it does not make.
+
+Before returning incomplete_support, identify the precise necessary premise in the final summary that the captured passages do not support. Before returning material_gap, identify the missing qualification that changes that final claim's meaning. A limitation already acknowledged in the brief, or the absence of independent outcome validation for an explicitly attributed description, is not by itself either defect. A missing method, unsubstantiated causal result, misleading population or unavailable source premise remains a defect. Never automatically upgrade a finding.
+
+Walk the entire passage catalog in order before returning. Assess every distinct substantive section's actual method, comparison, capability or reasoned position; do not stop after the first attractive theme. Return each independently useful complete core with its concrete names, steps, contrasts and own supporting passage IDs. Include a whole-source comparison when several findings form one decision framework, while keeping useful component mechanisms independently selectable. For a substantive section with no useful core, return a rejected no_useful_core assessment in additionalIdeas with a specific explanation in limitations; do not silently omit the section. Repeated navigation, offers and boilerplate are not substantive sections. There is no fixed number of accepted ideas, and broad topic similarity is insufficient.`;
+
 export type ResearchSourceReviewPassage = {
   passageId: number; start: number; end: number; text: string; selectable: boolean; headingContext: number[];
 };

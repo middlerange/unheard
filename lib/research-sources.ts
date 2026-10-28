@@ -1493,10 +1493,11 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "url": "https://support.google.com/google-ads/answer/2497941?hl=en",
     "kind": "web",
     "pageMode": "article",
+    "articleSectionHeading": "About dynamic prospecting",
     "category": "research",
     "enabled": true,
     "priority": 1,
-    "notes": "Monitor this public first-party reference body. Preserve its original publication date when explicit; otherwise label it an undated reference with actual first observation. Attribute product and practitioner claims; do not treat a crawl as a launch, infer unreported outcomes, or assume historical discovery."
+    "notes": "Collect the publisher's About dynamic prospecting section before applying the article body limit; the earlier audience definitions can otherwise exclude this later section. This is a Google Ads feed-performance and user-behavior mechanism, not proof of outcomes or a GA4 predictive-audience integration. Preserve any explicit original publication date and actual first observation; otherwise retain an undated reference. A crawl or page update is not a launch."
   },
   {
     "id": "google-demand-generation-reference",
@@ -1643,10 +1644,11 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "url": "https://exitfive.com/podcast/the-6-types-of-ownable-ideas-and-how-to-find-yours-with-katelyn-bourgoin-founder-of-unignorable/",
     "kind": "web",
     "pageMode": "article",
+    "articleTimestampRange": { "start": "0:23:12", "end": "0:35:01" },
     "category": "practitioner",
     "enabled": true,
     "priority": 2,
-    "notes": "Explicit public original reference watch. Preserve actual publication dates, unknown-date status and first observation; a newly observed old reference is not a new event. Attribute the original author/vendor, retain access limitations, and share only claims supported by the actually captured body. This known-page watch establishes reference coverage, not independent discovery of unseen material."
+    "notes": "Collect the complete public transcript interval 0:23:12 to 0:35:01 before applying article-prefix limits. These exact publisher timestamps cover the entertaining-versus-substantive-content discussion and the later repeated authority mechanism; they do not prove client acquisition outcomes. Fail closed if either boundary is absent or ambiguous. Preserve the original episode publication date and actual first observation. This known public section establishes reference coverage, not independent discovery or a complete episode transcript."
   },
   {
     "id": "reference-665e44daf7ae",

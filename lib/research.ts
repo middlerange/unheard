@@ -7,7 +7,8 @@ import { researchSelectionAudience, RESEARCH_SELECTION_VIEW_VERSION } from "./re
 import { cacheValidResearchEvidenceItems, researchEvidenceFailures, researchEvidenceItemCacheId, reuseResearchEvidenceItems, validateResearchEvidenceCacheValue, type EvidenceCacheInput, type EvidenceCacheValue, type EvidenceFailure } from "./research-evidence-cache";
 import { repairResearchCitation, RESEARCH_QUOTE_REPAIR_INSTRUCTIONS, sameContextQuoteFailure, verifyResearchEvidenceFailure } from "./research-quote-repair";
 import { coverResearchEvidence, ResearchCoveragePending, RESEARCH_COVERAGE_VERSION, type ResearchCoverageAccess } from "./research-coverage";
-import { reviewResearchSources, ResearchSourceReviewPending, RESEARCH_SOURCE_REVIEW_VERSION } from "./research-source-review";
+import { reviewResearchSources, ResearchSourceReviewPending, RESEARCH_SOURCE_REVIEW_VERSION, type ResearchSourceReviewRequest } from "./research-source-review";
+import { RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS } from "./research-source-review-model";
 import { researchFindingDates, researchItemSignalKind } from "./research-dates";
 import { getDraftResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
 import { hasUsablePewResearchBody, isPewResearchSource } from "./research-pew";
@@ -1144,6 +1145,7 @@ async function cachedModel(
         .returning({ id: research_cache.id })).length === 1,
       writeImmutable: async (id, value) => { await db.insert(research_cache).values({ id, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now() }).onConflictDoNothing(); },
   };
+  let activeReviewPhase = { name: "source-review", version: RESEARCH_SOURCE_REVIEW_VERSION };
   try {
     const covered = await coverResearchEvidence(sources, base as EvidenceCacheValue, {
       ...storage,
@@ -1151,15 +1153,21 @@ async function cachedModel(
         evidenceJsonSchemaForItems([item.id], profileIds, { sectionCoverage: true }), outputTokens) as EvidenceCacheValue,
     });
     await recordPhase("coverage", RESEARCH_COVERAGE_VERSION, [], covered.manifestIds, false);
-    const reviewed = await reviewResearchSources(sources, { ...covered.value, coverageManifestIds: covered.manifestIds }, {
+    const reviewAccess = {
       ...storage,
-      generate: async request => (await callResearchModel(request.instructions, request.data, request.schema, outputTokens,
+      generate: async (request: ResearchSourceReviewRequest) => (await callResearchModel(request.instructions, request.data, request.schema, outputTokens,
         { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? "replay_review_evidence" : "review_evidence" }, request.model)).value,
-    });
+    };
+    const reviewed = await reviewResearchSources(sources, { ...covered.value, coverageManifestIds: covered.manifestIds }, reviewAccess);
     await recordPhase("source-review", RESEARCH_SOURCE_REVIEW_VERSION, [], reviewed.manifestIds, false);
-    return reviewed.value;
+    activeReviewPhase = { name: "source-review-consistency", version: RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION };
+    const checked = await reviewResearchSources(sources, reviewed.value, reviewAccess, {
+      version: RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, instructions: RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS,
+    });
+    await recordPhase(activeReviewPhase.name, activeReviewPhase.version, [], checked.manifestIds, false);
+    return checked.value;
   } catch (error) {
-    if (error instanceof ResearchSourceReviewPending) await recordPhase("source-review", RESEARCH_SOURCE_REVIEW_VERSION, error.planIds, error.manifestIds, true);
+    if (error instanceof ResearchSourceReviewPending) await recordPhase(activeReviewPhase.name, activeReviewPhase.version, error.planIds, error.manifestIds, true);
     else if (error instanceof ResearchCoveragePending) await recordPhase("coverage", RESEARCH_COVERAGE_VERSION, error.planIds, error.manifestIds, true);
     throw error;
   }

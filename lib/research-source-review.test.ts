@@ -73,6 +73,57 @@ async function failedBase(item: ResearchSourceReviewInput, h: Awaited<ReturnType
 }
 
 describe("source-led whole-capture review with real SQLite checkpoints", () => {
+  it("retains the default v1 immutable plan identity", async () => {
+    const item=source("policy"),h=await harness();
+    await reviewResearchSources([item],baseGrade(item),h.access);
+    expect((await h.records("research-source-review-plan:"))[0].id).toBe("research-source-review-plan:v1:7685a0d73c641df63ff512c7b367f322fa64df2a0762279a8b6cdfd2715fa792");
+  });
+  it("chains a distinct policy once while preserving v1 claims, dates, proofs and diagnostics", async () => {
+    const item={...source("policy-chain"),publishedAt:123456,discoveredAt:456789},base=baseGrade(item),h=await harness();
+    h.generate.mockImplementation(async request=>{
+      const wire=rawReview(request);
+      wire.findings[item.id].additionalIdeas=[frame([99999],"invalid-v1-proof")] as never[];
+      return wire;
+    });
+    const first=await reviewResearchSources([item],base,h.access),before=JSON.stringify(first.value),oldRecords=await h.records("research-source-review-");
+    expect(await reviewResearchSources([item],base,h.access)).toEqual(first);expect(h.generate).toHaveBeenCalledTimes(1);
+    const policy={version:"fixture-review-v2",instructions:"Review the complete documented handoff, preserving existing supported cores.",model:"fixture-review-model"};
+    h.generate.mockImplementation(async request=>{
+      expect(request.model).toBe(policy.model);expect(request.instructions).toBe(policy.instructions);expect(request.data.sourceReviewVersion).toBe(policy.version);
+      const ids=(request.data.items[0].passages as ReturnType<typeof researchSourceReviewPassages>).filter(passage=>passage.selectable).map(passage=>passage.passageId);
+      const duplicate=frame([ids[1],ids[2]],"review-policy-chain");duplicate.claim.summary="A later phrasing must not replace an already accepted family.";duplicate.profileChecks[0].relevance=30;
+      return {findings:{[item.id]:{...duplicate,additionalIdeas:[frame([ids[1],ids[2]],"separate-checked-handoff"),frame([99999],"invalid-v2-proof")]}}};
+    });
+    const second=await reviewResearchSources([item],first.value,h.access,policy);
+    expect(h.generate).toHaveBeenCalledTimes(2);expect(JSON.stringify(first.value)).toBe(before);
+    const ideas=(value:EvidenceCacheValue)=>{const {itemId:_id,additionalIdeas,sectionChecks:_checks,...primary}=value.findings[0];return [primary,...(additionalIdeas||[])];};
+    for(const idea of ideas(first.value))expect(ideas(second.value).find(candidate=>candidate.familyKey===idea.familyKey)).toEqual(idea);
+    expect(ideas(second.value).map(idea=>idea.familyKey)).toEqual(["base-policy-chain","review-policy-chain","separate-checked-handoff"]);
+    expect(second.manifestIds).toHaveLength(2);expect(second.manifestIds[0]).toBe(first.manifestIds[0]);expect(second.value.sourceReviewManifestIds).toEqual(second.manifestIds);
+    expect(second.value.multiProofs.filter(proof=>first.manifestIds.includes(proof.reviewManifestId))).toEqual(first.value.multiProofs);
+    expect(second.value.multiProofs).toHaveLength(2);expect(second.value.multiProofs[0].evidencePassageIds).not.toEqual(second.value.multiProofs[1].evidencePassageIds);
+    expect(second.value.multiProofs.map(proof=>proof.familyKey)).toEqual(["review-policy-chain","separate-checked-handoff"]);
+    expect(second.value.sourceReviewDiagnostics.slice(0,first.value.sourceReviewDiagnostics.length)).toEqual(first.value.sourceReviewDiagnostics);
+    expect(second.value.sourceReviewDiagnostics).toHaveLength(2);
+    for(const record of oldRecords)expect(await h.read(record.id)).toEqual(record.value);
+    const plans=await h.records("research-source-review-plan:");expect(plans).toHaveLength(2);expect(plans[0].id).not.toBe(plans[1].id);
+    const nextPlan=plans.find((row:{value:{version:string}})=>row.value.version===policy.version)!.value;
+    expect(nextPlan.catalogSource).toMatchObject({publishedAt:item.publishedAt,discoveredAt:item.discoveredAt});
+    expect(nextPlan.request).toMatchObject({model:policy.model,instructions:policy.instructions});expect(nextPlan.researchView.sourceReviewVersion).toBe(policy.version);
+    const repeatedV1=await reviewResearchSources([item],base,h.access);
+    expect(await reviewResearchSources([item],repeatedV1.value,h.access,policy)).toEqual(second);expect(h.generate).toHaveBeenCalledTimes(2);
+  });
+  it("keeps accepted v1 families and proof when a later policy fails without repeating it", async () => {
+    const item=source("failed-policy"),h=await harness(),first=await reviewResearchSources([item],baseGrade(item),h.access);
+    h.generate.mockRejectedValue(new Error("Later policy request did not complete"));
+    const policy={version:"fixture-failed-v2",instructions:"Inspect only supported additional distinctions."};
+    const failed=await reviewResearchSources([item],first.value,h.access,policy);
+    expect(failed.value.findings).toEqual(first.value.findings);expect(failed.value.multiProofs).toEqual(first.value.multiProofs);
+    expect(failed.value.sourceReviewDiagnostics).toEqual(first.value.sourceReviewDiagnostics);expect(failed.manifestIds).toHaveLength(2);
+    expect(failed.manifestIds).toContain(first.manifestIds[0]);expect((await h.read(failed.manifestIds[1])).terminalState).toBe("failed");
+    expect((await h.records("research-source-review-attempt:")).filter((row:{value:{version:string}})=>row.value.version===policy.version)).toHaveLength(1);
+    expect(await reviewResearchSources([item],first.value,h.access,policy)).toEqual(failed);expect(h.generate).toHaveBeenCalledTimes(2);
+  });
   it("reviews short and long sources once, budgets2 calls globally and never repeats base/window work", async () => {
     const items = [source("short"), source("long", 35), source("third")], h = await harness(), base = { findings: items.flatMap(item => baseGrade(item).findings) };
     await h.put("research-coverage-attempt:v1:old", { immutable: "old window grade" });

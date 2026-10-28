@@ -15,6 +15,7 @@ export type ResearchSourceSeed = {
   articlePathPrefixes?: string[];
   pageMode?: "index" | "article";
   articleSectionHeading?: string;
+  articleTimestampRange?: { start: string; end: string };
   trustedArticleHosts?: string[];
   hydratePublishedWindowOnly?: boolean;
   freeArticleFallback?: boolean;
