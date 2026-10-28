@@ -1281,10 +1281,10 @@ describe("research persistence and team isolation", () => {
     ] });
     const idea = (familyKey: string, evidence: string, suppliedProfiles: Array<{ id: string; groupName: string }>) => ({
       familyKey, evidence, claimBasis: 'described_method',
-      profileChecks: Object.fromEntries(suppliedProfiles.map(profile => [profile.id, {
+      profileChecks: suppliedProfiles.map(profile => ({ profileId: profile.id,
         fits: profile.id === 'personal-linkedin', relevance: profile.id === 'personal-linkedin' ? 27 : profile.groupName === 'company' ? 30 : 8,
         reason: profile.id === 'personal-linkedin' ? 'A concrete independent product-builder decision fits this personal profile.' : 'This specific decision does not fit this profile’s captured selection remit.',
-      }])),
+      })),
       qualityComponents: { sourceSupport: 22, usefulDecision: 25, scopeHonesty: 14 },
       summary: familyKey, contentAngle: `Inspect ${familyKey} before adopting this workflow.`,
       whyItMatters: 'A separate practical product-team decision.', limitations: 'A practitioner account; no measured uplift.',
@@ -1301,13 +1301,13 @@ describe("research persistence and team isolation", () => {
         expect(profile.selectionInstructions).toBe(profiles.find(captured => captured.id === profile.id)?.systemPrompt);
         expect(profile).not.toHaveProperty('systemPrompt');
       }
-      expect(request.output_config.format.schema.$defs.profileChecks.required).toEqual(profiles.map(profile => profile.id));
+      expect(request.output_config.format.schema.$defs.profileCheck.properties.profileId.enum).toEqual(profiles.map(profile => profile.id));
       const primary = ++calls === 1 ? idea('consent-review', quotes[0], input.publishingProfiles) : idea('publication-confirmation', quotes[2], input.publishingProfiles);
       const additional = idea('preview-before-connection', quotes[1], input.publishingProfiles);
       for (const assessment of [primary, additional]) {
         for (const derived of ['score', 'chosenProfileId', 'profileFit']) expect(assessment).not.toHaveProperty(derived);
       }
-      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify({ findings: { [itemId]: { ...primary, additionalIdeas: [additional] } } }) }] }] });
+      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify({ findings: [{ itemId, ...primary, additionalIdeas: [additional] }] }) }] }] });
     });
     try {
       await finishResearchRankJob(runIds[0]);

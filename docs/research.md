@@ -547,7 +547,7 @@ do not copy those keys locally to run an experiment.
 
 ### Distinct ideas and explicit reference watches
 
-Research v18 returns one primary assessment per source and an `additionalIdeas`
+Research v19 returns one primary assessment per source and an `additionalIdeas`
 array for genuinely different supported decisions. Every idea keeps its own
 profile choice, score, exact quote and story family. Several paraphrases of one
 claim do not create several ideas. Family identities retain their saved ideas,
@@ -583,7 +583,7 @@ Source keys, profile choices and local quote/coverage checks remain strict.
 Provider rejection diagnostics retain only an allowlisted configuration category;
 raw provider messages, credentials and prompts are never stored as diagnostics.
 
-Each v18 idea declares its claim basis and checks every supplied publishing
+Each v19 idea declares its claim basis and checks every supplied publishing
 profile independently. The application selects the highest-relevance fitting
 profile and sums the existing rubric: relevance (30), source support (25), useful
 decision (30), honest scope (15). The minimum remains 70, with the same exact quote
@@ -592,3 +592,5 @@ attributed argument is assessed against that bounded claim, without requiring
 proof of unrelated business outcomes. Original audience snapshots remain intact.
 A conservative, versioned selection view removes only recognized publishing
 boilerplate; unfamiliar instructions remain unchanged.
+
+The v19 wire uses arrays for source assessments and per-profile checks to keep the provider grammar compact. The application enforces exactly one assessment per input, exactly one check per enabled profile, quote validity and the same 70-point threshold.
