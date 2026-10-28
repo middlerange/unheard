@@ -86,6 +86,48 @@ describe('configured replay persistence and paid cache boundary', () => {
     }));
   });
   afterAll(()=>{fault=undefined;vi.unstubAllGlobals();globalThis.__contentHubResearchWorkflow__=undefined;rmSync(folder,{recursive:true,force:true});});
+  it('continues replay after a verified terminal quote failure and reuses failed and valid source caches', async () => {
+    const id='66666666-6666-4666-8666-666666666666',later='77777777-7777-4777-8777-777777777777';
+    const inputs=[item('grounding-failed'),item('grounding-valid')];
+    let grades=0,repairs=0;
+    const fetcher=vi.spyOn(globalThis,'fetch').mockImplementation(async(_url,init)=>{
+      const request=JSON.parse(String(init?.body)),payload=JSON.parse(request.messages[0].content);
+      let value:unknown;
+      if(payload.claims){repairs++;value={'route-check':{passageId:0,supportsCore:false}};}
+      else{
+        grades++;expect(payload.items).toHaveLength(1);const source=payload.items[0];
+        value={findings:{[source.id]:{claimBasis:'described_method',profileChecks:[
+          {profileId:'personal',fits:true,relevance:25,reason:'A concrete product delivery decision.'},
+          {profileId:'company',fits:true,relevance:20,reason:'A concrete onboarding decision.'}],
+          claim:{summary:'Inspect every entry route before requiring setup.',evidence:source.id==='grounding-failed'?'A paraphrased claim that never appears in the actual source.':body.slice(0,100),
+            contentAngle:'Compare actual entry routes before choosing an onboarding gate.',whyItMatters:'Alternative paths can change which setup steps are necessary.',limitations:'A described workflow without causal outcome measurement.'},
+          familyKey:'route-check',qualityComponents:{sourceSupport:'supported_bounded_claim',usefulDecision:'concrete_decision',scopeHonesty:'accurately_bounded'},additionalIdeas:[],sectionChecks:[]}}};
+      }
+      return Response.json({id:'quote-continuation-'+grades+'-'+repairs,model:'claude-haiku-5-5',stop_reason:'end_turn',content:[{type:'text',text:JSON.stringify(value)}],usage:{input_tokens:10,output_tokens:10}});
+    });
+    try{
+      const run=async(runId:string)=>{
+        await researchReplayAction('team',prepare(runId,2));await researchReplayAction('team',{operation:'upload',runId,chunkIndex:0,items:inputs});await researchReplayAction('team',{operation:'start',runId});
+        let steps=0;while(await rankPending(runId))if(++steps>8)throw Error('Replay failed to advance');
+        return researchReplayStatus('team',runId);
+      };
+      const result=await run(id);
+      expect(result.run.status).toBe('completed');expect(result.run.findings_count).toBe(1);
+      const progress=result.records.find(row=>row.id.endsWith(':progress'))!.value;
+      expect(progress).toMatchObject({evidenceOffset:2,evidenceCount:2,qualifiedCount:1,groundingFailureCount:1});
+      const evidence=result.records.find(row=>row.id.endsWith(':evidence:0'))!.value;
+      expect(evidence.ids).toEqual(['grounding-failed','grounding-valid']);
+      expect(evidence.assessments.map((finding:any)=>finding.itemId)).toEqual(['grounding-valid']);
+      expect(evidence.acceptedIds).toEqual(['grounding-valid']);expect(evidence.evidenceFailures).toHaveLength(1);
+      expect(evidence.evidenceFailures[0].reason).toContain('unsupported_core');
+      const receipt=JSON.parse(query('SELECT value FROM research_cache WHERE id=?',[evidence.evidenceFailures[0].receiptId])[0].value);
+      expect(receipt.rawGrade.findings['grounding-failed'].claim.evidence).toContain('paraphrased');
+      expect(grades).toBe(2);expect(repairs).toBe(1);
+      const replay=await run(later);expect(replay.run.findings_count).toBe(1);
+      expect(grades).toBe(2);expect(repairs).toBe(1);
+      expect(query('SELECT COUNT(*) count FROM research_usage WHERE run_id=?',[later])[0].count).toBe(0);
+    }finally{fetcher.mockRestore();}
+  },60000);
   it('starts a corpus over1MB through D1-safe pages and status excludes uploaded bodies in SQL', async () => {
     const id='55555555-5555-4555-8555-555555555555',items=Array.from({length:80},(_,n)=>({...item('large-'+n),content:body.repeat(20).slice(0,14000)}));
     expect(Buffer.byteLength(JSON.stringify(items))).toBeGreaterThan(1_000_000);

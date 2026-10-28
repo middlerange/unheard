@@ -4,8 +4,8 @@ import { getDb } from "./db/client";
 import { retryResearchStorage } from "./research-storage";
 import { getFrozenResearchAudience } from "./research-audience";
 import { researchSelectionAudience, RESEARCH_SELECTION_VIEW_VERSION } from "./research-selection-audience";
-import { cacheValidResearchEvidenceItems, researchEvidenceItemCacheId, reuseResearchEvidenceItems, validateResearchEvidenceCacheValue, type EvidenceCacheInput, type EvidenceCacheValue } from "./research-evidence-cache";
-import { repairResearchCitation, RESEARCH_QUOTE_REPAIR_INSTRUCTIONS, sameContextQuoteFailure } from "./research-quote-repair";
+import { cacheValidResearchEvidenceItems, researchEvidenceFailures, researchEvidenceItemCacheId, reuseResearchEvidenceItems, validateResearchEvidenceCacheValue, type EvidenceCacheInput, type EvidenceCacheValue, type EvidenceFailure } from "./research-evidence-cache";
+import { repairResearchCitation, RESEARCH_QUOTE_REPAIR_INSTRUCTIONS, sameContextQuoteFailure, verifyResearchEvidenceFailure } from "./research-quote-repair";
 import { researchFindingDates, researchItemSignalKind } from "./research-dates";
 import { getDraftResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
 import { hasUsablePewResearchBody, isPewResearchSource } from "./research-pew";
@@ -959,8 +959,18 @@ async function cachedModel(
       const ids = items.map(item => item.id);
       if (stage === "screen") validateResearchScreening(researchScreeningSchema.parse(value), ids);
       if (stage === "evidence") {
-        const output = validateResearchEvidenceCacheValue(value, items, enabledProfileIds);
-        const sectionInputs = items.map(item => researchSourceSections({ ...item, content: typeof item.content === "string" ? item.content : null }));
+        const verifiedFailures: EvidenceFailure[] = [];
+        for (const failure of researchEvidenceFailures(value)) {
+          const item = items.find(item => item.id === failure.itemId);
+          if (!item) throw new Error("Research evidence failure references an unknown source");
+          const row = await db.select().from(research_cache)
+            .where(and(eq(research_cache.id, failure.receiptId), eq(research_cache.team_id, run.team_id))).get();
+          verifiedFailures.push(await verifyResearchEvidenceFailure(failure, item, enabledProfileIds,
+            await researchEvidenceItemCacheId(evidenceAccess.context, item), row ? JSON.parse(row.value) : null));
+        }
+        const output = validateResearchEvidenceCacheValue(value, items, enabledProfileIds, verifiedFailures);
+        const sectionInputs = items.filter(item => !verifiedFailures.some(failure => failure.itemId === item.id))
+          .map(item => researchSourceSections({ ...item, content: typeof item.content === "string" ? item.content : null }));
         const checked = sectionInputs.filter(item => item.sourceSections.length > 0 || output.findings.find(finding => finding.itemId === item.id)?.sectionChecks !== undefined);
         validateResearchSectionCoverage(output.findings.filter(finding => checked.some(item => item.id === finding.itemId)), checked);
         return output;
@@ -1034,6 +1044,7 @@ async function cachedModel(
     )).value;
     const sources = items as EvidenceCacheInput[];
     const findings: EvidenceCacheValue["findings"] = [];
+    const failures: EvidenceFailure[] = [];
     // Bound provider concurrency, not the number of sources that receive review.
     const concurrency = 2;
     for (let start = 0; start < sources.length; start += concurrency) {
@@ -1050,13 +1061,16 @@ async function cachedModel(
           output = await repairQuote(raw, item);
         }
         await cacheValidResearchEvidenceItems(output, [item], evidenceAccess);
-        return output.findings[0];
+        return output;
       }));
       const failed = results.find(result => result.status === "rejected");
       if (failed?.status === "rejected") throw failed.reason;
-      findings.push(...results.flatMap(result => result.status === "fulfilled" ? [result.value] : []));
+      for (const result of results) if (result.status === "fulfilled") {
+        findings.push(...result.value.findings);
+        failures.push(...result.value.evidenceFailures || []);
+      }
     }
-    return { findings };
+    return { findings, ...(failures.length ? { evidenceFailures: failures } : {}) };
   };
   if (stage === "evidence") {
     const reused = await reuseResearchEvidenceItems(input as EvidenceCacheInput[], {
@@ -1309,16 +1323,17 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
         signalKind: researchItemSignalKind(item, run),
         content: item.content, contentProvenance: item.content_provenance,
       }));
-      const output = researchEvidenceSchema.parse(await cachedModel(
+      const output = await cachedModel(
         run, "evidence", input, RESEARCH_EVIDENCE_INSTRUCTIONS,
         evidenceJsonSchemaForItems(batch.map(item => item.id)), RESEARCH_EVIDENCE_OUTPUT_TOKENS,
-      ));
-      validateResearchEvidenceCoverage(output.findings, batch.map(item => item.id));
+      ) as EvidenceCacheValue;
+      validateResearchEvidenceCoverage(output.findings, batch.filter(item => !output.evidenceFailures?.some(failure => failure.itemId === item.id)).map(item => item.id));
       const accepted = validateResearchEvidence(output.findings, batch.map(item => ({ id: item.id, content: item.content! })));
       for (const item of batch) {
         if (accepted.some(finding => finding.itemId === item.id)) continue;
+        const groundingFailure = output.evidenceFailures?.find(failure => failure.itemId === item.id);
         const assessment = output.findings.find(finding => finding.itemId === item.id);
-        let reason = "No supported editorial assessment was returned for this story.";
+        let reason = groundingFailure?.reason || "No supported editorial assessment was returned for this story.";
         if (assessment) reason = assessment.score < 70
           ? assessment.limitations
           : "The supporting quote could not be verified against the source.";

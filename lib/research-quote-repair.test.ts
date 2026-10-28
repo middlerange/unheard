@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { researchEvidenceSchema, validateResearchSectionCoverage } from "./research-model";
-import { validateResearchEvidenceCacheValue } from "./research-evidence-cache";
+import { researchEvidenceFailures, researchEvidenceItemCacheId, reuseResearchEvidenceItems, validateResearchEvidenceCacheValue, type EvidenceCacheContext, type EvidenceCacheInput } from "./research-evidence-cache";
 import { researchSourceSections } from "./research-sections";
-import { applyResearchQuoteRepair, quoteRepairSchema, repairResearchCitation, researchQuotePassages, researchQuoteRepairPlan, sameContextQuoteFailure } from "./research-quote-repair";
+import { applyResearchQuoteRepair, quoteRepairSchema, repairResearchCitation, researchQuotePassages, researchQuoteRepairPlan, sameContextQuoteFailure, verifyResearchEvidenceFailure } from "./research-quote-repair";
 
 const item = { id: "source-a", content: "The measurement workflow freezes high-intent prompts before comparing visibility and downstream outcomes.\n\nOperators log the same prompts for four weeks and compare leading visibility against lagging business measures." };
-function grade(source = item) {
+function grade(source: EvidenceCacheInput = item) {
   return { findings: [{ itemId: source.id, summary: "Freeze prompts and compare visibility with downstream business outcomes.",
     evidence: "A paraphrased introduction does not reproduce the actual source's words.", contentAngle: "Use a fixed prompt set rather than changing the denominator between measurements.",
     whyItMatters: "A stable comparison distinguishes visibility from referral clicks.", limitations: "A described method, without independent causal outcome proof.", familyKey: "fixed-prompt-measurement",
@@ -76,17 +76,22 @@ describe("bounded citation-only passage selection", () => {
     { "fixed-prompt-measurement": { passageId: 0.5, supportsCore: true } },
     { "fixed-prompt-measurement": { passageId: 0, supportsCore: true, score: 100 } },
     { foreign: { passageId: 0, supportsCore: true } },
-  ])("fails unsupported, invalid or extra output and never repeats the repair: %j", async selection => {
+  ])("records unsupported or invalid grounding without assessment or a repeated repair: %j", async selection => {
     const h = harness(); h.select.mockResolvedValueOnce(selection as never);
-    await expect(repairResearchCitation(grade(), item, ["personal"], "context-a", h.access)).rejects.toThrow();
-    await expect(repairResearchCitation(grade(), item, ["personal"], "context-a", h.access)).rejects.toThrow("already attempted");
+    const failed = await repairResearchCitation(grade(), item, ["personal"], "context-a", h.access);
+    expect(failed.findings).toEqual([]);
+    expect(failed.evidenceFailures).toHaveLength(1);
+    expect(await repairResearchCitation(grade(), item, ["personal"], "context-a", h.access)).toEqual(failed);
+    expect([...h.receipts.values()][0].rawGrade).toEqual(grade());
     expect(h.select).toHaveBeenCalledTimes(1);
   });
 
   it("fences transport-unknown and concurrent attempts before another request", async () => {
     const h = harness(); h.select.mockRejectedValueOnce(new Error("Unknown transport outcome"));
-    await expect(repairResearchCitation(grade(), item, ["personal"], "context-a", h.access)).rejects.toThrow("Unknown transport");
-    await expect(repairResearchCitation(grade(), item, ["personal"], "context-a", h.access)).rejects.toThrow("already attempted");
+    const failed = await repairResearchCitation(grade(), item, ["personal"], "context-a", h.access);
+    expect(failed.findings).toEqual([]);
+    expect(failed.evidenceFailures?.[0].reason).toContain("request_failure");
+    expect(await repairResearchCitation(grade(), item, ["personal"], "context-a", h.access)).toEqual(failed);
     expect(h.select).toHaveBeenCalledTimes(1);
     const concurrent = harness();
     await Promise.allSettled([0, 1].map(() => repairResearchCitation(grade(), item, ["personal"], "context-a", concurrent.access)));
@@ -130,7 +135,10 @@ describe("bounded citation-only passage selection", () => {
       const out = validateResearchEvidenceCacheValue(value, [source], ["personal"]);
       validateResearchSectionCoverage(out.findings, [source]); return out;
     };
-    await expect(repairResearchCitation(raw, source, ["personal"], "context-a", h.access)).rejects.toThrow("inside their claimed section");
+    const failed = await repairResearchCitation(raw, source, ["personal"], "context-a", h.access);
+    expect(failed.findings).toEqual([]);
+    expect(failed.evidenceFailures?.[0].reason).toContain("validation_failure");
+    expect(failed.evidenceFailures?.[0].reason).toContain("inside their claimed section");
     expect(h.select).toHaveBeenCalledTimes(1);
   });
 });
@@ -148,5 +156,84 @@ describe("same-contract raw quote failure salvage", () => {
     expect(sameContextQuoteFailure([malformed], hash, item, ["personal"])).toBeNull();
     const wrongReason = record(); wrongReason.value.reason = "Missing source coverage";
     expect(sameContextQuoteFailure([wrongReason], hash, item, ["personal"])).toBeNull();
+  });
+});
+
+describe("verified source-scoped terminal grounding failures", () => {
+  async function failureFixture() {
+    const h = harness(); h.select.mockResolvedValueOnce({ "fixed-prompt-measurement": { passageId: 0, supportsCore: false } });
+    const value = await repairResearchCitation(grade(), item, ["personal"], "context-a", h.access);
+    const failure = value.evidenceFailures![0], receipt = h.receipts.get(failure.receiptId);
+    return { h, value, failure, receipt };
+  }
+
+  it("requires a rehashed receipt and exactly one assessment or verified failure per input", async () => {
+    const { value, failure, receipt } = await failureFixture();
+    expect(() => validateResearchEvidenceCacheValue(value, [item], ["personal"])).toThrow("not verified");
+    const verified = await verifyResearchEvidenceFailure(failure, item, ["personal"], "context-a", receipt);
+    expect(validateResearchEvidenceCacheValue(value, [item], ["personal"], [verified])).toEqual(value);
+    const valid = grade(); valid.findings[0].evidence = researchQuotePassages(item.content)[0].text;
+    expect(() => validateResearchEvidenceCacheValue({ ...value, findings: valid.findings }, [item], ["personal"], [verified])).toThrow();
+    expect(() => validateResearchEvidenceCacheValue({ findings: [], evidenceFailures: [failure, failure] }, [item], ["personal"], [verified])).toThrow();
+    expect(() => validateResearchEvidenceCacheValue(value, [item, { ...item, id: "missing" }], ["personal"], [verified])).toThrow("every input");
+    expect(() => validateResearchEvidenceCacheValue(value, [item, item], ["personal"], [verified])).toThrow("unique source");
+    for (const changed of [{ ...receipt, state: "started" }, { ...receipt, bodyHash: "forged" }, { ...receipt, gradeHash: "forged" }, { ...receipt, rawGrade: { findings: [] } }])
+      await expect(verifyResearchEvidenceFailure(failure, item, ["personal"], "context-a", changed)).rejects.toThrow();
+    await expect(verifyResearchEvidenceFailure(failure, { ...item, content: item.content + " changed" }, ["personal"], "context-a", receipt)).rejects.toThrow();
+    await expect(verifyResearchEvidenceFailure(failure, item, ["personal"], "different-context", receipt)).rejects.toThrow();
+    await expect(verifyResearchEvidenceFailure({ ...failure, reason: "invented" }, item, ["personal"], "context-a", receipt)).rejects.toThrow();
+  });
+
+  it("preserves an old failed receipt's same-hash raw grade without another request", async () => {
+    const { h, value, failure, receipt } = await failureFixture();
+    delete receipt.rawGrade;
+    h.receipts.set(failure.receiptId, receipt);
+    expect(await repairResearchCitation(grade(), item, ["personal"], "context-a", h.access)).toEqual(value);
+    expect(h.receipts.get(failure.receiptId).rawGrade).toEqual(grade());
+    expect(h.select).toHaveBeenCalledTimes(1);
+  });
+
+  it("continues valid neighbors and caches terminal failure coverage without a synthetic grade or repeat", async () => {
+    const h = harness(), cache = new Map<string, unknown>();
+    const context: EvidenceCacheContext = { teamId: "team", model: "model", promptVersion: "v26", system: "same", audience: {}, selectionViewVersion: "v1", selectionAudience: {}, schemaForItem: id => ({ id }) };
+    const other = { ...item, id: "source-b" }, added = { ...item, id: "source-c" };
+    h.select.mockResolvedValueOnce({ "fixed-prompt-measurement": { passageId: 0, supportsCore: false } });
+    const generated: string[][] = [];
+    const access = {
+      context, read: async (id: string) => cache.get(id) ?? null,
+      write: async (id: string, value: unknown) => { cache.set(id, value); },
+      discard: async (id: string) => { cache.delete(id); },
+      validate: async (value: unknown, items: EvidenceCacheInput[]) => {
+        const verified = [];
+        for (const failure of researchEvidenceFailures(value)) {
+          const source = items.find(source => source.id === failure.itemId)!;
+          verified.push(await verifyResearchEvidenceFailure(failure, source, ["personal"], await researchEvidenceItemCacheId(context, source), h.receipts.get(failure.receiptId)));
+        }
+        return validateResearchEvidenceCacheValue(value, items, ["personal"], verified);
+      },
+      generate: async (items: EvidenceCacheInput[]) => {
+        generated.push(items.map(source => source.id));
+        const outputs = [];
+        for (const source of items) {
+          if (source.id === item.id) outputs.push(await repairResearchCitation(grade(source), source, ["personal"], await researchEvidenceItemCacheId(context, source), h.access));
+          else {
+            const raw = grade(source); raw.findings[0].evidence = researchQuotePassages(source.content || "")[0].text;
+            outputs.push(validateResearchEvidenceCacheValue(raw, [source], ["personal"]));
+          }
+        }
+        return { findings: outputs.flatMap(output => output.findings), evidenceFailures: outputs.flatMap(output => output.evidenceFailures || []) };
+      },
+    };
+    const first = await reuseResearchEvidenceItems([item, other], access);
+    expect(first.value.findings.map(finding => finding.itemId)).toEqual([other.id]);
+    expect(first.value.evidenceFailures?.map(failure => failure.itemId)).toEqual([item.id]);
+    expect(first.value.findings[0].score).toBe(95);
+    expect(cache.size).toBe(2);
+    const next = await reuseResearchEvidenceItems([added, other, item], access);
+    expect(generated).toEqual([[item.id, other.id], [added.id]]);
+    expect(next.value.findings.map(finding => finding.itemId)).toEqual([added.id, other.id]);
+    expect(next.value.evidenceFailures).toEqual(first.value.evidenceFailures);
+    expect(next.cacheHits).toBe(2);
+    expect(h.select).toHaveBeenCalledTimes(1);
   });
 });

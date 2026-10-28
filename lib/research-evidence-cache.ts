@@ -2,11 +2,12 @@ import { matchResearchQuote, researchEvidenceSchema, researchHash, validateResea
 import { RESEARCH_POST_MIN_SCORE } from "./research-policy";
 
 export type EvidenceCacheInput = { id: string; content?: string; [key: string]: unknown };
+export type EvidenceFailure = { itemId: string; reason: string; receiptId: string };
 export type CitationRepair = { itemId: string; familyKey: string; original: string; selected: string } & (
   { method: "ordered_omission_to_contiguous_span" | "leading_determiner_to_contiguous_span" }
   | { method: "model_passage_selection"; requestId: string; passageId: number; start: number; end: number; bodyHash: string; gradeHash: string }
 );
-export type EvidenceCacheValue = { findings: ResearchEvidence[]; citationRepairs?: CitationRepair[] };
+export type EvidenceCacheValue = { findings: ResearchEvidence[]; citationRepairs?: CitationRepair[]; evidenceFailures?: EvidenceFailure[] };
 export type EvidenceCacheContext = {
   teamId: string;
   model: string;
@@ -75,9 +76,26 @@ export function canonicalResearchCitation(content: string, evidence: string): st
   return canonicalCitation(content, evidence)?.selected ?? null;
 }
 
-function canonicalEvidenceCacheValue(value: unknown, items: EvidenceCacheInput[], enabledProfileIds: string[], unsupported?: (family: string) => void): EvidenceCacheValue {
+export function researchEvidenceFailures(value: unknown): EvidenceFailure[] {
+  if (!value || typeof value !== "object" || !("evidenceFailures" in value)) return [];
+  if (!Array.isArray(value.evidenceFailures)) throw new Error("Research evidence failures must be verified source records");
+  return value.evidenceFailures.map(failure => {
+    if (!failure || typeof failure !== "object" || Object.keys(failure).sort().join(",") !== "itemId,reason,receiptId"
+      || typeof failure.itemId !== "string" || typeof failure.reason !== "string" || !failure.reason || failure.reason.length > 600
+      || typeof failure.receiptId !== "string" || !/^quote-repair:v1:[a-f0-9]{64}$/.test(failure.receiptId))
+      throw new Error("Research evidence failures must be verified source records");
+    return { itemId: failure.itemId, reason: failure.reason, receiptId: failure.receiptId };
+  });
+}
+
+function canonicalEvidenceCacheValue(value: unknown, items: EvidenceCacheInput[], enabledProfileIds: string[], unsupported?: (family: string) => void, verifiedFailures: EvidenceFailure[] = []): EvidenceCacheValue {
+  if (new Set(items.map(item => item.id)).size !== items.length) throw new Error("Research evidence inputs must have unique source IDs");
   const output = researchEvidenceSchema.parse(value);
-  const findings = validateResearchEvidenceCoverage(output.findings, items.map(item => item.id));
+  const failures = researchEvidenceFailures(value), failureIds = new Set(failures.map(failure => failure.itemId));
+  if (failureIds.size !== failures.length || failures.some(failure => !items.some(item => item.id === failure.itemId)
+    || !verifiedFailures.some(verified => verified.itemId === failure.itemId && verified.reason === failure.reason && verified.receiptId === failure.receiptId)))
+    throw new Error("Research evidence failure receipt was not verified for this source context");
+  const findings = validateResearchEvidenceCoverage(output.findings, items.filter(item => !failureIds.has(item.id)).map(item => item.id));
   validateResearchEvidenceProfiles(findings, enabledProfileIds);
   const bodies = new Map(items.map(item => [item.id, item.content]));
   const repairs: CitationRepair[] = [];
@@ -120,11 +138,11 @@ function canonicalEvidenceCacheValue(value: unknown, items: EvidenceCacheInput[]
         repairs.push({ itemId: primary.itemId, familyKey: idea.familyKey, original: repair.original, selected: repair.selected, method: verified.method });
     }
   }
-  return repairs.length ? { ...output, citationRepairs: repairs } : output;
+  return { ...output, ...(repairs.length ? { citationRepairs: repairs } : {}), ...(failures.length ? { evidenceFailures: failures } : {}) };
 }
 
-export function validateResearchEvidenceCacheValue(value: unknown, items: EvidenceCacheInput[], enabledProfileIds: string[]): EvidenceCacheValue {
-  return canonicalEvidenceCacheValue(value, items, enabledProfileIds);
+export function validateResearchEvidenceCacheValue(value: unknown, items: EvidenceCacheInput[], enabledProfileIds: string[], verifiedFailures: EvidenceFailure[] = []): EvidenceCacheValue {
+  return canonicalEvidenceCacheValue(value, items, enabledProfileIds, undefined, verifiedFailures);
 }
 
 export function prepareResearchQuoteRepair(value: unknown, item: EvidenceCacheInput, enabledProfileIds: string[]) {
@@ -145,12 +163,13 @@ function individualResponses(value: unknown) {
   if (!value || typeof value !== "object" || !("findings" in value)) return [];
   const findings = (value as { findings: unknown }).findings;
   const metadata = "citationRepairs" in value ? { citationRepairs: value.citationRepairs } : {};
-  if (Array.isArray(findings)) return findings.flatMap(finding =>
+  const failures = researchEvidenceFailures(value).map(failure => ({ itemId: failure.itemId, value: { findings: [], evidenceFailures: [failure] } }));
+  if (Array.isArray(findings)) return [...findings.flatMap(finding =>
     finding && typeof finding === "object" && typeof finding.itemId === "string"
-      ? [{ itemId: finding.itemId as string, value: { findings: [finding], ...metadata } }] : []);
-  if (findings && typeof findings === "object") return Object.entries(findings).map(([itemId, finding]) => ({
+      ? [{ itemId: finding.itemId as string, value: { findings: [finding], ...metadata } }] : []), ...failures];
+  if (findings && typeof findings === "object") return [...Object.entries(findings).map(([itemId, finding]) => ({
     itemId, value: { findings: { [itemId]: finding }, ...metadata },
-  }));
+  })), ...failures];
   return [];
 }
 
@@ -160,7 +179,7 @@ export async function cacheValidResearchEvidenceItems(
   const candidates = individualResponses(value), counts = new Map<string, number>();
   for (const candidate of candidates) counts.set(candidate.itemId, (counts.get(candidate.itemId) || 0) + 1);
   const inputs = new Map(items.map(item => [item.id, item]));
-  const valid = new Map<string, ResearchEvidence>();
+  const valid = new Map<string, EvidenceCacheValue>();
   for (const candidate of candidates) {
     const item = inputs.get(candidate.itemId);
     if (!item || counts.get(candidate.itemId) !== 1) continue;
@@ -169,7 +188,7 @@ export async function cacheValidResearchEvidenceItems(
     catch { continue; }
     const id = await researchEvidenceItemCacheId(access.context, item);
     await access.write(id, parsed);
-    valid.set(item.id, parsed.findings[0]);
+    valid.set(item.id, parsed);
   }
   return valid;
 }
@@ -185,6 +204,7 @@ export async function reuseResearchEvidenceItems(
   if (new Set(items.map(item => item.id)).size !== items.length)
     throw new Error("Research evidence inputs must have unique source IDs");
   const findings = new Map<string, ResearchEvidence>();
+  const failures = new Map<string, EvidenceFailure>();
   const missing: EvidenceCacheInput[] = [];
   let cacheHits = 0;
   for (const item of items) {
@@ -193,7 +213,8 @@ export async function reuseResearchEvidenceItems(
     if (cached !== null) {
       try {
         const parsed = await access.validate(cached, [item], false);
-        findings.set(item.id, parsed.findings[0]);
+        if (parsed.findings[0]) findings.set(item.id, parsed.findings[0]);
+        if (parsed.evidenceFailures?.[0]) failures.set(item.id, parsed.evidenceFailures[0]);
         cacheHits++;
         continue;
       } catch (error) { await access.discard(id, cached, error); }
@@ -207,7 +228,10 @@ export async function reuseResearchEvidenceItems(
     await cacheValidResearchEvidenceItems(value, missing, access);
     const parsed = await access.validate(value, missing, true);
     for (const finding of parsed.findings) findings.set(finding.itemId, finding);
+    for (const failure of parsed.evidenceFailures || []) failures.set(failure.itemId, failure);
   }
-  const result = await access.validate({ findings: items.map(item => findings.get(item.id)) }, items, true);
+  const result = await access.validate({ findings: items.flatMap(item => findings.has(item.id) ? [findings.get(item.id)!] : []),
+    ...(failures.size ? { evidenceFailures: items.flatMap(item => failures.has(item.id) ? [failures.get(item.id)!] : []) } : {}),
+  }, items, true);
   return { value: result, cacheHits };
 }
