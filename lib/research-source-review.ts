@@ -11,7 +11,12 @@ import { RESEARCH_SOURCE_REVIEW_VERSION, RESEARCH_SOURCE_REVIEW_INSTRUCTIONS, re
 export { RESEARCH_SOURCE_REVIEW_VERSION } from "./research-source-review-model";
 export type ResearchSourceReviewInput = EvidenceCacheInput & { content: string };
 export type ResearchSourceReviewRequest = { model: string; instructions: string; schema: Record<string, unknown>; data: ReturnType<typeof researchSourceReviewAudience> & { items: Array<Record<string, unknown>> } };
-export type ResearchSourceReviewPolicy = { version: string; instructions: string; model?: string };
+export type ResearchSourceReviewPolicy = {
+  version: string; instructions: string; model?: string;
+  sourceSchema?: (source: ResearchSourceReviewSource, profileIds: string[]) => Record<string, unknown>;
+  requestMetadata?: (source: ResearchSourceReviewSource) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  normalize?: (raw: unknown, sources: ResearchSourceReviewSource[], profileIds: string[]) => ResearchSourceReviewResult | Promise<ResearchSourceReviewResult>;
+};
 export type SourceReviewMultiProof = ResearchSourceReviewProof & { reviewManifestId: string };
 export type SourceReviewEvidenceValue = EvidenceCacheValue & { sourceReviewManifestIds: string[]; multiProofs: SourceReviewMultiProof[]; sourceReviewDiagnostics: Array<ResearchSourceReviewDiagnostic & { reviewManifestId: string }> };
 export type ResearchSourceReviewAccess = Pick<ResearchCoverageAccess, "read" | "claim" | "save" | "writeImmutable" | "budget" | "now"> & {
@@ -77,8 +82,13 @@ export async function reviewResearchSources(items: ResearchSourceReviewInput[], 
     if (!parent && !failure) throw new Error("Source review requires a valid covered parent or verified source failure");
     const passages = researchSourceReviewPassages(source.content), catalogSource: ResearchSourceReviewSource = { ...source, passages };
     const { content: _content, excerpt: _excerpt, publicText: _publicText, sourceSections: _sections, ...metadata } = source;
+    const extraMetadata = policy.requestMetadata ? await policy.requestMetadata(catalogSource) : {};
+    if (!extraMetadata || typeof extraMetadata !== "object" || Array.isArray(extraMetadata)) throw new Error("Source review policy metadata must be an object");
+    const protectedKeys = new Set([...Object.keys(source), "id", "content", "excerpt", "publicText", "passages", "sourceSections"]);
+    if (Object.keys(extraMetadata).some(key => protectedKeys.has(key))) throw new Error("Source review policy metadata cannot shadow captured source fields");
     const request: ResearchSourceReviewRequest = { model: policy.model ?? access.context.model, instructions: policy.instructions,
-      schema: researchSourceReviewSchemaForItems([source.id], profileIds), data: { ...view, items: [{ ...metadata, passages }] } };
+      schema: policy.sourceSchema ? policy.sourceSchema(catalogSource, profileIds) : researchSourceReviewSchemaForItems([source.id], profileIds),
+      data: { ...view, items: [{ ...metadata, passages, ...extraMetadata }] } };
     const parentValue: EvidenceCacheValue = { findings: parent ? [parent] : [], ...(failure ? { evidenceFailures: [failure.failure] } : {}),
       ...(base.citationRepairs?.some(repair => repair.itemId === source.id) ? { citationRepairs: base.citationRepairs.filter(repair => repair.itemId === source.id) } : {}) };
     const bodyHash = await researchHash(source.content), baseCoveredHash = await researchHash(stable(parentValue));
@@ -102,7 +112,30 @@ export async function reviewResearchSources(items: ResearchSourceReviewInput[], 
     if (receipt.state === "indeterminate" && receipt.completedAt - receipt.startedAt < 120_000) throw new Error("Source review indeterminate receipt has no expired claim");
     return receipt;
   }
-  async function normalize(item: Work, raw: unknown): Promise<ResearchSourceReviewResult> { return normalizeResearchSourceReview(raw, [item.catalogSource], profileIds); }
+  async function normalize(item: Work, raw: unknown): Promise<ResearchSourceReviewResult> {
+    if (!policy.normalize) return normalizeResearchSourceReview(raw, [item.catalogSource], profileIds);
+    const result = await policy.normalize(raw, [item.catalogSource], profileIds);
+    if (!result || !Array.isArray(result.findings) || !Array.isArray(result.proofs) || !Array.isArray(result.diagnostics)) throw new Error("Source review policy returned an invalid result");
+    const catalogHash = await researchHash(json(item.catalogSource.passages));
+    for (const proof of result.proofs) {
+      if (proof.itemId !== item.source.id || proof.bodyHash !== item.bodyHash || proof.catalogHash !== catalogHash
+        || !Array.isArray(proof.evidencePassageIds) || new Set(proof.evidencePassageIds).size !== proof.evidencePassageIds.length || !Array.isArray(proof.passages)) throw new Error("Source review policy proof does not match its own captured source");
+      const selected = proof.evidencePassageIds.map(id => item.catalogSource.passages[id]);
+      if (selected.some(passage => !passage?.selectable || passage.text !== item.source.content.slice(passage.start, passage.end))
+        || stable(proof.passages) !== stable(selected.map(({ passageId, start, end, text }) => ({ passageId, start, end, text })))) throw new Error("Source review policy proof has a nonliteral catalog passage");
+    }
+    for (const finding of result.findings) {
+      if (finding.itemId !== item.source.id) throw new Error("Source review policy returned another source's finding");
+      const checked = researchEvidenceSchema.parse({ findings: [finding] }).findings[0];
+      validateResearchEvidenceProfiles([checked], profileIds);
+      if (checked.score !== finding.score || checked.qualificationRubric !== finding.qualificationRubric) throw new Error("Source review policy changed the categorical score");
+      if (finding.score < RESEARCH_POST_MIN_SCORE) continue;
+      const proof = result.proofs.find(proof => proof.familyKey === finding.familyKey && stable(proof.passages.map(passage => passage.text)) === stable(finding.supportingEvidence));
+      if (!proof?.passages.length || finding.evidence !== proof.passages[0].text
+        || validateResearchEvidence([checked], [item.source]).length !== 1) throw new Error("Passing source review policy frame has no own-source citation anchor");
+    }
+    return result;
+  }
   async function completed(item: Work, receipt: Receipt) {
     if (receipt.state !== "completed") return null;
     if (receipt.rawHash !== await researchHash(json(receipt.raw))) throw new Error("Source review raw response hash changed");

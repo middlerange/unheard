@@ -1494,6 +1494,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "kind": "web",
     "pageMode": "article",
     "articleSectionHeading": "About dynamic prospecting",
+    "freeArticleFallback": true,
     "category": "research",
     "enabled": true,
     "priority": 1,

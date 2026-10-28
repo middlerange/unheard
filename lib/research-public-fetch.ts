@@ -14,16 +14,24 @@ function restrictedUrl(url: URL) {
     || [...url.searchParams.keys()].some(key => /^(?:access_token|auth(?:_token)?|authorization|api_key|key|token|password|session(?:id)?|signature|sig)$/i.test(key));
 }
 
+function exactSectionWatch(source: ResearchSourceSeed) {
+  return source.kind === 'web' && source.pageMode === 'article' && source.freeArticleFallback === true && !source.feedUrl
+    && (source.articleSectionHeading !== undefined) !== (source.articleTimestampRange !== undefined);
+}
+
 export function canUseFreePublicWatchFetch(source: ResearchSourceSeed, error: unknown, allowedHosts?: Set<string>) {
   if (source.kind !== 'web' || source.pageMode !== 'article' || !process.env.TREG_TOKEN || error instanceof ResearchRateLimitError || error instanceof ResearchArticleSectionError
-    || error instanceof Error && /\bHTTP (?:401|402|429)\b|Source redirect rejected|outside the approved|Only public HTTPS/.test(error.message)) return false;
+    || (source.articleSectionHeading !== undefined || source.articleTimestampRange !== undefined) && !exactSectionWatch(source)
+    || error instanceof Error && (/\bHTTP (?:401|402|429)\b|outside the approved|Only public HTTPS/.test(error.message)
+      || /Source redirect rejected/.test(error.message) && !exactSectionWatch(source))) return false;
   try { return !restrictedUrl(assertPublicResearchUrl(source.url, allowedHosts ?? sourceArticleHosts(source))); }
   catch { return false; }
 }
 
 export async function fetchFreePublicWatchHtml(source: ResearchSourceSeed, allowedHosts?: Set<string>) {
   const hosts = allowedHosts ?? sourceArticleHosts(source), target = assertPublicResearchUrl(source.url, hosts), token = process.env.TREG_TOKEN;
-  if (!token || source.kind !== 'web' || source.pageMode !== 'article' || restrictedUrl(target))
+  if (!token || source.kind !== 'web' || source.pageMode !== 'article' || restrictedUrl(target)
+    || (source.articleSectionHeading !== undefined || source.articleTimestampRange !== undefined) && !exactSectionWatch(source))
     throw new Error('Free public fetch is unavailable for this source');
   const requested = canonicalResearchUrl(target.href);
   const headers: Record<string, string> = {
@@ -63,7 +71,8 @@ export async function fetchFreePublicWatchHtml(source: ResearchSourceSeed, allow
     throw new Error('Free public fetch did not return one successful publisher HTML result');
   try {
     const returned = assertPublicResearchUrl(result.url, hosts), final = assertPublicResearchUrl(result.final_url, hosts);
-    if (canonicalResearchUrl(returned.href) !== requested || restrictedUrl(returned) || restrictedUrl(final)) throw new Error('Rejected result');
+    if (canonicalResearchUrl(returned.href) !== requested || exactSectionWatch(source) && canonicalResearchUrl(final.href) !== requested
+      || restrictedUrl(returned) || restrictedUrl(final)) throw new Error('Rejected result');
   } catch { throw new Error('Free public fetch did not return the requested public page on approved source domains'); }
   const body = articleResearchText(result.text), title = articleResearchTitle(result.text);
   if (!/<(?:html|main|article)\b/i.test(result.text) || body.trim().length < 500

@@ -9,6 +9,7 @@ import { repairResearchCitation, RESEARCH_QUOTE_REPAIR_INSTRUCTIONS, sameContext
 import { coverResearchEvidence, ResearchCoveragePending, RESEARCH_COVERAGE_VERSION, type ResearchCoverageAccess } from "./research-coverage";
 import { reviewResearchSources, ResearchSourceReviewPending, RESEARCH_SOURCE_REVIEW_VERSION, type ResearchSourceReviewRequest } from "./research-source-review";
 import { RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS } from "./research-source-review-model";
+import { RESEARCH_SOURCE_DEPTH_VERSION, RESEARCH_SOURCE_DEPTH_INSTRUCTIONS, researchSourceDepthSchema, researchSourceDepthRequestMetadata, normalizeResearchSourceDepth } from "./research-source-depth-model";
 import { researchFindingDates, researchItemSignalKind } from "./research-dates";
 import { getDraftResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
 import { hasUsablePewResearchBody, isPewResearchSource } from "./research-pew";
@@ -53,6 +54,7 @@ import {
 import {
   callResearchModel,
   evidenceJsonSchemaForItems,
+  normalizeResearchSectionChecks,
   RESEARCH_MODEL,
   RESEARCH_PROMPT_VERSION,
   RESEARCH_SCREEN_BATCH_SIZE,
@@ -1055,10 +1057,13 @@ async function baseCachedModel(
     for (let start = 0; start < sources.length; start += concurrency) {
       const results = await Promise.allSettled(sources.slice(start, start + concurrency).map(async item => {
         let raw = await priorQuoteGrade(item);
-        if (raw === null) raw = (await callResearchModel(
-          system, { ...selectionAudience, items: [item] },
-          evidenceJsonSchemaForItems([item.id], enabledProfileIds, { sectionCoverage: true }), outputTokens, usage,
-        )).value;
+        if (raw === null) {
+          const sectionIds = researchSourceSections({ content: typeof item.content === "string" ? item.content : null }).sourceSections.map(section => section.id);
+          raw = normalizeResearchSectionChecks((await callResearchModel(
+            system, { ...selectionAudience, items: [item] },
+            evidenceJsonSchemaForItems([item.id], enabledProfileIds, { sectionCoverage: true, sectionIds }), outputTokens, usage,
+          )).value, [item]);
+        }
         let output: EvidenceCacheValue;
         try { output = await validateReusable(raw, [item]) as EvidenceCacheValue; }
         catch (error) {
@@ -1165,7 +1170,18 @@ async function cachedModel(
       version: RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, instructions: RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS,
     });
     await recordPhase(activeReviewPhase.name, activeReviewPhase.version, [], checked.manifestIds, false);
-    return checked.value;
+    activeReviewPhase = { name: "source-depth", version: RESEARCH_SOURCE_DEPTH_VERSION };
+    const expanded = await reviewResearchSources(sources, checked.value, reviewAccess, {
+      version: RESEARCH_SOURCE_DEPTH_VERSION, instructions: RESEARCH_SOURCE_DEPTH_INSTRUCTIONS,
+      sourceSchema: researchSourceDepthSchema,
+      requestMetadata: async source => {
+        const { groups, depth } = await researchSourceDepthRequestMetadata(source);
+        return { groups, depth };
+      },
+      normalize: normalizeResearchSourceDepth,
+    });
+    await recordPhase(activeReviewPhase.name, activeReviewPhase.version, [], expanded.manifestIds, false);
+    return expanded.value;
   } catch (error) {
     if (error instanceof ResearchSourceReviewPending) await recordPhase(activeReviewPhase.name, activeReviewPhase.version, error.planIds, error.manifestIds, true);
     else if (error instanceof ResearchCoveragePending) await recordPhase("coverage", RESEARCH_COVERAGE_VERSION, error.planIds, error.manifestIds, true);

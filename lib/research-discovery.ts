@@ -38,7 +38,9 @@ export async function fetchDiscoveredResearchArticle(
     try { html = await fetchResearchText(target.url, hosts); }
     catch (error) {
       const fallbackSource: ResearchSourceSeed = { ...candidateSource, kind: "web", pageMode: "article" };
-      if (source.kind !== "rss" || !source.feedUrl || !source.freeArticleFallback || !canUseFreePublicWatchFetch(fallbackSource, error, hosts)) throw error;
+      const approvedRss = source.kind === "rss" && Boolean(source.feedUrl) && source.freeArticleFallback;
+      const approvedSection = source.kind === "web" && source.pageMode === "article" && hasConfiguredChapter && source.freeArticleFallback;
+      if (!(approvedRss || approvedSection) || !canUseFreePublicWatchFetch(fallbackSource, error, hosts)) throw error;
       html = await fetchFreePublicWatchHtml(fallbackSource, hosts);
       retrievalNote = PUBLIC_FETCH_RETRIEVAL_NOTE;
     }
@@ -230,9 +232,13 @@ export async function collectDiscoveredResearchSource(
   assertResearchArticleSectionWatch(source);
   if (source.kind === "web" && source.pageMode === "article") {
     const target = { url: source.url, title: source.name };
-    try { return { items: [await fetchDiscoveredResearchArticle(source, target, windowEnd)], warning: null }; }
+    try {
+      const item = await fetchDiscoveredResearchArticle(source, target, windowEnd);
+      return { items: [item], warning: item.retrievalNote ?? null };
+    }
     catch (error) {
-      if (error instanceof ResearchArticleSectionError || isPewResearchSource(source) || !canUseFreePublicWatchFetch(source, error)) throw error;
+      if (source.articleSectionHeading !== undefined || source.articleTimestampRange !== undefined
+        || error instanceof ResearchArticleSectionError || isPewResearchSource(source) || !canUseFreePublicWatchFetch(source, error)) throw error;
       const html = await fetchFreePublicWatchHtml(source);
       const item = await fetchDiscoveredResearchArticle(source, target, windowEnd, html);
       return { items: [{ ...item, retrievalNote: PUBLIC_FETCH_RETRIEVAL_NOTE }], warning: PUBLIC_FETCH_RETRIEVAL_NOTE };

@@ -3,8 +3,9 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reviewResearchSources, ResearchSourceReviewPending, type ResearchSourceReviewAccess, type ResearchSourceReviewInput, type ResearchSourceReviewRequest } from "./research-source-review";
-import { RESEARCH_SOURCE_REVIEW_INSTRUCTIONS, researchSourceReviewPassages } from "./research-source-review-model";
+import { reviewResearchSources, ResearchSourceReviewPending, type ResearchSourceReviewAccess, type ResearchSourceReviewInput, type ResearchSourceReviewRequest, type ResearchSourceReviewPolicy } from "./research-source-review";
+import { RESEARCH_SOURCE_REVIEW_INSTRUCTIONS, researchSourceReviewPassages, normalizeResearchSourceReview } from "./research-source-review-model";
+import { RESEARCH_SOURCE_DEPTH_VERSION, RESEARCH_SOURCE_DEPTH_INSTRUCTIONS, researchSourceDepthSchema, researchSourceDepthRequestMetadata, normalizeResearchSourceDepth } from "./research-source-depth-model";
 import { ResearchCoveragePending } from "./research-coverage";
 import { evidenceJsonSchemaForItems, researchEvidenceSchema, researchHash } from "./research-model";
 import { researchEvidenceItemCacheId, type EvidenceCacheContext, type EvidenceCacheValue } from "./research-evidence-cache";
@@ -77,6 +78,58 @@ describe("source-led whole-capture review with real SQLite checkpoints", () => {
     const item=source("policy"),h=await harness();
     await reviewResearchSources([item],baseGrade(item),h.access);
     expect((await h.records("research-source-review-plan:"))[0].id).toBe("research-source-review-plan:v1:7685a0d73c641df63ff512c7b367f322fa64df2a0762279a8b6cdfd2715fa792");
+  });
+  it("uses grouped policy hooks with one provider call and preserves both earlier policy chains on resume", async () => {
+    const item={...source("depth-chain"),publishedAt:123456,discoveredAt:456789},h=await harness(),base=baseGrade(item);
+    const first=await reviewResearchSources([item],base,h.access);
+    const v2={version:"fixture-consistency-v2",instructions:"Inspect distinct supported handoff decisions."};
+    h.generate.mockImplementation(async request=>rawReview(request,"consistency-family"));
+    const second=await reviewResearchSources([item],first.value,h.access,v2),before=JSON.stringify(second.value);
+    const sourceSchema=vi.fn(researchSourceDepthSchema),requestMetadata=vi.fn(async (captured:Parameters<typeof researchSourceDepthRequestMetadata>[0])=>{
+      const {groups,depth}=await researchSourceDepthRequestMetadata(captured);return {groups,depth};
+    }),normalize=vi.fn(normalizeResearchSourceDepth);
+    const policy:ResearchSourceReviewPolicy={version:RESEARCH_SOURCE_DEPTH_VERSION,instructions:RESEARCH_SOURCE_DEPTH_INSTRUCTIONS,sourceSchema,requestMetadata,normalize};
+    h.generate.mockImplementation(async request=>{
+      const captured=request.data.items[0],ids=(captured.passages as ReturnType<typeof researchSourceReviewPassages>).filter(passage=>passage.selectable).map(passage=>passage.passageId);
+      expect(captured).not.toHaveProperty("content");expect(captured.groups).toEqual({});expect(captured.depth).toMatchObject({version:policy.version});
+      return {findings:{[item.id]:{wholeSource:{...frame([ids[0],ids.at(-1)!],"depth-compound"),additionalIdeas:[]},groups:{}}}};
+    });
+    const third=await reviewResearchSources([item],second.value,h.access,policy);
+    expect(h.generate).toHaveBeenCalledTimes(3);expect(sourceSchema).toHaveBeenCalledTimes(1);expect(requestMetadata).toHaveBeenCalledTimes(1);expect(normalize).toHaveBeenCalled();
+    expect(JSON.stringify(second.value)).toBe(before);expect(third.manifestIds).toHaveLength(3);
+    expect(third.value.multiProofs.slice(0,second.value.multiProofs.length)).toEqual(second.value.multiProofs);
+    expect(third.value.multiProofs.at(-1)).toMatchObject({familyKey:"depth-compound",depthVersion:RESEARCH_SOURCE_DEPTH_VERSION,groupId:null});
+    const claims=(value:EvidenceCacheValue)=>{const {itemId:_id,additionalIdeas,sectionChecks:_checks,...primary}=value.findings[0];return [primary,...(additionalIdeas||[])];};
+    for(const prior of claims(second.value))expect(claims(third.value).find(idea=>idea.familyKey===prior.familyKey)).toEqual(prior);
+    const plan=(await h.records("research-source-review-plan:")).find((row:{value:{version:string}})=>row.value.version===policy.version)!.value;
+    expect(plan.request.schema).toEqual(researchSourceDepthSchema(plan.catalogSource,["personal","company"]));
+    expect(plan.catalogSource).not.toHaveProperty("groups");expect(plan.catalogSource).not.toHaveProperty("depth");
+    expect(plan.catalogSource).toMatchObject({content:item.content,publishedAt:item.publishedAt,discoveredAt:item.discoveredAt});
+    expect(plan.fullSourceHash).toBe(await researchHash(JSON.stringify(researchSourceSections(item))));
+    const repeatedFirst=await reviewResearchSources([item],base,h.access),repeatedSecond=await reviewResearchSources([item],repeatedFirst.value,h.access,v2);
+    expect(await reviewResearchSources([item],repeatedSecond.value,h.access,policy)).toEqual(third);expect(h.generate).toHaveBeenCalledTimes(3);
+  });
+  it("rejects policy metadata shadowing even when a protected value is unchanged", async () => {
+    const item=source("protected"),h=await harness();
+    for(const key of [...Object.keys(item),"excerpt","publicText","passages","sourceSections"]){
+      await expect(reviewResearchSources([item],baseGrade(item),h.access,{version:"fixture-metadata",instructions:"Inspect source.",requestMetadata:()=>({[key]:(item as Record<string,unknown>)[key]})})).rejects.toThrow("cannot shadow");
+    }
+    expect(h.generate).not.toHaveBeenCalled();expect(await h.records("research-source-review-plan:")).toEqual([]);
+  });
+  it("does not trust custom normalizers to bypass profile, score or literal source-proof validation", async () => {
+    for(const corrupt of ["source","profile","score","proof"]){
+      const item=source(`invalid-callback-${corrupt}`),h=await harness();
+      const result=await reviewResearchSources([item],baseGrade(item),h.access,{version:`fixture-${corrupt}`,instructions:"Inspect source.",normalize:async(raw,sources,profiles)=>{
+        const normalized=await normalizeResearchSourceReview(raw,sources,profiles);
+        if(corrupt==="source")normalized.findings[0].itemId="another-source";
+        if(corrupt==="profile")delete normalized.findings[0].profileChecks!.company;
+        if(corrupt==="score")normalized.findings[0].score=100;
+        if(corrupt==="proof")normalized.proofs[0].passages[0].text="A fabricated passage that does not occur in this source.";
+        return normalized;
+      }});
+      expect(result.value.findings).toEqual(baseGrade(item).findings);expect(result.value.multiProofs).toEqual([]);
+      expect((await h.read(result.manifestIds[0])).terminalState).toBe("failed");expect(h.generate).toHaveBeenCalledTimes(1);
+    }
   });
   it("chains a distinct policy once while preserving v1 claims, dates, proofs and diagnostics", async () => {
     const item={...source("policy-chain"),publishedAt:123456,discoveredAt:456789},base=baseGrade(item),h=await harness();

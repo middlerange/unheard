@@ -128,9 +128,12 @@ describe('research source selection', () => {
 });
 
 
-it('restricts bounded feed hydration and free article fallback to the two verified publishers', () => {
+it('restricts feed hydration and free fetch to their reviewed publisher and section watches', () => {
   const ids = ['google-deepmind-research', 'openai-news'];
   expect(RESEARCH_SOURCE_SEEDS.filter(source => source.hydratePublishedWindowOnly).map(source => source.id).sort()).toEqual(ids);
-  expect(RESEARCH_SOURCE_SEEDS.filter(source => source.freeArticleFallback).map(source => source.id).sort()).toEqual(ids);
+  expect(RESEARCH_SOURCE_SEEDS.filter(source => source.freeArticleFallback).map(source => source.id).sort()).toEqual(['google-ads-dynamic-prospecting', ...ids]);
+  expect(RESEARCH_SOURCE_SEEDS.find(source => source.id === 'google-ads-dynamic-prospecting')).toMatchObject({
+    kind: 'web', pageMode: 'article', articleSectionHeading: 'About dynamic prospecting', freeArticleFallback: true,
+  });
   expect(RESEARCH_SOURCE_SEEDS.filter(source => source.trustedArticleHosts?.length).map(source => [source.id, source.trustedArticleHosts])).toEqual([['google-deepmind-research', ['blog.google']]]);
 });

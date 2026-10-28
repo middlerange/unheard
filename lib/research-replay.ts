@@ -11,7 +11,8 @@ import { hasUsablePewResearchBody } from './research-pew';
 import { RESEARCH_POST_MIN_SCORE } from './research-policy';
 import type { EvidenceCacheValue, EvidenceFailure } from './research-evidence-cache';
 import { ResearchCoveragePending, RESEARCH_COVERAGE_VERSION, RESEARCH_WINDOW_SCOPE_INSTRUCTIONS } from './research-coverage';
-import { RESEARCH_SOURCE_REVIEW_PIPELINE_VERSION as RESEARCH_SOURCE_REVIEW_VERSION, RESEARCH_SOURCE_REVIEW_INSTRUCTIONS, RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS, researchSourceReviewSchemaForItems } from './research-source-review-model';
+import { RESEARCH_SOURCE_REVIEW_INSTRUCTIONS, RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS, researchSourceReviewSchemaForItems } from './research-source-review-model';
+import { RESEARCH_SOURCE_DEPTH_PIPELINE_VERSION as RESEARCH_SOURCE_REVIEW_VERSION, RESEARCH_SOURCE_DEPTH_VERSION, RESEARCH_SOURCE_DEPTH_INSTRUCTIONS, researchSourceDepthSchema } from './research-source-depth-model';
 import { RESEARCH_MODEL, RESEARCH_PROMPT_VERSION, RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS,
   RESEARCH_SCREEN_BATCH_SIZE, RESEARCH_EVIDENCE_BATCH_SIZE, RESEARCH_EVIDENCE_OUTPUT_TOKENS, RESEARCH_SECTION_COVERAGE_INSTRUCTIONS, researchHash, researchScreeningSchema,
   researchEvidenceSchema, screeningJsonSchemaForItems, evidenceJsonSchemaForItems, validateResearchScreening,
@@ -82,6 +83,8 @@ async function contractHash() {
     coverageVersion: RESEARCH_COVERAGE_VERSION, coverageScope: RESEARCH_WINDOW_SCOPE_INSTRUCTIONS,
     sourceReviewVersion: RESEARCH_SOURCE_REVIEW_VERSION, sourceReviewInstructions: RESEARCH_SOURCE_REVIEW_INSTRUCTIONS,
     sourceReviewConsistencyVersion: RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, sourceReviewConsistencyInstructions: RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS,
+    sourceDepthVersion: RESEARCH_SOURCE_DEPTH_VERSION, sourceDepthInstructions: RESEARCH_SOURCE_DEPTH_INSTRUCTIONS,
+    sourceDepthSchema: researchSourceDepthSchema({ id: 'item', content: '' }, ['profile']),
     sourceReviewSchema: researchSourceReviewSchemaForItems(['item'], ['profile']),
     screen: RESEARCH_SCREEN_INSTRUCTIONS, evidence: RESEARCH_EVIDENCE_INSTRUCTIONS,
     sectionInstructions: RESEARCH_SECTION_COVERAGE_INSTRUCTIONS, evidenceOutputTokens: RESEARCH_EVIDENCE_OUTPUT_TOKENS,

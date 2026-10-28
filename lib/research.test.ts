@@ -454,18 +454,20 @@ describe("research persistence and team isolation", () => {
         expect(input.items[0]).not.toHaveProperty("content");
         expect(input.items[0]).not.toHaveProperty("excerpt");
         expect(input.items[0].passages.some((passage: { text: string }) => passage.text.includes(quote))).toBe(true);
-        return modelResponseFixture({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ findings: {
-          "audience-item": {
-            claimBasis: "no_useful_core", familyKey: "no-additional-reviewed-core",
-            profileChecks: input.publishingProfiles.map((profile: { id: string }) => ({ profileId: profile.id, fits: false, relevance: 0, reason: "No additional supported reader decision beyond the preserved parent finding." })),
-            qualityComponents: { sourceSupport: "unsupported", usefulDecision: "none", scopeHonesty: "accurately_bounded" },
-            claim: { summary: "No additional supported core.", evidencePassageIds: [], contentAngle: "", whyItMatters: "", limitations: "The accepted parent finding remains unchanged." },
-            additionalIdeas: [],
-          },
-        } }) }] }] });
+        const frame = {
+          claimBasis: "no_useful_core", familyKey: "no-additional-reviewed-core",
+          profileChecks: input.publishingProfiles.map((profile: { id: string }) => ({ profileId: profile.id, fits: false, relevance: 0, reason: "No additional supported reader decision beyond the preserved parent finding." })),
+          qualityComponents: { sourceSupport: "unsupported", usefulDecision: "none", scopeHonesty: "accurately_bounded" },
+          claim: { summary: "No additional supported core.", evidencePassageIds: [], contentAngle: "", whyItMatters: "", limitations: "The accepted parent finding remains unchanged." },
+          additionalIdeas: [],
+        };
+        const source = input.items[0];
+        const assessment = source.depth || source.groups ? { wholeSource: frame, groups: Object.fromEntries(Object.keys(source.groups).map(id => [id, frame])) } : frame;
+        return modelResponseFixture({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ findings: { "audience-item": assessment } }) }] }] });
       }
       sourceCalls++;
       expect(input.items[0].content).toBe(quote.repeat(8));
+      expect(fixtureResearchSchema(request).$defs.sourceAssessment.properties.sectionChecks).toEqual({ type: "object", properties: {}, required: [], additionalProperties: false });
       return modelResponseFixture({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ findings: [{
         itemId: "audience-item", chosenProfileId: "audience-personal", profileFit: "The personal profile explicitly covers distribution; inspect qualified referral traffic rather than treating company onboarding scope as a veto.",
         summary: "Observed search referral behavior", evidence: quote, contentAngle: "Measure qualified search referrals before changing distribution priorities", whyItMatters: "A personal growth practitioner chooses a distribution test", limitations: "Observational study, no causal claim", familyKey: "observed-search-referrals", score: 82,
@@ -482,13 +484,13 @@ describe("research persistence and team isolation", () => {
         if (phase === "before" && queries.some(query => query.params.includes(`rank-progress:${run.id}`)
           && query.params.some(param => typeof param === "string" && param.includes('"nextOffset":1')))) throw new Error("Network connection lost.");
       };
-      await expect(processResearchJob({ operation: "rank", runId: run.id })).rejects.toThrow("Network connection lost");
-      expect({ sourceCalls, reviewCalls }).toEqual({ sourceCalls: 1, reviewCalls: 2 });
+      await expect(finishResearchRankJob(run.id)).rejects.toThrow("Network connection lost");
+      expect({ sourceCalls, reviewCalls }).toEqual({ sourceCalls: 1, reviewCalls: 3 });
       storageFault = undefined;
       await finishResearchRankJob(run.id);
-      expect({ sourceCalls, reviewCalls }).toEqual({ sourceCalls: 1, reviewCalls: 2 });
-      expect(fetcher).toHaveBeenCalledTimes(3);
-      expect(execute({ queries: [{ sql: "SELECT findings_count,cache_hits FROM research_runs WHERE id=?", params: [run.id] }] })[0].results[0]).toMatchObject({ findings_count: 1, cache_hits: 1 });
+      expect({ sourceCalls, reviewCalls }).toEqual({ sourceCalls: 1, reviewCalls: 3 });
+      expect(fetcher).toHaveBeenCalledTimes(4);
+      expect(execute({ queries: [{ sql: "SELECT findings_count,cache_hits FROM research_runs WHERE id=?", params: [run.id] }] })[0].results[0]).toMatchObject({ findings_count: 1, cache_hits: 2 });
       expect((await getRunResearchFindings(team, run.id))[0]).toMatchObject({ score: 82, evidence: quote, family_key: "observed-search-referrals" });
       const saved = execute({ queries: [{ sql: "SELECT * FROM research_runs WHERE id=?", params: [run.id] }] })[0].results[0];
       expect((await getFrozenResearchAudience(saved)).publishingProfiles.find(profile => profile.id === "audience-personal")?.systemPrompt).toBe(personal);

@@ -199,3 +199,90 @@ it('does not invent an extra www alias when an RSS entry uses a trusted article 
   await expect(fetchDiscoveredResearchArticle(rssSource, { url: target }, end)).rejects.toThrow('approved source domains');
   expect(fetcher).toHaveBeenCalledTimes(2);
 });
+
+it('independently retrieves an opted-in public section at its original URL after a blocked redirect', async () => {
+  const sectionSource = { ...source, articleSectionHeading: 'Public steps', freeArticleFallback: true };
+  const originalHtml = `<meta property="article:published_time" content="2025-09-01T10:00:00Z"><main><h1>Original public framework</h1><p>${'Earlier definitions. '.repeat(1000)}</p><h2>Public steps</h2><p>${quote.repeat(12)}</p><h2>Next section</h2><p>Excluded source remainder.</p></main>`;
+  const fetcher = vi.fn(async (input: string | URL, options?: RequestInit) => {
+    if (String(input) === source.url) return new Response(null, { status: 302, headers: { location: 'https://www.google.com/unapproved-redirect' } });
+    expect(String(input)).toBe(endpoint);
+    expect(options).toMatchObject({ redirect: 'manual', headers: { 'X-Treg-Route-Max-Cost': '0', 'X-Treg-Route-Waterfall': '0' } });
+    expect(JSON.parse(String(options?.body)).urls).toEqual([source.url]);
+    return Response.json({ results: [{ ...record(), text: originalHtml }], errors: [] });
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const collection = await collectDiscoveredResearchSource(sectionSource, end - 1, end, new Set(), { deferArticleFetch: true });
+  expect(collection.items[0]).toMatchObject({ url: source.url, title: 'Original public framework — Public steps', contentProvenance: 'public_section',
+    content: `Public steps\n\n${quote.repeat(12)}`, publishedAt: Date.parse('2025-09-01T10:00:00Z'), retrievalNote: expect.stringContaining('free fetch') });
+  expect(collection.warning).toContain('free fetch');
+  expect(fetcher.mock.calls.map(call => String(call[0]))).toEqual([source.url, endpoint]);
+});
+
+it.each([
+  { final_url: `${source.url}/other` },
+  { final_url: `${source.url}?different=1` },
+  { final_url: 'https://www.google.com/unapproved-redirect' },
+  { final_url: 'https://publisher.example/login' },
+  { text: `<main><h1>Sign in to continue</h1><input type="password"><p>${quote.repeat(12)}</p></main>` },
+  { text: `${html()}<aside class="paywall-gate">Restricted.</aside>` },
+])('does not reuse a different final page or gated HTML for an opted-in section: %j', async change => {
+  const sectionSource = { ...source, articleSectionHeading: 'Public steps', freeArticleFallback: true };
+  const fetcher = vi.fn(async (input: string | URL) => String(input) === source.url
+    ? new Response(null, { status: 302, headers: { location: 'https://www.google.com/unapproved-redirect' } })
+    : Response.json({ results: [{ ...record(), ...change }], errors: [] }));
+  vi.stubGlobal('fetch', fetcher);
+  await expect(collectDiscoveredResearchSource(sectionSource, end - 1, end, new Set())).rejects.toThrow('Free public fetch');
+  expect(fetcher.mock.calls.map(call => String(call[0]))).toEqual([source.url, endpoint]);
+});
+
+it.each([401, 402, 429])('does not authorize a section fallback for HTTP%s', async status => {
+  const fetcher = vi.fn(async () => new Response('', { status }));
+  vi.stubGlobal('fetch', fetcher);
+  await expect(collectDiscoveredResearchSource({ ...source, articleSectionHeading: 'Public steps', freeArticleFallback: true }, end - 1, end, new Set()))
+    .rejects.toThrow(`HTTP ${status}`);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+it('does not repeat the free request when the original returned page lacks its configured section', async () => {
+  const fetcher = vi.fn(async (input: string | URL) => String(input) === source.url
+    ? new Response(null, { status: 302, headers: { location: 'https://www.google.com/unapproved-redirect' } })
+    : Response.json({ results: [record()], errors: [] }));
+  vi.stubGlobal('fetch', fetcher);
+  await expect(collectDiscoveredResearchSource({ ...source, articleSectionHeading: 'Missing section', freeArticleFallback: true }, end - 1, end, new Set()))
+    .rejects.toThrow('chapter heading');
+  expect(fetcher.mock.calls.map(call => String(call[0]))).toEqual([source.url, endpoint]);
+  fetcher.mockImplementation(async () => new Response(html()));
+  await expect(collectDiscoveredResearchSource({ ...source, articleSectionHeading: 'Missing section', freeArticleFallback: true }, end - 1, end, new Set()))
+    .rejects.toThrow('chapter heading');
+  expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
+it('retains the redirect block without both explicit fallback approval and an actual section selector', async () => {
+  const fetcher = vi.fn(async () => new Response(null, { status: 302, headers: { location: 'https://www.google.com/unapproved-redirect' } }));
+  vi.stubGlobal('fetch', fetcher);
+  for (const unapproved of [{ ...source, freeArticleFallback: true }, { ...source, articleSectionHeading: 'Public steps' }])
+    await expect(collectDiscoveredResearchSource(unapproved, end - 1, end, new Set())).rejects.toThrow('Source redirect rejected');
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
+it('requires explicit fallback approval for a section even on an ordinary direct403 failure', async () => {
+  const fetcher = vi.fn(async () => new Response('', { status: 403 }));
+  vi.stubGlobal('fetch', fetcher);
+  await expect(collectDiscoveredResearchSource({ ...source, articleSectionHeading: 'Public steps' }, end - 1, end, new Set())).rejects.toThrow('HTTP 403');
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+it('preserves the complete timestamp interval through the opted-in original-page fallback', async () => {
+  const timestampSource = { ...source, freeArticleFallback: true, articleTimestampRange: { start: '0:10:00', end: '0:11:00' } };
+  const selected = `Guest [0:10:00]: ${'The captured explanation stays complete. '.repeat(400).trim()}`;
+  const originalHtml = `<main><h1>Original public framework</h1><p>${selected}</p><p>Host [0:11:00]: Excluded next topic.</p></main>`;
+  const fetcher = vi.fn(async (input: string | URL) => String(input) === source.url
+    ? new Response(null, { status: 302, headers: { location: 'https://www.google.com/unapproved-redirect' } })
+    : Response.json({ results: [{ ...record(), text: originalHtml }], errors: [] }));
+  vi.stubGlobal('fetch', fetcher);
+  const result = await fetchDiscoveredResearchArticle(timestampSource, { url: source.url }, end);
+  expect(result).toMatchObject({ url: source.url, publishedAt: null, contentProvenance: 'public_section', transcriptStatus: 'available', content: selected,
+    retrievalNote: expect.stringContaining('free fetch') });
+  expect(result.content!.length).toBeGreaterThan(14_000);
+  expect(fetcher.mock.calls.map(call => String(call[0]))).toEqual([source.url, endpoint]);
+});

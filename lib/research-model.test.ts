@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import {
   validateResearchEvidenceCoverage, matchResearchQuote, validateResearchScreening, validateResearchEvidence, researchScreeningSchema, screeningJsonSchema, screeningJsonSchemaForItems, researchEvidenceSchema,
   RESEARCH_SCREEN_BATCH_SIZE, openAIResearchOutput, callResearchModel, evidenceJsonSchemaForItems,
-  validateResearchEvidenceProfiles,
+  validateResearchEvidenceProfiles, validateResearchSectionCoverage, normalizeResearchSectionChecks,
 } from "./research-model";
 import { anthropicResearchSchema } from "./research-anthropic";
+import { researchSectionInventory } from "./research-sections";
 
 vi.mock("./research-usage", () => ({
   beginResearchUsage: vi.fn(async () => "test-usage"),
@@ -377,6 +379,69 @@ it("places the supported claim, exact evidence and limitations before the final 
   expect(schema.required).toEqual(["claim", "familyKey", "score", "additionalIdeas"]);
   expect(Object.keys(researchEvidenceSchema.parse({ findings: [finding] }).findings[0])).toEqual(["itemId", ...fields]);
   expect(validateResearchEvidence([{ ...finding, evidence: "Unverified efficacy that the source does not contain." }], items)).toEqual([]);
+});
+
+describe("actual single-source section schema", () => {
+  const { itemId: _itemId, ...keyedFinding } = finding;
+  it("retains byte-identical generic schemas for existing cache contracts", () => {
+    const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    expect(hash(evidenceJsonSchemaForItems(["study"], ["personal", "company"], { sectionCoverage: true }))).toBe("be6c8ca44197aec677fcdea9e691b099a5402513a1d4468c22667cd0f51d45e8");
+    expect(hash(evidenceJsonSchemaForItems(["study", "other"], ["personal", "company"], { sectionCoverage: true }))).toBe("10e4b55ad275dff881ad06892c283dacfdf9309014e03e57a4173a68f480afa6");
+    expect(hash(evidenceJsonSchemaForItems(["study"]))).toBe("3e34ee5ace8e52394c1eedc83faccaa740245e4c1991420acc481fedf5d16295");
+    expect(evidenceJsonSchemaForItems(["study", "other"], undefined, { sectionCoverage: true, sectionIds: [] })).toEqual(evidenceJsonSchemaForItems(["study", "other"], undefined, { sectionCoverage: true }));
+    expect(evidenceJsonSchemaForItems(["study"], undefined, { sectionIds: ["ignored"] })).toEqual(evidenceJsonSchemaForItems(["study"]));
+  });
+  it("retains exact empty object checks through the Anthropic wire conversion", () => {
+    const wire = evidenceJsonSchemaForItems(["study"], ["personal"], { sectionCoverage: true, sectionIds: [] });
+    const converted = anthropicResearchSchema(wire) as typeof wire;
+    expect(converted.$defs.sourceAssessment.properties.sectionChecks).toEqual({ type: "object", properties: {}, required: [], additionalProperties: false });
+    expect(converted.$defs.sectionCheck?.properties).not.toHaveProperty("sectionId");
+    const raw = { findings: { study: { ...keyedFinding, sectionChecks: {} } } }, before = JSON.stringify(raw);
+    const normalized = normalizeResearchSectionChecks(raw, items);
+    expect(normalized).toEqual({ findings: { study: { ...keyedFinding, sectionChecks: [] } } });
+    expect(JSON.stringify(raw)).toBe(before);
+    const valid = researchEvidenceSchema.parse(normalized).findings;
+    expect(validateResearchSectionCoverage(valid, items)).toBe(valid);
+    expect(() => normalizeResearchSectionChecks({ findings: { study: { ...finding, sectionChecks: { invented: { familyKeys: [], notPostworthyReason: "No core." } } } } }, items)).toThrow("every supplied section exactly once");
+  });
+  const content = `Insight 1: First decision\n${"A team documents the observed workflow before changing the requirement. ".repeat(2)}\n\nFinding 2: Second decision\n${"A reviewer checks the stated assumptions before approving a proposed change. ".repeat(2)}`;
+  const sectionIds = researchSectionInventory(content).map(section => section.id);
+  const source = [{ id: "study", content }];
+  const checks = Object.fromEntries(sectionIds.map(sectionId => [sectionId, { familyKeys: [], notPostworthyReason: "No additional decision for this profile." }]));
+  it("pins all actual keys and excludes foreign keys in the provider schema", () => {
+    expect(sectionIds).toHaveLength(2);
+    const converted = anthropicResearchSchema(evidenceJsonSchemaForItems(["study"], ["personal"], { sectionCoverage: true, sectionIds })) as ReturnType<typeof evidenceJsonSchemaForItems>;
+    expect(converted.$defs.sourceAssessment.properties.sectionChecks).toEqual({ type: "object", properties: Object.fromEntries(sectionIds.map(id => [id, { $ref: "#/$defs/sectionCheck" }])), required: sectionIds, additionalProperties: false });
+    expect(converted.$defs.sectionCheck?.required).toEqual(["familyKeys", "notPostworthyReason"]);
+  });
+  it.each([false, true])("normalizes source-keyed and array findings without changing claim/grade fields (array=%s)", array => {
+    const assessment = { ...(array ? finding : keyedFinding), sectionChecks: checks }, raw = { findings: array ? [assessment] : { study: assessment } }, before = JSON.stringify(raw);
+    const normalized = normalizeResearchSectionChecks(raw, source) as { findings: unknown };
+    const expected = { ...(array ? finding : keyedFinding), sectionChecks: sectionIds.map(sectionId => ({ sectionId, ...checks[sectionId] })) };
+    expect(normalized.findings).toEqual(array ? [expected] : { study: expected });
+    expect(JSON.stringify(raw)).toBe(before);
+    expect(validateResearchSectionCoverage(researchEvidenceSchema.parse(normalized).findings, source)).toHaveLength(1);
+  });
+  it.each(["missing", "unknown", "collision"])("rejects %s keyed sections before parsing", kind => {
+    const malformed = structuredClone(checks);
+    if (kind === "missing") delete malformed[sectionIds[0]];
+    if (kind === "unknown") { malformed.invented = malformed[sectionIds[0]]; delete malformed[sectionIds[0]]; }
+    if (kind === "collision") Object.assign(malformed[sectionIds[0]], { sectionId: "foreign" });
+    for (const findings of [[{ ...finding, sectionChecks: malformed }], { study: { ...finding, sectionChecks: malformed } }])
+      expect(() => normalizeResearchSectionChecks({ findings }, source)).toThrow(kind === "collision" ? "override" : "every supplied section exactly once");
+  });
+  it("leaves legacy arrays unchanged and retains server-side duplicate/unknown ID rejection", () => {
+    const legacyChecks = sectionIds.map(sectionId => ({ sectionId, familyKeys: [], notPostworthyReason: "No relevant core." }));
+    const assessment = { ...finding, sectionChecks: legacyChecks };
+    const normalized = normalizeResearchSectionChecks({ findings: [assessment] }, source) as { findings: typeof assessment[] };
+    expect(normalized.findings[0]).toBe(assessment);
+    expect(normalized.findings[0].sectionChecks).toBe(legacyChecks);
+    for (const badId of [sectionIds[0], "unknown"]) {
+      const parsed = researchEvidenceSchema.parse({ findings: [{ ...finding, sectionChecks: legacyChecks.map(check => ({ ...check })) }] }).findings;
+      parsed[0].sectionChecks![1].sectionId = badId;
+      expect(() => validateResearchSectionCoverage(parsed, source)).toThrow("every supplied section exactly once");
+    }
+  });
 });
 
 describe("compact nested claim wire normalization", () => {

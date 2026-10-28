@@ -498,7 +498,33 @@ export const evidenceJsonSchema = {
   additionalProperties: false,
 };
 
-export function evidenceJsonSchemaForItems(itemIds: string[], enabledProfileIds?: string[], options: { sectionCoverage?: boolean } = {}) {
+export function normalizeResearchSectionChecks(raw: unknown, items: Array<{ id: string; content?: string | null }>): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const output = raw as Record<string, unknown>, findings = output.findings;
+  const normalize = (finding: unknown, itemId: unknown) => {
+    if (!finding || typeof finding !== "object" || Array.isArray(finding)) return finding;
+    const assessment = finding as Record<string, unknown>, checks = assessment.sectionChecks;
+    if (checks === undefined || Array.isArray(checks)) return finding;
+    const item = items.find(item => item.id === itemId);
+    if (!item || !checks || typeof checks !== "object") throw new Error("Keyed research section checks require a known source and object");
+    const expected = researchSectionInventory(item.content || "").map(section => section.id);
+    const entries = checks as Record<string, unknown>, keys = Object.keys(entries);
+    if (keys.length !== expected.length || keys.some(key => !expected.includes(key)))
+      throw new Error("Research section checks must assess every supplied section exactly once");
+    return { ...assessment, sectionChecks: expected.map(sectionId => {
+      const check = entries[sectionId];
+      if (!check || typeof check !== "object" || Array.isArray(check) || Object.hasOwn(check, "sectionId"))
+        throw new Error("Keyed research section check must not override its section ID");
+      return { sectionId, ...check };
+    }) };
+  };
+  if (Array.isArray(findings)) return { ...output, findings: findings.map(finding => normalize(finding, finding?.itemId)) };
+  if (findings && typeof findings === "object") return { ...output, findings: Object.fromEntries(Object.entries(findings).map(([id, finding]) => [id, normalize(finding, id)])) };
+  return raw;
+}
+
+export function evidenceJsonSchemaForItems(itemIds: string[], enabledProfileIds?: string[], options: { sectionCoverage?: boolean; sectionIds?: string[] } = {}) {
+  const sectionIds = options.sectionCoverage && itemIds.length === 1 ? options.sectionIds : undefined;
   const { itemId: _itemId, ...properties } = evidenceJsonSchema.properties.findings.items.properties;
   const required = evidenceJsonSchema.properties.findings.items.required.filter(name => name !== "itemId");
   const { summary, evidence, contentAngle, whyItMatters, limitations, ...decisionProperties } = properties;
@@ -517,9 +543,9 @@ export function evidenceJsonSchemaForItems(itemIds: string[], enabledProfileIds?
     $defs: {
       claim: { type: "object", additionalProperties: false, properties: { summary, evidence, contentAngle, whyItMatters, limitations }, required: [...claimFields] },
       ...(options.sectionCoverage ? { sectionCheck: { type: "object", additionalProperties: false, properties: {
-        sectionId: { type: "string" }, familyKeys: { type: "array", items: { type: "string", maxLength: 160 } },
+        ...(sectionIds ? {} : { sectionId: { type: "string" } }), familyKeys: { type: "array", items: { type: "string", maxLength: 160 } },
         notPostworthyReason: { type: "string", maxLength: 600 },
-      }, required: ["sectionId", "familyKeys", "notPostworthyReason"] } } : {}),
+      }, required: [...(sectionIds ? [] : ["sectionId"]), "familyKeys", "notPostworthyReason"] } } : {}),
       profileCheck: { type: "object", additionalProperties: false, properties: {
         profileId: { type: "string", enum: enabledProfileIds || [] }, fits: { type: "boolean" }, relevance: { type: "integer", minimum: 0, maximum: 30 }, reason: { type: "string", maxLength: 600 },
       }, required: ["profileId", "fits", "relevance", "reason"] },
@@ -533,7 +559,9 @@ export function evidenceJsonSchemaForItems(itemIds: string[], enabledProfileIds?
       sourceAssessment: {
         type: "object", additionalProperties: false,
         properties: { ...ideaProperties, additionalIdeas: { type: "array", items: { $ref: "#/$defs/idea" } },
-          ...(options.sectionCoverage ? { sectionChecks: { type: "array", items: { $ref: "#/$defs/sectionCheck" } } } : {}),
+          ...(options.sectionCoverage ? { sectionChecks: sectionIds
+            ? { type: "object", properties: Object.fromEntries(sectionIds.map(id => [id, { $ref: "#/$defs/sectionCheck" }])), required: sectionIds, additionalProperties: false }
+            : { type: "array", items: { $ref: "#/$defs/sectionCheck" } } } : {}),
         },
         required: [...ideaRequired, "additionalIdeas", ...(options.sectionCoverage ? ["sectionChecks"] : [])],
       },
