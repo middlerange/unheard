@@ -4,7 +4,7 @@ import { researchSourceReviewPassages } from './research-source-review-model';
 import {
   RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
   researchSourcePacketMetadata, researchSourcePacketSchema, normalizeResearchSourcePacket,
-  RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS,
+  RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS,
   researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2,
   type ResearchSourcePacket,
 } from './research-source-packet-model';
@@ -215,6 +215,14 @@ describe('explicit original-document research packets', () => {
 });
 
 describe('opt-in structured packet qualification v2', () => {
+  it('keeps reader-decision coverage separate from unchanged relationship and outcome standards',()=>{
+    expect(RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS).toContain('After finding one useful frame, continue inspecting');
+    expect(RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS).toContain('what can be done, how a described method works');
+    expect(RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS).toContain('An inspectable sequence can support a bounded method brief without proof that a customer deployed it');
+    expect(RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS).toContain('at least two distinct configured documents');
+    expect(RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS).toContain('An unsupported bridge cannot qualify');
+    expect(RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS).toContain('There is no acceptance quota');
+  });
   function inference() {
     const idea = frame(); idea.relationshipSupport = 'bounded_inference';
     idea.relationshipExplanation = 'The same-product documents describe complementary operations; their use in one workflow is an editorial connection rather than observed deployment.';

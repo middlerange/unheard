@@ -10,7 +10,7 @@ import { canonicalResearchUrl } from './research-collectors';
 import {
   RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
   researchSourcePacketMetadata, researchSourcePacketSchema, normalizeResearchSourcePacket,
-  RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS,
+  RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS,
   researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2,
   type ResearchSourcePacket,
 } from './research-source-packet-model';
@@ -63,6 +63,7 @@ export function configuredResearchPacketDefinitions(seeds: ResearchSourceSeed[],
 
 type PacketResult = Awaited<ReturnType<typeof normalizeResearchSourcePacket>>;
 export const RESEARCH_SOURCE_PACKET_V2_REVIEW = 'coherent-synthesis-v2';
+export const RESEARCH_SOURCE_PACKET_V3_REVIEW = 'reader-decision-synthesis-v3';
 export const RESEARCH_SOURCE_PACKET_V2_NORMALIZER = 'structured-inference-v2';
 export type ResearchSourcePacketPolicy = {
   version: string; instructions: string; normalizerVersion?: string;
@@ -76,8 +77,8 @@ const defaultPolicy: ResearchSourcePacketPolicy = {
 };
 export function researchSourcePacketPolicy(reviewVersion?: string): ResearchSourcePacketPolicy {
   if (reviewVersion === undefined) return defaultPolicy;
-  if (reviewVersion !== RESEARCH_SOURCE_PACKET_V2_REVIEW) throw new Error('Unknown source packet review policy');
-  return { version: RESEARCH_SOURCE_PACKET_V2_VERSION, instructions: RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS,
+  if (reviewVersion !== RESEARCH_SOURCE_PACKET_V2_REVIEW && reviewVersion !== RESEARCH_SOURCE_PACKET_V3_REVIEW) throw new Error('Unknown source packet review policy');
+  return { version: RESEARCH_SOURCE_PACKET_V2_VERSION, instructions: reviewVersion === RESEARCH_SOURCE_PACKET_V3_REVIEW ? RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS : RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS,
     normalizerVersion: RESEARCH_SOURCE_PACKET_V2_NORMALIZER, qualificationPolicyVersion: RESEARCH_SOURCE_PACKET_V2_VERSION,
     metadata: researchSourcePacketMetadataV2, schema: researchSourcePacketSchemaV2, normalize: normalizeResearchSourcePacketV2 };
 }

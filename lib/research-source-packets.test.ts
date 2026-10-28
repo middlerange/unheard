@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parseResearchAudience } from './research-audience';
 import { researchSelectionAudience, RESEARCH_SELECTION_VIEW_VERSION } from './research-selection-audience';
-import { researchPacketsFromDefinitions, configuredResearchPacketDefinitions, reviewResearchSourcePackets, researchSourcePacketPolicy, RESEARCH_SOURCE_PACKET_V2_REVIEW, ResearchSourcePacketPending, type ResearchPacketAccess } from './research-source-packets';
+import { researchPacketsFromDefinitions, configuredResearchPacketDefinitions, reviewResearchSourcePackets, researchSourcePacketPolicy, researchSourcePacketPolicyContract, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, ResearchSourcePacketPending, type ResearchPacketAccess } from './research-source-packets';
+import { researchHash } from './research-model';
 import type { ResearchSourcePacket } from './research-source-packet-model';
 import type { ResearchSourceSeed } from './research-types';
 
@@ -92,6 +93,27 @@ describe('durable source packet inference', () => {
     expect(v2Plan.normalizerVersion).toBe('structured-inference-v2');expect(v2Plan.packetHash).toBe(v1Plan.packetHash);
     expect(await reviewResearchSourcePackets([packet()], test.access, researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V2_REVIEW))).toEqual(v2);
     expect(await reviewResearchSourcePackets([packet()], test.access)).toEqual(original);expect(test.generate).toHaveBeenCalledTimes(2);
+    const previousPlans = [...test.values.entries()].filter(([id]) => id.startsWith('research-source-packet-plan:')).map(([id,value])=>[id,JSON.stringify(value)]);
+    const v3Policy=researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V3_REVIEW);
+    const v3=await reviewResearchSourcePackets([packet()],test.access,v3Policy);
+    expect(test.generate).toHaveBeenCalledTimes(3);expect(v3.findings).toEqual(v2.findings);expect(v3.packetProofs).toEqual(v2.packetProofs);
+    expect(v3.manifestIds).not.toEqual(v2.manifestIds);
+    const v3Plan=[...test.values.values()].find((value:any)=>value.request?.instructions===v3Policy.instructions) as any;
+    expect(v3Plan).toMatchObject({version:'research-source-packet-v2',normalizerVersion:'structured-inference-v2',packetHash:v1Plan.packetHash});
+    for(const [id,value]of previousPlans)expect(JSON.stringify(test.values.get(id))).toBe(value);
+    expect(await reviewResearchSourcePackets([packet()],test.access,v3Policy)).toEqual(v3);
+    expect(await reviewResearchSourcePackets([packet()],test.access,researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V2_REVIEW))).toEqual(v2);
+    expect(await reviewResearchSourcePackets([packet()],test.access)).toEqual(original);expect(test.generate).toHaveBeenCalledTimes(3);
+  });
+  it('preserves frozen v1/v2 prompt and contract hashes while v3 reuses exactly the v2 protocol', async()=>{
+    const v1=researchSourcePacketPolicy(),v2=researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V2_REVIEW),v3=researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V3_REVIEW);
+    expect(await researchHash(v1.instructions)).toBe('55bdc84f8af507dcf87d34b57c859b465e0e25503ad10740c18d9bb33fc7c172');
+    expect(await researchHash(v2.instructions)).toBe('5b2ef7056250b9d409e40378657dfdbcd67a02b76e119b8f6b289296889c9079');
+    expect(await researchHash(JSON.stringify(researchSourcePacketPolicyContract(RESEARCH_SOURCE_PACKET_V2_REVIEW,16384)))).toBe('b2b30673aa56d9e473871e0cf10b8f423c7c9abd6c1e29d8e6b744231e5d537e');
+    expect(v3.normalize).toBe(v2.normalize);expect(v3.schema).toBe(v2.schema);expect(v3.metadata).toBe(v2.metadata);
+    expect(v3.version).toBe(v2.version);expect(v3.qualificationPolicyVersion).toBe(v2.qualificationPolicyVersion);expect(v3.normalizerVersion).toBe(v2.normalizerVersion);
+    expect(v3.instructions).not.toBe(v2.instructions);expect(researchSourcePacketPolicyContract(RESEARCH_SOURCE_PACKET_V3_REVIEW,16384)).not.toEqual(researchSourcePacketPolicyContract(RESEARCH_SOURCE_PACKET_V2_REVIEW,16384));
+    expect(()=>researchSourcePacketPolicy('reader-decision-synthesis-v4')).toThrow('Unknown source packet review policy');
   });
   it('expires an in-flight claim without repeating inference and keeps its terminal state against a late response', async () => {
     let resolve!: (value: unknown) => void, entered!: () => void;
