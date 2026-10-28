@@ -14,6 +14,7 @@ import type { ResearchDraftContent } from "./research-types";
 import { assertResearchIdentityTargets } from "./research-identity";
 import { RESEARCH_TEXT_PLATFORMS } from "./research-profiles";
 import { getRunResearchFindings } from "./research-finding-snapshots";
+import { researchFindingDates } from "./research-dates";
 
 declare global {
   var __contentHubSlackWorkflow__:
@@ -250,6 +251,9 @@ export function buildSlackReviewPacket(
     limitations: string;
     evidence: string;
     published_at?: number;
+    source_published_at?: number | null;
+    source_discovered_at?: number | null;
+    signal_kind?: string | null;
   },
   snapshotHash: string,
   publication: Array<{
@@ -309,7 +313,8 @@ export function buildSlackReviewPacket(
       },
     });
   }
-  const publishedAt = writing?.sourceContext?.publishedAt || (finding.published_at ? new Date(finding.published_at).toISOString() : null);
+  const sourceDates = researchFindingDates(finding);
+  const publishedAt = writing?.sourceContext?.publishedAt || (sourceDates.publishedAt === null ? null : new Date(sourceDates.publishedAt).toISOString());
   if (publishedAt) {
     const lane = writing?.sourceContext?.signalKind === "evergreen_newly_discovered"
       ? "Newly discovered older source; not a new announcement"
@@ -317,6 +322,12 @@ export function buildSlackReviewPacket(
     blocks.push({
       type: "context",
       elements: [{ type: "plain_text", text: `Original publication: ${publishedAt}\nDiscovery: ${lane}${writing?.sourceContext?.discoveredAt ? ` · first collected ${writing.sourceContext.discoveredAt}` : ""}` }],
+    });
+  } else if (sourceDates.signalKind === "undated_reference") {
+    const discoveredAt = writing?.sourceContext?.discoveredAt || (sourceDates.discoveredAt === null ? null : new Date(sourceDates.discoveredAt).toISOString());
+    blocks.push({
+      type: "context",
+      elements: [{ type: "plain_text", text: `Publication date unknown\nDiscovery: Undated reference; first observation does not establish publication or novelty${discoveredAt ? ` · first collected ${discoveredAt}` : ""}` }],
     });
   }
   const alreadyPublished = new Map(

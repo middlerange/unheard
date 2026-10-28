@@ -3,11 +3,11 @@ import { researchIdentityKey, type ResearchIdentityProfile } from './research-id
 export type ResearchPriorDraft = {
   id: string; runId: string; findingId: string; content: string; createdAt: number;
   status: string; isTest: boolean; familyKey: string; title: string; url: string;
-  publishedAt: number; summary: string; contentAngle: string; evidence: string;
+  publishedAt: number | null; summary: string; contentAngle: string; evidence: string;
 };
 export type ResearchPriorPost = {
   draftId: string; runId: string; createdAt: string; status: string;
-  familyKey: string; title: string; sourceUrl: string; sourcePublishedAt: string;
+  familyKey: string; title: string; sourceUrl: string; sourcePublishedAt: string | null;
   identityGroupIds: string[]; channelIds: string[];
   sourceFact: string; alpha: string | null; readerDecision: string | null;
   findingContentAngle: string; copyExcerpt: string; legacyWithoutEditorial: boolean;
@@ -68,7 +68,7 @@ export function researchNoveltyContext(
       const ledger = targetIdentities.length === 1 ? parsed.editorial : undefined;
       const post: ResearchPriorPost = {
         draftId: draft.id, runId: draft.runId, createdAt: new Date(draft.createdAt).toISOString(), status: draft.status,
-        familyKey: draft.familyKey, title: draft.title, sourceUrl: draft.url, sourcePublishedAt: new Date(draft.publishedAt).toISOString(),
+        familyKey: draft.familyKey, title: draft.title, sourceUrl: draft.url, sourcePublishedAt: draft.publishedAt === null ? null : new Date(draft.publishedAt).toISOString(),
         identityGroupIds: [identity], channelIds, sourceFact: ledger?.sourceFact || draft.evidence || draft.summary,
         alpha: ledger?.alpha || null, readerDecision: ledger?.readerDecision || null,
         findingContentAngle: draft.contentAngle, copyExcerpt: excerpt(copy), legacyWithoutEditorial: !ledger?.readerDecision,

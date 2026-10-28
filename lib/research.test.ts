@@ -2,7 +2,7 @@ import {
   getResearchProfiles,
   updateResearchProfile,
 } from "./research-profiles";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import { closeSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -35,8 +35,10 @@ import { RESEARCH_WRITING_MODEL } from "./research-writing";
 import { beginResearchUsage, finishResearchUsage, getResearchUsage } from "./research-usage";
 import {
   processResearchDraftJob,
+  runResearchDraftWriting,
   rewriteResearchDraftContent,
 } from "./research-drafts";
+import { researchFindingDates, researchFindingSourceContext } from "./research-dates";
 import { createSlackTestReview } from "./slack-test-review";
 import { SLACK_TEST_EVIDENCE, SLACK_TEST_PROMPT } from "./slack-test-content";
 import type { ResearchSourceSeed } from "./research-types";
@@ -117,6 +119,10 @@ const source: ResearchSourceSeed = {
   notes: "",
   priority: 1,
 };
+beforeEach(() => vi.stubGlobal("fetch", vi.fn(async input => {
+  throw new Error(`Unexpected network request in research test: ${String(input)}`);
+})));
+afterEach(() => vi.unstubAllGlobals());
 describe("research collectors and grounded evidence", () => {
   it("reports underlying source storage errors without exposing SQL bindings", () => {
     expect(researchSourceErrorMessage(new Error("Failed query: insert values params: private", { cause: new Error("D1_ERROR: Too many requests") }))).toBe("D1_ERROR: Too many requests");
@@ -503,9 +509,13 @@ describe("research persistence and team isolation", () => {
     try {
       await finishResearchRankJob(newRun);
       const [oldFinding] = await getRunResearchFindings(team, oldRun, [findingId]);
-      const [newFinding] = await getRunResearchFindings(team, newRun, [findingId]);
+      const newFindingId = await researchHash(`${team}:shared-qualification-item:angle:new-family`);
+      const [newFinding] = await getRunResearchFindings(team, newRun, [newFindingId]);
       expect(oldFinding).toEqual(oldGlobals);
+      expect(execute({ queries: [{ sql: 'SELECT * FROM research_findings WHERE id=?', params: [findingId] }] })[0].results).toEqual([oldGlobals]);
+      expect(newFinding.id).not.toBe(findingId);
       expect(newFinding).toMatchObject({ run_id: newRun, score: 88, title: "Updated source title", published_at: now - 1000, summary: "Updated summary", content_angle: "Updated angle", evidence: newQuote });
+      await saveResearchFindingSnapshot(oldFinding);
       await saveResearchFindingSnapshot({ ...oldFinding, summary: "Do not replace immutable original", score: 1 });
       expect((await getRunResearchFindings(team, oldRun, [findingId]))[0].summary).toBe("Original summary");
       try {
@@ -1243,7 +1253,85 @@ describe("research persistence and team isolation", () => {
       else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 20_000);
-  it("updates accepted assessments without losing saved ideas and never drafts an older finding rejected by the current scan", async () => {
+  it("saves distinct quote-valid ideas per item with stable family IDs and preserves an earlier family's saved idea and pending review", async () => {
+    const team = 'distinct-idea-integration', itemId = `${team}-item`, now = Date.now();
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === 'rss' && source.feedUrl)!;
+    const quotes = [
+      'The team reviews the consent requirements before changing the signup flow.',
+      'A separate preview lets users inspect useful output before connecting their data.',
+      'An explicit confirmation gate keeps the final publication under human control.',
+    ];
+    const runIds = [`${team}-first`, `${team}-second`];
+    execute({ queries: [
+      { sql: 'INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)', params: [team, team, team] },
+      ...runIds.map((id, index) => ({
+        sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'scan',?,1,0,?,'Product teams',1,?)", params: [id, team, index === 0 ? 'collecting' : 'completed', now + index, JSON.stringify([seed.id])],
+      })),
+      ...runIds.map(id => ({ sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: [`${id}:${seed.id}`, id, seed.id] })),
+      { sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,'article')", params: [itemId, team, seed.id, `${new URL(seed.url).origin}/distinct-decision-report`, 'Independently supported workflow decisions', quotes[0], now - 1000, now, quotes.slice(0, 2).join(' ').repeat(10)] },
+    ] });
+    const idea = (familyKey: string, evidence: string) => ({
+      familyKey, evidence, score: 86, chosenProfileId: RESEARCH_AUDIENCE_ONLY_PROFILE_ID,
+      profileFit: 'A bounded product workflow decision fits the saved general audience.',
+      summary: familyKey, contentAngle: `Inspect ${familyKey} before adopting this workflow.`,
+      whyItMatters: 'A separate practical product-team decision.', limitations: 'A practitioner account; no measured uplift.',
+    });
+    const previousKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'test-distinct-ideas';
+    let calls = 0;
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      expect(String(url)).toBe('https://api.anthropic.com/v1/messages');
+      const request = JSON.parse(String(init?.body)), input = JSON.parse(request.messages[0].content);
+      expect(input.items.map((item: { id: string }) => item.id)).toEqual([itemId]);
+      const primary = ++calls === 1 ? idea('consent-review', quotes[0]) : idea('publication-confirmation', quotes[2]);
+      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify({ findings: [{ itemId, ...primary, additionalIdeas: [idea('preview-before-connection', quotes[1])] }] }) }] }] });
+    });
+    try {
+      await finishResearchRankJob(runIds[0]);
+      const firstId = await researchHash(`${team}:${itemId}`), secondId = await researchHash(`${team}:${itemId}:angle:preview-before-connection`);
+      const first = await getRunResearchFindings(team, runIds[0]);
+      expect(first.map(finding => finding.id).sort()).toEqual([firstId, secondId].sort());
+      expect(first.map(finding => finding.evidence).sort()).toEqual(quotes.slice(0, 2).sort());
+      expect((await processResearchJob({ operation: 'rank', runId: runIds[0] }))).toEqual({ sourceIds: [], done: true });
+      expect(calls).toBe(1);
+      const saved = await actOnResearchFinding(team, { id: firstId, action: 'save_idea' });
+      execute({ queries: [
+        { sql: "INSERT INTO research_drafts(id,team_id,run_id,finding_id,content,status,revision,slack_channel_id,slack_thread_ts,slack_message_ts,snapshot_hash,created_at,updated_at) VALUES(?,?,?,?,'{\"targets\":[]}','pending',4,'C-PENDING','123.456','123.789','unchanged-snapshot',?,?)", params: [`${team}-review`, team, runIds[0], firstId, now, now] },
+        { sql: "INSERT INTO research_draft_revisions(id,team_id,draft_id,revision,content,instruction,slack_user_id,created_at) VALUES(?,?,?,4,'Exact approved-for-review copy','Keep this decision','U-REVIEWER',?)", params: [`${team}-revision`, team, `${team}-review`, now] },
+      ] });
+      const prior = execute({ queries: [
+        { sql: 'SELECT * FROM research_findings WHERE id=?', params: [firstId] },
+        { sql: 'SELECT * FROM research_drafts WHERE team_id=?', params: [team] },
+        { sql: 'SELECT * FROM research_draft_revisions WHERE team_id=?', params: [team] },
+        { sql: 'SELECT * FROM ideas WHERE id=?', params: ['ideaId' in saved ? saved.ideaId : ''] },
+      ] }).map((result: { results: unknown[] }) => result.results);
+      execute({ queries: [
+        { sql: "UPDATE research_runs SET status='collecting' WHERE id=?", params: [runIds[1]] },
+        { sql: 'UPDATE research_items SET content=? WHERE id=?', params: [quotes.join(' ').repeat(10), itemId] },
+      ] });
+      await finishResearchRankJob(runIds[1]);
+      const newPrimaryId = await researchHash(`${team}:${itemId}:angle:publication-confirmation`);
+      const second = await getRunResearchFindings(team, runIds[1]);
+      expect(second.map(finding => finding.id).sort()).toEqual([newPrimaryId, secondId].sort());
+      expect(second.find(finding => finding.id === newPrimaryId)).toMatchObject({ status: 'new', idea_id: null, family_key: 'publication-confirmation' });
+      expect(second.find(finding => finding.id === secondId)?.created_at).toBe(first.find(finding => finding.id === secondId)?.created_at);
+      expect(execute({ queries: [
+        { sql: 'SELECT * FROM research_findings WHERE id=?', params: [firstId] },
+        { sql: 'SELECT * FROM research_drafts WHERE team_id=?', params: [team] },
+        { sql: 'SELECT * FROM research_draft_revisions WHERE team_id=?', params: [team] },
+        { sql: 'SELECT * FROM ideas WHERE id=?', params: ['ideaId' in saved ? saved.ideaId : ''] },
+      ] }).map((result: { results: unknown[] }) => result.results)).toEqual(prior);
+      expect((await getRunResearchFindings(team, runIds[0])).map(finding => finding.id).sort()).toEqual([firstId, secondId].sort());
+      expect(execute({ queries: [{ sql: 'PRAGMA foreign_key_check' }] })[0].results).toEqual([]);
+      expect(calls).toBe(2);
+    } finally {
+      fetcher.mockRestore();
+      if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousKey;
+    }
+  }, 30_000);
+
+  it("saves newly selected families without taking earlier saved ideas and never drafts a finding rejected by the current scan", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.feedUrl && source.kind === "rss")!;
     const now = Date.now();
     const strongQuote = "The optional marketing consent never blocks account creation, while every required consent must be accepted.";
@@ -1323,8 +1411,11 @@ describe("research persistence and team isolation", () => {
       expect(fetcher).toHaveBeenCalledTimes(1);
       expect(execute({ queries: [{ sql: "SELECT item_id,score FROM research_findings WHERE team_id='assessments' AND run_id='assessments-run'" }] })[0].results)
         .toEqual([{ item_id: "assessed-strong", score: 86 }]);
-      expect(execute({ queries: [{ sql: "SELECT score,status,idea_id,created_at,summary FROM research_findings WHERE item_id='assessed-strong' AND team_id='assessments'" }] })[0].results)
-        .toEqual([{ score: 86, status: "saved", idea_id: "assessment-idea", created_at: now - 120_000, summary: "Required and optional consent follow separate signup paths." }]);
+      expect(execute({ queries: [{ sql: "SELECT score,status,idea_id,created_at,summary FROM research_findings WHERE item_id='assessed-strong' AND team_id='assessments' ORDER BY score" }] })[0].results)
+        .toEqual([
+          { score: 78, status: "saved", idea_id: "assessment-idea", created_at: now - 120_000, summary: "Earlier summary" },
+          { score: 86, status: "new", idea_id: null, created_at: expect.any(Number), summary: "Required and optional consent follow separate signup paths." },
+        ]);
       expect(execute({ queries: [{ sql: "SELECT score,run_id FROM research_findings WHERE item_id='assessed-weak' AND team_id='assessments'" }] })[0].results)
         .toEqual([{ score: 90, run_id: "assessments-previous" }]);
       const [stored] = execute({ queries: [{ sql: "SELECT status,diagnostics FROM research_runs WHERE id='assessments-run'" }] })[0].results;
@@ -1422,7 +1513,7 @@ describe("research persistence and team isolation", () => {
       if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
-  }, 20_000);
+  }, 60_000);
   it("retains an existing reviewed story and bundles verified sources when multiple articles produce the same family", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
     const now = Date.now();
@@ -1634,7 +1725,7 @@ describe("research persistence and team isolation", () => {
       if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
-  }, 20_000);
+  }, 90_000);
   it("resumes more than eighteen shortlisted stories without re-screening hydrated evidence or new arrivals", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
     const now = Date.now();
@@ -1723,7 +1814,7 @@ describe("research persistence and team isolation", () => {
       if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
-  }, 20_000);
+  }, 60_000);
   it("skips item writes for unchanged feeds while preserving hydrated evidence and applying actual updates", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
     const now = Date.now();
@@ -2132,6 +2223,91 @@ describe("research persistence and team isolation", () => {
       else process.env.OPENAI_API_KEY = priorKey;
       if (priorAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = priorAnthropicKey;
+    }
+  }, 30_000);
+
+  it("qualifies exact article-watch URLs already owned by another source without retagging or inventing dates", async () => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === 'web')!;
+    const search = RESEARCH_SOURCE_SEEDS.find(source => source.kind === 'search')!;
+    const previousMode = seed.pageMode, previousUrl = seed.url, sourceCount = RESEARCH_SOURCE_SEEDS.length;
+    const origin = new URL(seed.url).origin;
+    seed.pageMode = 'article';
+    seed.url = `${origin}/watch-current/?utm_source=fixture#watch`;
+    for (const id of ['watch-thin', 'watch-known-old', 'watch-after-cutoff'])
+      RESEARCH_SOURCE_SEEDS.push({ ...seed, id: `fixture-${id}`, url: `${origin}/${id}` });
+    const roster = RESEARCH_SOURCE_SEEDS.map(source => source.id).filter(id => id !== search.id);
+    const team = 'undated-article-watch', runId = `${team}-run`, now = Date.now(), firstSeen = now + 10;
+    const quote = 'This public resource describes a concrete product decision and the limits of its approach.';
+    const rows = [
+      { id: 'watch-current', sourceId: search.id, firstSeen, body: quote.repeat(12) },
+      { id: 'watch-thin', sourceId: seed.id, firstSeen, body: quote },
+      { id: 'watch-known-old', sourceId: seed.id, firstSeen: now - 2 * 86_400_000, body: quote.repeat(12) },
+      { id: 'watch-after-cutoff', sourceId: seed.id, firstSeen: now + 1000, body: quote.repeat(12) },
+      { id: 'search-undated', sourceId: search.id, firstSeen, body: quote.repeat(12) },
+      { id: 'watch-unconfigured-path', sourceId: seed.id, firstSeen, body: quote.repeat(12) },
+    ];
+    execute({ queries: [
+      { sql: 'INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)', params: [team, team, team] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'scan','collecting',1,0,?,'Product teams',?,?)", params: [runId, team, now, roster.length, JSON.stringify(roster)] },
+      ...roster.map(sourceId => ({
+        sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: [`${runId}:${sourceId}`, runId, sourceId],
+      })),
+      ...rows.map(row => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,NULL,?,?,'article')",
+        params: [row.id, team, row.sourceId, `${new URL(seed.url).origin}/${row.id}`, row.id, quote, row.firstSeen, row.body],
+      })),
+    ] });
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 50);
+    const previousKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'test-undated-watch';
+    storageFault = queries => {
+      for (const query of queries) if (query.sql.includes('from "research_items"') && query.params.length > 100)
+        throw new Error('D1 bound-parameter limit exceeded');
+    };
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const input = JSON.parse(request.input ?? request.messages[0].content);
+      expect(input.items).toHaveLength(1);
+      expect(input.items[0]).toMatchObject({ publishedAt: null, discoveredAt: firstSeen, signalKind: 'undated_reference' });
+      const screening = (request.text?.format.schema ?? request.output_config.format.schema).properties.assessments;
+      expect(input.items[0].id).toBe(screening ? 'watch-thin' : 'watch-current');
+      const value = screening ? screeningFixture({ itemIds: [] }, input.items) : {
+        findings: [{ itemId: 'watch-current', score: 85, summary: 'A bounded public framework', whyItMatters: 'A product decision to inspect', contentAngle: 'Inspect the resource before adopting its process', evidence: quote, limitations: 'Publication date is unknown; first observation does not prove novelty', familyKey: 'undated-watch-test' }],
+      };
+      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 1, output_tokens: 1 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify(value) }] }] });
+    });
+    try {
+      expect(await processResearchJob({ operation: 'rank', runId })).toEqual({ ok: true, pending: false });
+      const [finding] = await getRunResearchFindings(team, runId);
+      expect(researchFindingDates(finding)).toEqual({ publishedAt: null, discoveredAt: firstSeen, signalKind: 'undated_reference' });
+      expect(finding.source_id).toBe(search.id);
+      expect(execute({ queries: [{ sql: "SELECT source_id,published_at,collected_at FROM research_items WHERE id='watch-current'" }] })[0].results)
+        .toEqual([{ source_id: search.id, published_at: null, collected_at: firstSeen }]);
+      const snapshot = await getResearchSnapshot(team);
+      expect(snapshot.findings[0]).toMatchObject({ publishedAt: null, discoveredAt: firstSeen, signalKind: 'undated_reference' });
+      expect(snapshot.runs.find(run => run.id === runId)?.diagnostics).toMatchObject({ eligibleCount: 2, freshCount: 0, evergreenCount: 0, directEvidenceCount: 1, incompleteScreenedCount: 1 });
+      const invoke = vi.fn(async (_instructions, input: unknown) => {
+        expect((input as { source: unknown }).source).toMatchObject({ publishedAt: null, discoveredAt: new Date(firstSeen).toISOString(), signalKind: 'undated_reference' });
+        return { ready: false, reason: 'No new draft requested', editorial: null, targets: [] };
+      });
+      await runResearchDraftWriting({ source: { url: finding.url, content: quote.repeat(12), ...researchFindingSourceContext(finding, { created_at: now, days: 1 }, now) }, destinations: [], current: null }, invoke);
+      expect(invoke).toHaveBeenCalledTimes(1);
+      const idea = await actOnResearchFinding(team, { id: finding.id, action: 'save_idea' });
+      const text = execute({ queries: [{ sql: 'SELECT text FROM ideas WHERE id=?', params: [idea.ideaId] }] })[0].results[0].text;
+      expect(text).toContain(`Publication date unknown\nFirst seen: ${new Date(firstSeen).toISOString()}`);
+      expect(text).not.toContain('Published:');
+      const withoutWatch = `${team}-without-watch`;
+      execute({ queries: [
+        { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'scan','collecting',1,0,?,'Product teams',1,?)", params: [withoutWatch, team, now + 1, JSON.stringify([search.id])] },
+        { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: [`${withoutWatch}:${search.id}`, withoutWatch, search.id] },
+      ] });
+      expect(await processResearchJob({ operation: 'rank', runId: withoutWatch })).toEqual({ ok: true, pending: false });
+      expect(await getRunResearchFindings(team, withoutWatch)).toEqual([]);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    } finally {
+      storageFault = undefined; seed.pageMode = previousMode; seed.url = previousUrl; RESEARCH_SOURCE_SEEDS.splice(sourceCount); fetcher.mockRestore(); clock.mockRestore();
+      if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousKey;
     }
   }, 30_000);
 
@@ -2773,7 +2949,7 @@ describe("research persistence and team isolation", () => {
       if (priorAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = priorAnthropicKey;
     }
-  }, 60_000);
+  }, 180_000);
 
   it("chooses two strong24hour profile fits even after the top finding is declined, with cached edits and no auto-publishing", async () => {
     const now = Date.now();

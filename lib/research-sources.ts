@@ -1336,5 +1336,266 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
       "https://www.pewresearch.org/short-reads/2025/07/22/google-users-are-less-likely-to-click-on-links-when-an-ai-summary-appears-in-the-results/"
     ],
     "notes": "Original Pew AI/search-use and survey-method research only. Keep the scoped public topic index and exact historical AI-summary backfill. Prefer the publisher-advertised public WordPress JSON representation for each canonical article, verified by exact URL, published status and AI category. Preserve original date_gmt, never modified time. Worker access can differ from local probes; archive records and per-page failures do not establish readable source coverage. Strip share/widget metadata before accepting source text. Preserve studied population, period, denominators, selection and measurement limitations. The 22 July 2025 AI-overview study observes 900 U.S. adults during March 2025; 1% is clicks on summary-source links per visits with a summary, not all search traffic. Do not infer causal SEO decline, business-buyer behavior, or AI accuracy from this consumer study. Retain only practical product/growth/customer-research implications; exclude partisan/election, geopolitical, labor and general AI-opinion news without specific ICP relevance. Public notes/abstracts are not full report evidence. Index-first-page discovery does not promise complete historical site enumeration."
+  },
+  {
+    "id": "foldspace-product-workflows",
+    "name": "Foldspace — product onboarding workflows",
+    "url": "https://foldspace.ai/blog",
+    "kind": "web",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Discover substantive public original articles from this publisher index. Preserve original dates and access limits; older articles are evergreen references, not new releases. Index coverage is limited to actually returned links, not all publisher history.",
+    "articlePathPrefixes": [
+      "/blog/"
+    ]
+  },
+  {
+    "id": "itamar-original-resource-index",
+    "name": "Itamar Gilad — original product resources",
+    "url": "https://itamargilad.com/",
+    "kind": "web",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Discover substantive public original articles from this publisher index. Preserve original dates and access limits; older articles are evergreen references, not new releases. Index coverage is limited to actually returned links, not all publisher history."
+  },
+  {
+    "id": "april-original-positioning-index",
+    "name": "April Dunford — original positioning essays",
+    "url": "https://www.aprildunford.com/category/positioning",
+    "kind": "web",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Discover substantive public original articles from this publisher index. Preserve original dates and access limits; older articles are evergreen references, not new releases. Index coverage is limited to actually returned links, not all publisher history.",
+    "articlePathPrefixes": [
+      "/post/"
+    ]
+  },
+  {
+    "id": "hiten-original-product-observations",
+    "name": "Hiten Shah — original product observations",
+    "url": "https://hitenism.com/",
+    "kind": "web",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Discover substantive public original articles from this publisher index. Preserve original dates and access limits; older articles are evergreen references, not new releases. Index coverage is limited to actually returned links, not all publisher history."
+  },
+  {
+    "id": "lyssna-ai-skills-reference",
+    "name": "Lyssna — public research skills library",
+    "url": "https://www.lyssna.com/ai-skills/",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Monitor this public first-party reference body. Preserve its original publication date when explicit; otherwise label it an undated reference with actual first observation. Attribute product and practitioner claims; do not treat a crawl as a launch, infer unreported outcomes, or assume historical discovery."
+  },
+  {
+    "id": "wynter-ai-positioning-reference",
+    "name": "Wynter — public AI positioning workshop outline",
+    "url": "https://wynter.com/ai-positioning-workshop",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Monitor this public first-party reference body. Preserve its original publication date when explicit; otherwise label it an undated reference with actual first observation. Attribute product and practitioner claims; do not treat a crawl as a launch, infer unreported outcomes, or assume historical discovery."
+  },
+  {
+    "id": "itamar-impact-reference",
+    "name": "Itamar Gilad — impact matrix reference",
+    "url": "https://itamargilad.com/impact/",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Monitor this public first-party reference body. Preserve its original publication date when explicit; otherwise label it an undated reference with actual first observation. Attribute product and practitioner claims; do not treat a crawl as a launch, infer unreported outcomes, or assume historical discovery."
+  },
+  {
+    "id": "product-manager-toolkit-reference",
+    "name": "Product Manager Toolkit — public methods and skills",
+    "url": "https://github.com/imohammadfaraz/product-manager-toolkit",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Monitor this public first-party reference body. Preserve its original publication date when explicit; otherwise label it an undated reference with actual first observation. Attribute product and practitioner claims; do not treat a crawl as a launch, infer unreported outcomes, or assume historical discovery."
+  },
+  {
+    "id": "marketing-skills-reference",
+    "name": "Marketing Skills — public agent workflows",
+    "url": "https://github.com/coreyhaines31/marketingskills",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Monitor this public first-party reference body. Preserve its original publication date when explicit; otherwise label it an undated reference with actual first observation. Attribute product and practitioner claims; do not treat a crawl as a launch, infer unreported outcomes, or assume historical discovery."
+  },
+  {
+    "id": "ownable-idea-reference",
+    "name": "UNIGNORABLE — ownable idea framework",
+    "url": "https://beunignorable.com/ownable-idea/",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Monitor this public first-party reference body. Preserve its original publication date when explicit; otherwise label it an undated reference with actual first observation. Attribute product and practitioner claims; do not treat a crawl as a launch, infer unreported outcomes, or assume historical discovery."
+  },
+  {
+    "id": "swan-public-context-workflows",
+    "name": "Swan — public context and sales workflow examples",
+    "url": "https://www.getswan.com/",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Monitor this public first-party reference body. Preserve its original publication date when explicit; otherwise label it an undated reference with actual first observation. Attribute product and practitioner claims; do not treat a crawl as a launch, infer unreported outcomes, or assume historical discovery."
+  },
+  {
+    "id": "outreach2day-product-economics",
+    "name": "Outreach2day — public capability and pricing reference",
+    "url": "https://outreach2day.com/pricing",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Monitor this public first-party reference body. Preserve its original publication date when explicit; otherwise label it an undated reference with actual first observation. Attribute product and practitioner claims; do not treat a crawl as a launch, infer unreported outcomes, or assume historical discovery."
+  },
+  {
+    "id": "google-analytics-predictive-audiences",
+    "name": "Google Analytics — predictive audience definitions",
+    "url": "https://support.google.com/analytics/answer/9805833?hl=en",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "research",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Monitor this public first-party reference body. Preserve its original publication date when explicit; otherwise label it an undated reference with actual first observation. Attribute product and practitioner claims; do not treat a crawl as a launch, infer unreported outcomes, or assume historical discovery."
+  },
+  {
+    "id": "google-ads-dynamic-prospecting",
+    "name": "Google Ads — dynamic prospecting mechanics",
+    "url": "https://support.google.com/google-ads/answer/2497941?hl=en",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "research",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Monitor this public first-party reference body. Preserve its original publication date when explicit; otherwise label it an undated reference with actual first observation. Attribute product and practitioner claims; do not treat a crawl as a launch, infer unreported outcomes, or assume historical discovery."
+  },
+  {
+    "id": "google-demand-generation-reference",
+    "name": "Google Ads — Demand Gen capability reference",
+    "url": "https://support.google.com/google-ads/answer/14587068?hl=en",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "research",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Monitor this public first-party reference body. Preserve its original publication date when explicit; otherwise label it an undated reference with actual first observation. Attribute product and practitioner claims; do not treat a crawl as a launch, infer unreported outcomes, or assume historical discovery."
+  },
+  {
+    "id": "google-ai-search-reference",
+    "name": "Google Search — AI feature publisher guidance",
+    "url": "https://developers.google.com/search/docs/appearance/ai-features",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "research",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Monitor this public first-party reference body. Preserve its original publication date when explicit; otherwise label it an undated reference with actual first observation. Attribute product and practitioner claims; do not treat a crawl as a launch, infer unreported outcomes, or assume historical discovery."
+  },
+  {
+    "id": "google-search-original-updates",
+    "name": "Google Search — original product and publisher updates",
+    "url": "https://developers.google.com/search/blog",
+    "kind": "web",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Discover substantive public original articles from this publisher index. Preserve original dates and access limits; older articles are evergreen references, not new releases. Index coverage is limited to actually returned links, not all publisher history.",
+    "articlePathPrefixes": [
+      "/search/blog/"
+    ]
+  },
+  {
+    "id": "sparktoro-original-audience-research",
+    "name": "SparkToro — original audience and search research",
+    "url": "https://sparktoro.com/blog/",
+    "kind": "web",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Discover substantive public original articles from this publisher index. Preserve original dates and access limits; older articles are evergreen references, not new releases. Index coverage is limited to actually returned links, not all publisher history.",
+    "articlePathPrefixes": [
+      "/blog/"
+    ]
+  },
+  {
+    "id": "lenny-interview-resource-library",
+    "name": "Lenny’s Jobs — public interview resource library",
+    "url": "https://www.lennysjobs.com/interview-prep",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Public resource-library identity and descriptions only. Preserve unknown publication date. Resource curation does not prove career or hiring outcomes; do not infer paid resource contents."
+  },
+  {
+    "id": "trendtrack-original-growth-library",
+    "name": "TrendTrack — original advertising research and growth methods",
+    "url": "https://www.trendtrack.io/blog",
+    "kind": "web",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "articlePathPrefixes": [
+      "/blog-post/"
+    ],
+    "notes": "Public vendor research and operating choices. Separate documented free/paid capability boundaries from unverified MRR, growth attribution and competitor claims. Preserve original dates."
+  },
+  {
+    "id": "ryze-public-marketing-permissions",
+    "name": "Ryze — public marketing action permissions",
+    "url": "https://help.get-ryze.ai/claude/permissions",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "industry",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Original public tool permissions. Stated capabilities and required human approval are first-party descriptions, not independent execution or effectiveness tests. Preserve unknown publication dates."
+  },
+  {
+    "id": "ryze-public-managed-campaigns",
+    "name": "Ryze — public campaign workflows",
+    "url": "https://help.get-ryze.ai/paid-ads/managed-campaigns",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "industry",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Original public campaign workflow and platform scope. Attribute vendor claims and retain approval/availability conditions; never invent observed performance."
+  },
+  {
+    "id": "a16z-original-media-practice",
+    "name": "a16z — original media and distribution practice",
+    "url": "https://a16z.com/what-is-new-media-in-2026/",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Original practitioner argument about owned distribution, creator roles and trust. Treat recommendations as attributed perspectives, not proof of universal hiring order or exclusive durable moats."
   }
 ];

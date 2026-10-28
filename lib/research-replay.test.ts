@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { drizzle } from 'drizzle-orm/d1';
 import * as schema from './schema';
-import { researchReplayAction, researchReplayStatus, researchReplayRequestSchema, researchReplayItemSchema, researchReplayEligibility, researchReplayRoute, readResearchReplayRequest } from './research-replay';
+import { researchReplayAction, researchReplayStatus, researchReplayRequestSchema, researchReplayItemSchema, researchReplayEligibility, researchReplayRoute, readResearchReplayRequest, researchReplaySignalKind } from './research-replay';
 import { processResearchJob, createResearchRun } from './research';
 const state = vi.hoisted(() => ({ db: null as unknown }));
 vi.mock('./db/client', () => ({ getDb: async () => state.db }));
@@ -36,6 +36,20 @@ it('keeps strict original dates, end-exclusive window and current readable-body 
   expect(researchReplayEligibility({ ...item('undated'), publishedAt: null }, config)).toBe('undated');
   expect(researchReplayRoute(item('full'))).toBe('direct_evidence');
   expect(researchReplayRoute({ ...item('short'), content: 'A short description.' })).toBe('metadata_screen');
+});
+
+it('separates undated watch observations and historical references from fresh publication dates',()=>{
+  const observed={...item('watch'),publishedAt:null,discoveredAt:1500};
+  const config={...prepare(runIds[0]),articleWatchUrls:[observed.url],observationWindowStart:1000,observationWindowEnd:2000};
+  expect(researchReplayEligibility(observed,config)).toBeNull();
+  expect(researchReplayEligibility({...observed,url:'https://linear.app/now/not-watched'},config)).toBe('undated');
+  expect(researchReplayEligibility({...observed,discoveredAt:2000},config)).toBe('undated');
+  expect(researchReplayEligibility({...observed,discoveredAt:999},config)).toBe('undated');
+  expect(researchReplayEligibility(observed,prepare(runIds[0]))).toBe('undated');
+  expect(researchReplaySignalKind(observed,{windowStart:0,freshnessWindowStart:1200})).toBe('undated_reference');
+  expect(researchReplaySignalKind({...item('old'),publishedAt:1100},{windowStart:0,freshnessWindowStart:1200})).toBe('evergreen_newly_discovered');
+  expect(researchReplaySignalKind({...item('new'),publishedAt:1200},{windowStart:0,freshnessWindowStart:1200})).toBe('fresh');
+  expect(()=>researchReplayRequestSchema.parse({...prepare(runIds[0]),observationWindowStart:1000})).toThrow('Observation windows');
 });
 
 describe('configured replay persistence and paid cache boundary', () => {

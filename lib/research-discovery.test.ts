@@ -183,13 +183,55 @@ describe("topic-driven public discovery", () => {
     expect(result.warning).toContain("earlier results were retained");
   });
 
+  it("partitions HN timestamp windows to recover hits beyond the provider's 1000-result ceiling", async () => {
+    const lower = Math.floor(start / 1000), upper = lower + 9;
+    const records = Array.from({ length: 1201 }, (_, index) => ({ title: `Original ${index}`, url: `https://research.example/original-${index}`, created_at_i: lower + index % 10 }));
+    const windows: number[][] = [];
+    const fetcher = vi.fn(async (input: string | URL) => {
+      const url = new URL(String(input));
+      expect(url.hostname).toBe('hn.algolia.com');
+      const bounds = url.searchParams.get('numericFilters')!.match(/created_at_i>=(\d+),created_at_i<=(\d+)/)!;
+      const from = Number(bounds[1]), to = Number(bounds[2]), page = Number(url.searchParams.get('page'));
+      windows.push([from, to]);
+      const matches = records.filter(record => record.created_at_i >= from && record.created_at_i <= to);
+      return Response.json({ page, nbPages: Math.min(10, Math.ceil(matches.length / 100)), nbHits: matches.length, exhaustiveNbHits: true, hits: matches.slice(page * 100, (page + 1) * 100) });
+    });
+    vi.stubGlobal('fetch', fetcher);
+    const result = await collectDiscoveredResearchSource({ ...source, discoveryProvider: 'hackernews' }, lower * 1000, upper * 1000, new Set(), { deferArticleFetch: true });
+    expect(new Set(result.pendingArticles?.map(item => item.url)).size).toBe(1201);
+    expect(result.coverage).toMatchObject({ resultPages: 14, receivedHits: 1301, candidatePages: 1201, exhaustive: true });
+    expect(windows).toContainEqual([lower, lower + 4]);
+    expect(windows).toContainEqual([lower + 5, upper]);
+    expect(fetcher).toHaveBeenCalledTimes(14);
+    expect(result.warning).toContain('nonoverlapping timestamp windows');
+    expect(result.warning).not.toContain('not exhaustive');
+  });
+
+  it("retains the parent and readable HN partition when another timestamp window fails", async () => {
+    const lower = Math.floor(start / 1000);
+    const fetcher = vi.fn(async (input: string | URL) => {
+      const url = new URL(String(input));
+      const bounds = url.searchParams.get('numericFilters')!.match(/created_at_i>=(\d+),created_at_i<=(\d+)/)!;
+      const from = Number(bounds[1]), to = Number(bounds[2]);
+      if (from === lower + 1) return new Response('', { status: 503 });
+      return Response.json({ page: 0, nbPages: 1, nbHits: from === to ? 1 : 201, exhaustiveNbHits: true, hits: [{ title: 'Readable original', url: `https://research.example/${from === to ? 'partition' : 'parent'}` }] });
+    });
+    vi.stubGlobal('fetch', fetcher);
+    const result = await collectDiscoveredResearchSource({ ...source, discoveryProvider: 'hackernews' }, lower * 1000, (lower + 1) * 1000, new Set(), { deferArticleFetch: true });
+    expect(result.pendingArticles?.map(item => item.url).sort()).toEqual(['https://research.example/parent', 'https://research.example/partition']);
+    expect(result.coverage?.exhaustive).toBe(false);
+    expect(result.warning).toContain('timestamp window');
+    expect(result.warning).toContain('failed; readable results were retained');
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
   it("does not invent HN pagination when metadata is missing, malformed or provider-limited", async () => {
     for (const metadata of [{}, { nbPages: -1 }, { nbPages: "infinite" }, { nbPages: 1, nbHits: 1000, exhaustiveNbHits: false }]) {
       const fetcher = vi.fn(async (input: string | URL) => new URL(String(input)).hostname === "hn.algolia.com"
         ? Response.json({ ...metadata, hits: [{ title: "Original", url: "https://research.example/first" }] })
         : new Response(article("2026-10-23T10:00:00Z")));
       vi.stubGlobal("fetch", fetcher);
-      const result = await collectDiscoveredResearchSource({ ...source, discoveryProvider: "hackernews" }, start, end, new Set());
+      const result = await collectDiscoveredResearchSource({ ...source, discoveryProvider: "hackernews" }, end, end, new Set());
       expect(result.items).toHaveLength(1);
       expect(fetcher).toHaveBeenCalledTimes(2);
       expect(result.coverage?.exhaustive).toBe(false);
@@ -221,6 +263,42 @@ describe("topic-driven public discovery", () => {
     const result = await collectDiscoveredResearchSource({ ...source, kind: "web", url: "https://research.example/reports", articlePathPrefixes: ["/reports/"] }, start, end, new Set(), { deferArticleFetch: true });
     expect(result.items).toEqual([]);
     expect(result.pendingArticles?.map(target => target.url)).toEqual(urls);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([undefined, '2025-09-01T10:00:00Z'])("watches an explicit source page itself once without inventing freshness: %s", async date => {
+    const url = 'https://research.example/resources/practical-framework';
+    const fetcher = vi.fn(async (input: string | URL) => {
+      expect(String(input)).toBe(url);
+      return new Response(`${article(date)}<a href="https://research.example/other">Another original research page</a>`);
+    });
+    vi.stubGlobal('fetch', fetcher);
+    const result = await collectDiscoveredResearchSource({ ...source, kind: 'web', url, pageMode: 'article' }, start, end, new Set(), { deferArticleFetch: true });
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({ url, contentProvenance: 'article', publishedAt: date ? Date.parse(date) : null });
+    expect(result.items[0].content).toContain('Measured original evidence.');
+    expect(result.pendingArticles).toBeUndefined();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('extracts the public repository README rather than surrounding repository chrome', async () => {
+    const url = 'https://github.com/example/public-toolkit';
+    const fetcher = vi.fn(async (input: string | URL) => {
+      expect(String(input)).toBe(url);
+      return new Response(`<main><h1>Repository overview</h1><div>${'DIRECTORY_LISTING '.repeat(100)}</div><time class="updated" datetime="2026-10-22"></time><article class="markdown-body entry-content"><h1>Public toolkit</h1><p>${'Substantive README instructions and implementation tradeoffs. '.repeat(30)}</p></article></main>`);
+    });
+    vi.stubGlobal('fetch', fetcher);
+    const result = await collectDiscoveredResearchSource({ ...source, kind: 'web', url, pageMode: 'article' }, start, end, new Set(), { deferArticleFetch: true });
+    expect(result.items[0]).toMatchObject({ title: 'Public toolkit', publishedAt: null, contentProvenance: 'article' });
+    expect(result.items[0].content).toContain('Substantive README instructions');
+    expect(result.items[0].content).not.toContain('DIRECTORY_LISTING');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an explicit page watch redirect outside the approved publisher', async () => {
+    const fetcher = vi.fn(async () => new Response(null, { status: 302, headers: { location: 'https://unapproved.example/page' } }));
+    vi.stubGlobal('fetch', fetcher);
+    await expect(collectDiscoveredResearchSource({ ...source, kind: 'web', url: 'https://research.example/resource', pageMode: 'article' }, start, end, new Set(), { deferArticleFetch: true })).rejects.toThrow('approved source domains');
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 

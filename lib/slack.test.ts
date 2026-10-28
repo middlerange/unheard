@@ -604,7 +604,7 @@ describe("Slack review threads and approval safety", () => {
     run("UPDATE channels SET research_enabled=1 WHERE id='channel'");
   });
   it("keeps long research metadata inside Slack section limits", async () => {
-    const post = await getPostWithDetails("research-publish", "a");
+    const snapshot = { version: 1 as const, post_id: 'metadata-packet', team_id: 'a', channel_group: 'personal', publish_at: null, targets: [], media: [] };
     const packet = buildSlackReviewPacket(
       { id: "long", revision: 1, content: JSON.stringify({
         editorial: {
@@ -612,7 +612,7 @@ describe("Slack review threads and approval safety", () => {
         },
         sourceContext: { publishedAt: "2025-08-01T00:00:00.000Z", discoveredAt: "2026-10-27T00:00:00.000Z", signalKind: "evergreen_newly_discovered" },
       }) },
-      buildApprovalSnapshot(post!),
+      snapshot,
       {
         title: "Title",
         url: "https://example.com/article",
@@ -633,6 +633,21 @@ describe("Slack review threads and approval safety", () => {
     expect(JSON.stringify(packet)).toContain("Original publication: 2025-08-01");
     expect(JSON.stringify(packet)).toContain("not a new announcement");
     expect(JSON.stringify(packet)).toContain("Reader decision:");
+  });
+  it("keeps an undated reference's first observation out of the publication date", async () => {
+    const snapshot = { version: 1 as const, post_id: 'undated-packet', team_id: 'a', channel_group: 'personal', publish_at: null, targets: [], media: [] };
+    const firstSeen = Date.parse("2026-10-28T12:00:00Z");
+    const packet = buildSlackReviewPacket(
+      { id: "undated", revision: 1, content: JSON.stringify({ sourceContext: { publishedAt: null, discoveredAt: new Date(firstSeen).toISOString(), signalKind: "undated_reference" } }) },
+      snapshot,
+      { title: "Public resource", url: "https://example.com/resource", why_it_matters: "A bounded framework", limitations: "Date unknown", evidence: "A substantive public description", published_at: firstSeen, source_published_at: null, source_discovered_at: firstSeen, signal_kind: "undated_reference" },
+      "a".repeat(64),
+    );
+    const text = JSON.stringify(packet);
+    expect(text).toContain("Publication date unknown");
+    expect(text).toContain(`first collected ${new Date(firstSeen).toISOString()}`);
+    expect(text).not.toContain("Original publication:");
+    expect(text).not.toContain("Published in this scan's window");
   });
   it("blocks mixed identities on legacy previews and before approval even if content is unchanged", async () => {
     run("INSERT INTO channels(id,team_id,name,platform,account_type,account_id,group_name,credentials,created_at,research_enabled,system_prompt)VALUES('identity-second','a','Another channel','twitter','personal','identity-second-account','personal','encrypted',1,1,'Write for product leaders')");

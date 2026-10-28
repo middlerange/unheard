@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getDb } from "./db/client";
 import { retryResearchStorage } from "./research-storage";
 import { getFrozenResearchAudience } from "./research-audience";
+import { researchFindingDates, researchItemSignalKind } from "./research-dates";
 import { getDraftResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
 import { hasUsablePewResearchBody, isPewResearchSource } from "./research-pew";
 import {
@@ -36,6 +37,7 @@ import type {
 } from "./research-types";
 import {
   articleResearchText,
+  canonicalResearchUrl,
   fetchPublicYoutubeTranscript,
   fetchResearchText,
   sourceHosts,
@@ -259,7 +261,7 @@ export async function getResearchSnapshot(
         : RESEARCH_SOURCE_SEEDS.find((s) => s.id === row.source_id)?.name || row.source_id,
       title: row.title,
       url: row.url,
-      publishedAt: row.published_at,
+      ...researchFindingDates(row),
       score: row.score,
       summary: row.summary,
       whyItMatters: row.why_it_matters,
@@ -951,7 +953,7 @@ function researchScreenMetadata(item: typeof research_items.$inferSelect, run: t
   return {
     id: item.id, title: item.title, excerpt: item.excerpt.slice(0, 900), publicText: item.content || null,
     contentProvenance: item.content_provenance, publishedAt: item.published_at, discoveredAt: item.collected_at,
-    signalKind: item.published_at! >= run.created_at - run.days * 86_400_000 ? "fresh" : "evergreen_newly_discovered",
+    signalKind: researchItemSignalKind(item, run),
     sourceId: item.source_id,
   };
 }
@@ -1018,45 +1020,42 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
   if (!progress) {
     const sources = JSON.parse(run.source_ids) as string[];
     const discoveryCutoff = Date.now();
+    const windowStart = run.created_at - run.days * 86_400_000;
+    const articleWatches = RESEARCH_SOURCE_SEEDS.filter(source => source.kind === "web" && source.pageMode === "article" && sources.includes(source.id)).map(source => canonicalResearchUrl(source.url));
+    const watchedUrls = sql`${research_items.canonical_url} IN (SELECT value FROM json_each(${JSON.stringify(articleWatches)}))`;
+    const sourceRoster = or(sql`${research_items.source_id} IN (SELECT value FROM json_each(${JSON.stringify(sources)}))`, watchedUrls);
+    const datedSignal = and(
+      lte(research_items.published_at, run.created_at),
+      or(gte(research_items.published_at, windowStart), and(gte(research_items.collected_at, windowStart), lte(research_items.collected_at, discoveryCutoff))),
+    );
+    const undatedWatchSignal = articleWatches.length ? and(
+      isNull(research_items.published_at), watchedUrls,
+      eq(research_items.content_type, "article"),
+      gte(research_items.collected_at, windowStart), lte(research_items.collected_at, discoveryCutoff),
+    ) : sql`0`;
+    const eligibleSignal = and(
+      or(datedSignal, undatedWatchSignal),
+      or(eq(research_items.content_type, "article"), eq(research_items.transcript_status, "available")),
+    );
     const candidates = await db
       .select({ id: research_items.id })
       .from(research_items)
       .where(
         and(
           eq(research_items.team_id, run.team_id),
-          inArray(research_items.source_id, sources),
-          or(
-            gte(research_items.published_at, run.created_at - run.days * 86_400_000),
-            and(
-              gte(research_items.collected_at, run.created_at - run.days * 86_400_000),
-              lte(research_items.collected_at, discoveryCutoff),
-            ),
-          ),
-          lte(research_items.published_at, run.created_at),
-          or(
-            eq(research_items.content_type, "article"),
-            eq(research_items.transcript_status, "available"),
-          ),
+          sourceRoster,
+          eligibleSignal,
         ),
       )
-      .orderBy(desc(research_items.published_at), research_items.id)
+      .orderBy(desc(sql`COALESCE(${research_items.published_at}, ${research_items.collected_at})`), research_items.id)
       .all();
-    const windowStart = run.created_at - run.days * 86_400_000;
-    const datedSignal = and(
-      lte(research_items.published_at, run.created_at),
-      or(gte(research_items.published_at, windowStart), and(gte(research_items.collected_at, windowStart), lte(research_items.collected_at, discoveryCutoff))),
-    );
-    const eligibleSignal = and(
-      datedSignal,
-      or(eq(research_items.content_type, "article"), eq(research_items.transcript_status, "available")),
-    );
     const coverage = await db.select({
       eligible: sql<number>`COALESCE(SUM(CASE WHEN ${eligibleSignal} THEN 1 ELSE 0 END), 0)`,
       fresh: sql<number>`COALESCE(SUM(CASE WHEN ${eligibleSignal} AND ${research_items.published_at} >= ${windowStart} THEN 1 ELSE 0 END), 0)`,
       evergreen: sql<number>`COALESCE(SUM(CASE WHEN ${eligibleSignal} AND ${research_items.published_at} < ${windowStart} THEN 1 ELSE 0 END), 0)`,
       undated: sql<number>`COALESCE(SUM(CASE WHEN ${research_items.published_at} IS NULL THEN 1 ELSE 0 END), 0)`,
       unavailableVideos: sql<number>`COALESCE(SUM(CASE WHEN ${datedSignal} AND ${research_items.content_type} = 'video' AND ${research_items.transcript_status} <> 'available' THEN 1 ELSE 0 END), 0)`,
-    }).from(research_items).where(and(eq(research_items.team_id, run.team_id), inArray(research_items.source_id, sources))).get();
+    }).from(research_items).where(and(eq(research_items.team_id, run.team_id), sourceRoster)).get();
     const rejectedStories: Array<{ title: string; score: number | null; reason: string }> = [];
     const diagnostics: ResearchRankDiagnostics = {
       eligibleCount: Number(coverage?.eligible || 0), undatedCount: Number(coverage?.undated || 0),
@@ -1148,12 +1147,12 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       const input = batch.map(item => ({
         id: item.id, title: item.title, sourceId: item.source_id, publishedAt: item.published_at,
         discoveredAt: item.collected_at,
-        signalKind: item.published_at! >= run.created_at - run.days * 86_400_000 ? "fresh" : "evergreen_newly_discovered",
+        signalKind: researchItemSignalKind(item, run),
         content: item.content, contentProvenance: item.content_provenance,
       }));
       const output = researchEvidenceSchema.parse(await cachedModel(
         run, "evidence", input, RESEARCH_EVIDENCE_INSTRUCTIONS,
-        evidenceJsonSchemaForItems(batch.map(item => item.id)), 5000,
+        evidenceJsonSchemaForItems(batch.map(item => item.id)), 9000,
       ));
       validateResearchEvidenceCoverage(output.findings, batch.map(item => item.id));
       const accepted = validateResearchEvidence(output.findings, batch.map(item => ({ id: item.id, content: item.content! })));
@@ -1188,7 +1187,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
         await db.insert(research_cache).values({
           id: bundleId, team_id: run.team_id, value: bundle, created_at: Date.now(),
         }).onConflictDoUpdate({ target: research_cache.id, set: { value: bundle } });
-        const familyOwner = await db.select({ itemId: research_findings.item_id })
+        const familyOwner = await db.select({ id: research_findings.id, itemId: research_findings.item_id })
           .from(research_findings).where(and(
             eq(research_findings.team_id, run.team_id),
             eq(research_findings.family_key, familyKey),
@@ -1200,15 +1199,23 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
           });
           continue;
         }
-        const findingId = await researchHash(`${run.team_id}:${item.id}`);
-        const existingFinding = await db.select().from(research_findings).where(and(
+        const legacyId = await researchHash(`${run.team_id}:${item.id}`);
+        const legacyFinding = await db.select().from(research_findings).where(and(
+          eq(research_findings.id, legacyId), eq(research_findings.team_id, run.team_id),
+        )).get();
+        const findingId = familyOwner?.id || (finding.isAdditional || legacyFinding && legacyFinding.family_key !== familyKey
+          ? await researchHash(`${run.team_id}:${item.id}:angle:${familyKey}`) : legacyId);
+        const existingFinding = findingId === legacyId ? legacyFinding : await db.select().from(research_findings).where(and(
           eq(research_findings.id, findingId), eq(research_findings.team_id, run.team_id),
         )).get();
         if (existingFinding) await saveResearchFindingSnapshot(existingFinding);
         const qualified: ResearchFindingRow = {
           id: findingId, team_id: run.team_id, run_id: run.id, item_id: item.id,
           source_id: item.source_id, title: item.title, url: item.canonical_url,
-          published_at: item.published_at!, status: existingFinding?.status || "new", idea_id: existingFinding?.idea_id || null,
+          published_at: item.published_at ?? item.collected_at,
+          source_published_at: item.published_at, source_discovered_at: item.collected_at,
+          signal_kind: researchItemSignalKind(item, run),
+          status: existingFinding?.status || "new", idea_id: existingFinding?.idea_id || null,
           created_at: existingFinding?.created_at ?? Date.now(), content_type: item.content_type, transcript_status: item.transcript_status,
           score: finding.score, summary: finding.summary, why_it_matters: finding.whyItMatters,
           content_angle: finding.contentAngle, evidence: finding.evidence, limitations: finding.limitations,
@@ -1233,6 +1240,9 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
               title: qualified.title,
               url: qualified.url,
               published_at: qualified.published_at,
+              source_published_at: qualified.source_published_at,
+              source_discovered_at: qualified.source_discovered_at,
+              signal_kind: qualified.signal_kind,
               content_type: qualified.content_type,
               transcript_status: qualified.transcript_status,
             },
@@ -1518,7 +1528,11 @@ export async function actOnResearchFinding(teamId: string, input: unknown) {
   }
   const ideaId = finding.idea_id || `research-${finding.id}`;
   const now = Date.now();
-  const text = `${finding.title}\n\n${finding.content_angle}\n\n${finding.summary}\n\nWhy it matters: ${finding.why_it_matters}\n\nEvidence: “${finding.evidence}”\n\nSource: ${finding.url}\nPublished: ${new Date(finding.published_at).toISOString().slice(0, 10)}${finding.limitations ? `\nLimitations: ${finding.limitations}` : ""}`;
+  const dates = researchFindingDates(finding);
+  const dateText = dates.publishedAt === null
+    ? `Publication date unknown${dates.discoveredAt === null ? "" : `\nFirst seen: ${new Date(dates.discoveredAt).toISOString()}`}`
+    : `Published: ${new Date(dates.publishedAt).toISOString().slice(0, 10)}`;
+  const text = `${finding.title}\n\n${finding.content_angle}\n\n${finding.summary}\n\nWhy it matters: ${finding.why_it_matters}\n\nEvidence: “${finding.evidence}”\n\nSource: ${finding.url}\n${dateText}${finding.limitations ? `\nLimitations: ${finding.limitations}` : ""}`;
   await db.batch([
     db
       .insert(ideas)

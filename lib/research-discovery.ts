@@ -31,10 +31,12 @@ export async function fetchDiscoveredResearchArticle(
     ? await fetchResearchText(`https://arxiv.org/abs/${arxivId[2]}`, new Set(["arxiv.org", "www.arxiv.org"])) : html;
   const publishedAt = arxivId ? firstArxivSubmission(publicationHtml, windowEnd) : articleResearchDate(html, target.url, windowEnd);
   const abstractOnly = arxivId?.[1] === "abs";
-  const content = (abstractOnly ? researchAbstractText(html) : articleResearchText(html)).slice(0, 14_000);
+  const repositoryReadme = url.hostname === "github.com" && /^\/[^/]+\/[^/]+\/?$/.test(url.pathname)
+    ? html.match(/<article\b[^>]*class=["'][^"']*\bmarkdown-body\b[^"']*["'][^>]*>[\s\S]*?<\/article>/i)?.[0] : undefined;
+  const content = (abstractOnly ? researchAbstractText(html) : articleResearchText(repositoryReadme || html)).slice(0, 14_000);
   const heading = arxivId
     ? html.match(/<h1\b[^>]*class=["'][^"']*\b(?:title|ltx_title_document)\b[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i)?.[1]
-    : articleResearchTitle(html);
+    : articleResearchTitle(repositoryReadme || html);
   const pageTitle = plainResearchText(heading || "").replace(/^Title:\s*/i, "");
   return {
     url: target.url,
@@ -158,6 +160,22 @@ async function searchHackerNewsSignals(query: string, windowStart: number, windo
           warnings.push("Hacker News pagination metadata is missing or invalid; only the first returned page could be verified.");
         }
         totalHits = Number.isSafeInteger(payload.nbHits) && payload.nbHits! >= 0 ? payload.nbHits! : null;
+        const lower = Math.floor(windowStart / 1000), upper = Math.floor(windowEnd / 1000);
+        if (validPages && payload.nbPages! > 0 && totalHits !== null && totalHits > pageCount * 100 && lower < upper) {
+          const middle = lower + Math.floor((upper - lower) / 2);
+          const parts: SearchResults[] = [];
+          const partitionWarnings = [...warnings, "Hacker News query was split into nonoverlapping timestamp windows to recover results beyond its pagination ceiling."];
+          for (const [from, to] of [[lower, middle], [middle + 1, upper]]) {
+            try { parts.push(await searchHackerNewsSignals(query, from * 1000, to * 1000)); }
+            catch (error) { partitionWarnings.push(`Hacker News timestamp window ${from}–${to} failed; readable results were retained (${error instanceof Error ? error.message : "unreadable response"}).`); }
+          }
+          return {
+            hits: [...hits, ...parts.flatMap(part => part.hits)],
+            warnings: [...partitionWarnings, ...parts.flatMap(part => part.warnings)],
+            pages: pages + parts.reduce((total, part) => total + part.pages, 0),
+            exhaustive: parts.length === 2 && parts.every(part => part.exhaustive),
+          };
+        }
       } else if (payload.nbPages !== pageCount) {
         exhaustive = false;
         warnings.push("Hacker News page count changed during collection; coverage uses the initial page count.");
@@ -187,6 +205,9 @@ export async function collectDiscoveredResearchSource(
   blockedHosts: Set<string>,
   options: { deferArticleFetch?: boolean } = {},
 ): Promise<DiscoveryCollection> {
+  if (source.kind === "web" && source.pageMode === "article") {
+    return { items: [await fetchDiscoveredResearchArticle(source, { url: source.url, title: source.name }, windowEnd)], warning: null };
+  }
   if (source.kind !== "search") {
     let collection: DiscoveryCollection;
     try {

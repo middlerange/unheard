@@ -23,7 +23,7 @@ describe("v15 chosen-profile evidence protocol", () => {
   it("requires profile choice and rationale before claim and score, including in Anthropic's wire schema", () => {
     const wire = evidenceJsonSchemaForItems(["study"], ["company", "personal"]);
     const schema = wire.properties.findings.properties.study;
-    expect(Object.keys(schema.properties)).toEqual(["chosenProfileId", "profileFit", "summary", "evidence", "contentAngle", "whyItMatters", "limitations", "familyKey", "score"]);
+    expect(Object.keys(schema.properties)).toEqual(["chosenProfileId", "profileFit", "summary", "evidence", "contentAngle", "whyItMatters", "limitations", "familyKey", "score", "additionalIdeas"]);
     expect(schema.required.slice(0, 2)).toEqual(["chosenProfileId", "profileFit"]);
     expect(schema.properties.chosenProfileId).toEqual({ anyOf: [{ type: "string", enum: ["company", "personal"] }, { type: "null" }] });
     const converted = anthropicResearchSchema(wire) as typeof wire;
@@ -53,6 +53,34 @@ describe("v15 chosen-profile evidence protocol", () => {
     expect(validateResearchEvidence(oldArray.findings, items)).toEqual([finding]);
     expect(() => validateResearchEvidenceProfiles(oldArray.findings, ["personal"])).toThrow();
     expect(() => validateResearchEvidenceProfiles([{ ...finding, score: 20, chosenProfileId: "foreign", profileFit: "Unknown even for rejection." }], ["personal"])).toThrow();
+  });
+});
+
+describe("distinct supported ideas from one public source", () => {
+  const secondQuote = "Teams should measure channel adoption separately from reported impact.";
+  const extra = { ...finding, evidence: secondQuote, familyKey: "channel-impact", chosenProfileId: "personal", profileFit: "The personal profile covers distribution decisions." };
+  const { itemId: _id, ...additional } = extra;
+  it("keeps each independently quoted idea while assessing source coverage exactly once", () => {
+    const base = { ...finding, chosenProfileId: "personal", profileFit: "A concrete policy decision.", additionalIdeas: [additional] };
+    const parsed = researchEvidenceSchema.parse({ findings: [base] });
+    expect(validateResearchEvidenceCoverage(parsed.findings, ["study"])).toHaveLength(1);
+    validateResearchEvidenceProfiles(parsed.findings, ["personal"]);
+    const accepted = validateResearchEvidence(parsed.findings, [{ id: "study", content: quote + " " + secondQuote }]);
+    expect(accepted.map(x => x.familyKey)).toEqual([finding.familyKey, extra.familyKey]);
+    expect(accepted[1]).toMatchObject({ itemId: "study", isAdditional: true, evidence: secondQuote });
+  });
+  it("rejects unsupported extra quotes and does not let a passing primary rescue them", () => {
+    const base = { ...finding, additionalIdeas: [additional] };
+    expect(validateResearchEvidence([base], items).map(x => x.familyKey)).toEqual([finding.familyKey]);
+  });
+  it("does not require a passing primary when a distinct additional idea is grounded", () => {
+    const base = { ...finding, score: 45, additionalIdeas: [additional] };
+    expect(validateResearchEvidence([base], [{ id: "study", content: secondQuote }])).toEqual([{ ...extra, isAdditional: true }]);
+  });
+  it("rejects repeated families, nested item substitution and invalid extra profiles", () => {
+    expect(() => researchEvidenceSchema.parse({ findings: [{ ...finding, additionalIdeas: [{ ...additional, familyKey: "GenAI policy study" }] }] })).toThrow("Distinct ideas");
+    expect(() => researchEvidenceSchema.parse({ findings: [{ ...finding, additionalIdeas: [{ ...additional, itemId: "foreign" }] }] })).toThrow();
+    expect(() => validateResearchEvidenceProfiles([{ ...finding, chosenProfileId: "personal", profileFit: "Fits.", additionalIdeas: [{ ...additional, chosenProfileId: "foreign" }] }], ["personal"])).toThrow();
   });
 });
 
@@ -211,8 +239,8 @@ it("normalizes keyed evidence while retaining legacy cached arrays and quote val
 it("places the supported claim, exact evidence and limitations before the final evidence score", () => {
   const fields = ["summary", "evidence", "contentAngle", "whyItMatters", "limitations", "familyKey", "score"];
   const schema = evidenceJsonSchemaForItems(["study"]).properties.findings.properties.study;
-  expect(Object.keys(schema.properties)).toEqual(fields);
-  expect(schema.required).toEqual(fields);
+  expect(Object.keys(schema.properties)).toEqual([...fields, "additionalIdeas"]);
+  expect(schema.required).toEqual([...fields, "additionalIdeas"]);
   expect(Object.keys(researchEvidenceSchema.parse({ findings: [finding] }).findings[0])).toEqual(["itemId", ...fields]);
   expect(validateResearchEvidence([{ ...finding, evidence: "Unverified efficacy that the source does not contain." }], items)).toEqual([]);
 });

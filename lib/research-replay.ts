@@ -5,7 +5,7 @@ import { research_cache, research_runs, research_sources } from './schema';
 import { getFrozenResearchAudience, parseResearchAudience } from './research-audience';
 import { retryResearchStorage } from './research-storage';
 import { RESEARCH_SOURCE_SEEDS } from './research-sources';
-import { assertPublicResearchUrl } from './research-collectors';
+import { assertPublicResearchUrl, canonicalResearchUrl } from './research-collectors';
 import { hasUsablePewResearchBody } from './research-pew';
 import { RESEARCH_POST_MIN_SCORE } from './research-policy';
 import { RESEARCH_MODEL, RESEARCH_PROMPT_VERSION, RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS,
@@ -26,7 +26,11 @@ export const researchReplayItemSchema = z.object({
 const prepareSchema = z.object({ operation: z.literal('prepare'), runId: z.uuid(), audienceRunId: z.string().min(1).max(100),
   windowStart: timestamp, windowEnd: timestamp, inventorySha256: z.string().regex(/^[a-f0-9]{64}$/),
   inventoryCount: z.number().int().positive().max(100000), sourceIds: z.array(z.string().min(1).max(200)).min(1),
+  freshnessWindowStart: timestamp.optional(), observationWindowStart: timestamp.optional(), observationWindowEnd: timestamp.optional(),
 }).strict().refine(input => input.windowStart < input.windowEnd, 'Window end must follow start')
+  .refine(input => input.freshnessWindowStart === undefined || input.freshnessWindowStart >= input.windowStart && input.freshnessWindowStart < input.windowEnd, 'Freshness boundary must be inside the publication window')
+  .refine(input => input.observationWindowStart === undefined && input.observationWindowEnd === undefined
+    || input.observationWindowStart !== undefined && input.observationWindowEnd !== undefined && input.observationWindowStart < input.observationWindowEnd, 'Observation windows require both ordered boundaries')
   .refine(input => new Set(input.sourceIds).size === input.sourceIds.length, 'Source IDs must be unique');
 export const researchReplayRequestSchema = z.discriminatedUnion('operation', [prepareSchema,
   z.object({ operation: z.literal('upload'), runId: z.uuid(), chunkIndex: z.number().int().nonnegative(), items: z.array(researchReplayItemSchema).min(1).max(20) }).strict(),
@@ -53,7 +57,7 @@ export async function readResearchReplayRequest(request: Request) {
 }
 export type ResearchReplayItem = z.infer<typeof researchReplayItemSchema>;
 type Run = typeof research_runs.$inferSelect;
-type Config = Omit<z.infer<typeof prepareSchema>, 'operation'> & { model: string; version: string; contractHash: string; icp: string };
+type Config = Omit<z.infer<typeof prepareSchema>, 'operation'> & { model: string; version: string; contractHash: string; icp: string; articleWatchUrls?: string[] };
 type Entry = { id: string; chunkIndex: number; index: number; route: 'direct_evidence' | 'metadata_screen' | 'excluded'; reason: string | null };
 type Plan = { config: Config; uploadedSha256: string; entries: Entry[]; eligibleIds: string[] };
 type Progress = { screenOffset: number; selectedIds: string[]; evidenceOffset: number; screenedCount: number; evidenceCount: number; qualifiedCount: number };
@@ -75,9 +79,13 @@ async function contractHash() {
     screenSchema: screeningJsonSchemaForItems(['item']), evidenceSchema: evidenceJsonSchemaForItems(['item'], ['profile']),
     score: RESEARCH_POST_MIN_SCORE, route: 'readable-500-pew-guard-v1' }));
 }
-export function researchReplayEligibility(item: ResearchReplayItem, config: Pick<Config, 'sourceIds' | 'windowStart' | 'windowEnd'>) {
+export function researchReplayEligibility(item: ResearchReplayItem, config: Pick<Config, 'sourceIds' | 'windowStart' | 'windowEnd'> & Partial<Pick<Config, 'articleWatchUrls' | 'observationWindowStart' | 'observationWindowEnd'>>) {
   if (!config.sourceIds.includes(item.sourceId)) return 'source_not_in_frozen_roster';
-  if (item.publishedAt === null) return 'undated';
+  if (item.publishedAt === null) {
+    if (!config.articleWatchUrls?.includes(canonicalResearchUrl(item.url)) || config.observationWindowStart === undefined || config.observationWindowEnd === undefined
+      || item.discoveredAt === null || item.discoveredAt < config.observationWindowStart || item.discoveredAt >= config.observationWindowEnd) return 'undated';
+    return item.contentType === 'article' ? null : 'unavailable_transcript';
+  }
   if (item.publishedAt < config.windowStart || item.publishedAt >= config.windowEnd) return 'outside_frozen_window';
   if (item.contentType !== 'article' && item.transcriptStatus !== 'available') return 'unavailable_transcript';
   return null;
@@ -130,7 +138,8 @@ export async function researchReplayAction(teamId: string, input: unknown) {
     const existing = await db.select().from(research_runs).where(eq(research_runs.id, data.runId)).get();
     if (existing && (existing.team_id !== teamId || existing.mode !== 'replay')) throw new Error('Replay ID is already in use');
     const { operation: _, ...requested } = data;
-    const config: Config = { ...requested, model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION, contractHash: await contractHash(), icp: original.icp };
+    const config: Config = { ...requested, model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION, contractHash: await contractHash(), icp: original.icp,
+      articleWatchUrls: RESEARCH_SOURCE_SEEDS.filter(seed => data.sourceIds.includes(seed.id) && seed.pageMode === 'article').map(seed => canonicalResearchUrl(seed.url)) };
     const createdAt = Date.now(), configId = prefix(data.runId) + 'config';
     await retryResearchStorage(async () => db.batch([
       db.insert(research_runs).values({ id: data.runId, team_id: teamId, mode: 'replay', status: 'queued', days: Math.ceil((data.windowEnd - data.windowStart) / 86400000), editorial: false,
@@ -175,13 +184,16 @@ export async function researchReplayStatus(teamId: string, runId: string) {
   return { run, records: rows.map(row => ({ id: row.id, value: JSON.parse(row.value) })) };
 }
 
-function screenInput(item: ResearchReplayItem) {
-  return { id: item.id, title: item.title, excerpt: item.excerpt.slice(0, 900), publicText: item.content,
-    contentProvenance: item.contentProvenance, publishedAt: item.publishedAt, discoveredAt: item.discoveredAt, signalKind: 'fresh', sourceId: item.sourceId };
+export function researchReplaySignalKind(item: ResearchReplayItem, config: Pick<Config, 'windowStart' | 'freshnessWindowStart'>) {
+  return item.publishedAt === null ? 'undated_reference' : item.publishedAt < (config.freshnessWindowStart ?? config.windowStart) ? 'evergreen_newly_discovered' : 'fresh';
 }
-function evidenceInput(item: ResearchReplayItem) {
+function screenInput(item: ResearchReplayItem, config: Config) {
+  return { id: item.id, title: item.title, excerpt: item.excerpt.slice(0, 900), publicText: item.content,
+    contentProvenance: item.contentProvenance, publishedAt: item.publishedAt, discoveredAt: item.discoveredAt, signalKind: researchReplaySignalKind(item, config), sourceId: item.sourceId };
+}
+function evidenceInput(item: ResearchReplayItem, config: Config) {
   return { id: item.id, title: item.title, sourceId: item.sourceId, publishedAt: item.publishedAt,
-    discoveredAt: item.discoveredAt, signalKind: 'fresh', content: item.content, contentProvenance: item.contentProvenance };
+    discoveredAt: item.discoveredAt, signalKind: researchReplaySignalKind(item, config), content: item.content, contentProvenance: item.contentProvenance };
 }
 export async function processResearchReplay(run: Run, operation: string) {
   if (operation === 'drafts') return { ok: true, auditOnly: true };
@@ -214,7 +226,7 @@ export async function processResearchReplay(run: Run, operation: string) {
   if (!saved) { await persist(); return { pending: true }; }
   if (progress.screenOffset < incompleteIds.length) {
     const ids = incompleteIds.slice(progress.screenOffset, progress.screenOffset + RESEARCH_SCREEN_BATCH_SIZE);
-    const input = ids.map(id => screenInput(itemMap.get(id)!));
+    const input = ids.map(id => screenInput(itemMap.get(id)!, plan.config));
     await immutable(run.team_id, prefix(run.id) + 'request:screen:' + progress.screenOffset, { stage: 'screen', input });
     const output = validateResearchScreening(researchScreeningSchema.parse(await cachedResearchModel(run, 'screen', input, RESEARCH_SCREEN_INSTRUCTIONS,
       screeningJsonSchemaForItems(ids), 5000)), ids);
@@ -231,16 +243,17 @@ export async function processResearchReplay(run: Run, operation: string) {
     const batch = ids.map(id => itemMap.get(id)!).filter(item => researchReplayRoute(item) === 'direct_evidence');
     let assessments: z.infer<typeof researchEvidenceSchema>['findings'] = [];
     if (batch.length) {
-      await immutable(run.team_id, prefix(run.id) + 'request:evidence:' + progress.evidenceOffset, { stage: 'evidence', input: batch.map(evidenceInput) });
-      const output = researchEvidenceSchema.parse(await cachedResearchModel(run, 'evidence', batch.map(evidenceInput), RESEARCH_EVIDENCE_INSTRUCTIONS,
-        evidenceJsonSchemaForItems(batch.map(item => item.id)), 5000));
+      await immutable(run.team_id, prefix(run.id) + 'request:evidence:' + progress.evidenceOffset, { stage: 'evidence', input: batch.map(item => evidenceInput(item, plan.config)) });
+      const output = researchEvidenceSchema.parse(await cachedResearchModel(run, 'evidence', batch.map(item => evidenceInput(item, plan.config)), RESEARCH_EVIDENCE_INSTRUCTIONS,
+        evidenceJsonSchemaForItems(batch.map(item => item.id)), 9000));
       assessments = validateResearchEvidenceCoverage(output.findings, batch.map(item => item.id));
       const audience = await getFrozenResearchAudience(run);
       validateResearchEvidenceProfiles(assessments, audience.publishingProfiles.map(profile => profile.id));
     }
     const accepted = validateResearchEvidence(assessments, batch.map(item => ({ id: item.id, content: item.content! })));
-    await immutable(run.team_id, prefix(run.id) + 'evidence:' + progress.evidenceOffset, { ids, input: batch.map(evidenceInput), assessments,
-      acceptedIds: accepted.map(item => item.itemId), unavailableIds: ids.filter(id => !batch.some(item => item.id === id)), unavailableReason: 'No captured usable public body in the frozen replay corpus; live hydration was not performed.' });
+    await immutable(run.team_id, prefix(run.id) + 'evidence:' + progress.evidenceOffset, { ids, input: batch.map(item => evidenceInput(item, plan.config)), assessments,
+      acceptedIds: [...new Set(accepted.map(item => item.itemId))], acceptedIdeas: accepted,
+      unavailableIds: ids.filter(id => !batch.some(item => item.id === id)), unavailableReason: 'No captured usable public body in the frozen replay corpus; live hydration was not performed.' });
     progress.evidenceOffset += ids.length;
     progress.evidenceCount += assessments.length;
     progress.qualifiedCount += accepted.length;

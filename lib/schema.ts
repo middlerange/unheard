@@ -433,6 +433,7 @@ export const research_cache = sqliteTable('research_cache', {
 export const research_findings = sqliteTable('research_findings', {
   id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }), run_id: text('run_id').notNull().references(() => research_runs.id, { onDelete: 'cascade' }), item_id: text('item_id').notNull().references(() => research_items.id, { onDelete: 'cascade' }),
   source_id: text('source_id').notNull(), title: text('title').notNull(), url: text('url').notNull(), published_at: integer('published_at').notNull(), score: integer('score').notNull(),
+  source_published_at: integer('source_published_at'), source_discovered_at: integer('source_discovered_at'), signal_kind: text('signal_kind'),
   summary: text('summary').notNull(), why_it_matters: text('why_it_matters').notNull(), content_angle: text('content_angle').notNull(), evidence: text('evidence').notNull(), limitations: text('limitations').notNull(),
   status: text('status').notNull().default('new'), idea_id: text('idea_id'), created_at: integer('created_at').notNull(), family_key: text('family_key').notNull(), content_type: text('content_type').notNull().default('article'), transcript_status: text('transcript_status').notNull().default('not_applicable'),
 });

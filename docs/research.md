@@ -544,3 +544,35 @@ the guard stops before request N+1. Cache hits do not consume that scope. This
 administrative development guard does not cap normal daily research. Prefer the
 configured Worker's audit-only replay when model-provider keys are kept there;
 do not copy those keys locally to run an experiment.
+
+### Distinct ideas and explicit reference watches
+
+Research v16 returns one primary assessment per source and an `additionalIdeas`
+array for genuinely different supported decisions. Every idea keeps its own
+profile choice, score, exact quote and story family. Several paraphrases of one
+claim do not create several ideas. Family identities retain their saved ideas,
+review snapshots and approvals when another idea is discovered in the same
+document. Migration 0034 preserves findings, reviews and revisions while removing
+the old one-finding-per-item constraint; its rollback and foreign-key behavior
+are covered by a SQLite migration test.
+
+An explicitly configured `pageMode: "article"` reads the public reference page
+itself. Publisher indexes remain separate discovery routes. Unknown publication
+dates stay unknown; a recently observed, explicitly watched reference may qualify
+with `undated_reference` context and its actual first observation. Matching a
+watch uses its exact canonical URL even when an earlier collector owns that item.
+Unrelated undated search results remain excluded. Original publication and
+observation metadata are retained in immutable finding snapshots and displayed
+truthfully in the UI, writer inputs, saved ideas and review packets.
+
+Audit replays can declare a separate freshness boundary and an observation
+window for registered article watches. This allows historical references and
+current undated material to be evaluated without inventing release dates or
+claiming they were discovered before the historical social examples. Report
+historical timely capture, current reference coverage, source qualification and
+matching central ideas separately. Benchmark-informed page watches establish
+coverage of known references, not independent discovery recall on unseen items.
+
+Hacker News queries split nonoverlapping timestamp ranges when reported results
+exceed the provider's pagination ceiling. Readable results survive a failed
+partition; a saturated one-second range remains explicitly incomplete.

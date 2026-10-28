@@ -26,7 +26,8 @@ import { SLACK_TEST_PROMPT } from "./slack-test-content";
 import type { ResearchDraftContent, ResearchRunDiagnostics } from "./research-types";
 import { researchNoveltyContext, type ResearchNoveltyContext } from "./research-novelty";
 import { retryResearchStorage } from "./research-storage";
-import { getDraftResearchFindings, getRunResearchFindings, saveResearchFindingSnapshot } from "./research-finding-snapshots";
+import { researchFindingDates, researchFindingSourceContext } from "./research-dates";
+import { getDraftResearchFindings, getRunResearchFindings, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
 
 import {
   RESEARCH_WRITING_VERSION, RESEARCH_WRITING_MODEL, RESEARCH_DRAFT_INSTRUCTIONS,
@@ -274,9 +275,9 @@ export async function runResearchDraftWriting(input: ResearchDraftWritingInput, 
       content: {
         ...content, editorialReview: review,
         sourceContext: {
-          ...(typeof source.publishedAt === "string" ? { publishedAt: source.publishedAt } : {}),
+          ...(typeof source.publishedAt === "string" || source.publishedAt === null ? { publishedAt: source.publishedAt } : {}),
           ...(typeof source.discoveredAt === "string" ? { discoveredAt: source.discoveredAt } : {}),
-          ...(source.signalKind === "evergreen_newly_discovered" || source.signalKind === "fresh"
+          ...(source.signalKind === "evergreen_newly_discovered" || source.signalKind === "fresh" || source.signalKind === "undated_reference"
             ? { signalKind: source.signalKind } : {}),
         },
       },
@@ -296,7 +297,7 @@ export async function runResearchDraftWriting(input: ResearchDraftWritingInput, 
 
 async function generateDraft(
   run: typeof research_runs.$inferSelect,
-  finding: typeof research_findings.$inferSelect,
+  finding: ResearchFindingRow,
   destinations: Destination[],
   current?: ResearchDraftContent,
   editorialInstruction?: string,
@@ -337,6 +338,7 @@ async function generateDraft(
         content: research_drafts.content, createdAt: research_drafts.created_at, status: research_drafts.status, isTest: research_drafts.is_test,
         familyKey: research_findings.family_key, title: research_findings.title, url: research_findings.url,
         publishedAt: research_findings.published_at, summary: research_findings.summary, contentAngle: research_findings.content_angle, evidence: research_findings.evidence,
+        source_published_at: research_findings.source_published_at, signal_kind: research_findings.signal_kind,
       }).from(research_drafts).innerJoin(research_findings, and(
         eq(research_findings.id, research_drafts.finding_id), eq(research_findings.team_id, research_drafts.team_id),
       )).where(eq(research_drafts.team_id, run.team_id)).all(),
@@ -352,9 +354,10 @@ async function generateDraft(
     const originals = await getDraftResearchFindings(run.team_id, priorDrafts);
     const originalPriorDrafts = priorDrafts.map(draft => {
       const original = originals.get(`${draft.runId}:${draft.findingId}`);
+      const truthfulDraft = { ...draft, publishedAt: researchFindingDates({ ...draft, published_at: draft.publishedAt }).publishedAt };
       return original ? { ...draft, familyKey: original.family_key, title: original.title, url: original.url,
-        publishedAt: original.published_at, summary: original.summary, contentAngle: original.content_angle,
-        evidence: original.evidence } : draft;
+        publishedAt: researchFindingDates(original).publishedAt, summary: original.summary, contentAngle: original.content_angle,
+        evidence: original.evidence } : truthfulDraft;
     });
     const noveltyContext = researchNoveltyContext(originalPriorDrafts, teamChannels, {
       runId: run.id, findingId: finding.id, familyKey: finding.family_key, title: finding.title, url: finding.url,
@@ -389,10 +392,7 @@ async function generateDraft(
       source: {
         title: finding.title,
         url: finding.url,
-        publishedAt: new Date(finding.published_at).toISOString(),
-        discoveredAt: new Date(item.collected_at).toISOString(),
-        signalKind: finding.published_at < run.created_at - run.days * 86400000
-          ? "evergreen_newly_discovered" : "fresh",
+        ...researchFindingSourceContext(finding, run, item.collected_at),
         content: sourceContent,
         contentProvenance: item.content_provenance,
         ...(supportingSources.length ? { supportingSources } : {}),
@@ -610,7 +610,7 @@ export async function processResearchDraftJob(runId: string) {
   const sourceIds = new Set(JSON.parse(run.source_ids) as string[]);
   const candidates = progress ? [] : (await getRunResearchFindings(run.team_id, run.id)).filter(finding =>
     sourceIds.has(finding.source_id) && finding.score >= RESEARCH_POST_MIN_SCORE
-    && finding.published_at <= run.created_at && finding.status !== "dismissed");
+    && (researchFindingDates(finding).publishedAt === null || finding.published_at <= run.created_at) && finding.status !== "dismissed");
   for (const finding of candidates) await saveResearchFindingSnapshot(finding);
   const previous = await db
     .select({

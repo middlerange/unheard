@@ -13,6 +13,7 @@ export type ResearchSourceSeed = {
   priority: 1 | 2 | 3;
   channelId?: string;
   articlePathPrefixes?: string[];
+  pageMode?: "index" | "article";
   backfillUrls?: string[];
   maxDiscoveryLinks?: number;
   discoveryQueries?: string[];
@@ -69,7 +70,9 @@ export type ResearchFinding = {
   sourceName: string;
   title: string;
   url: string;
-  publishedAt: number;
+  publishedAt: number | null;
+  discoveredAt: number | null;
+  signalKind: import("./research-dates").ResearchSignalKind | null;
   score: number;
   summary: string;
   whyItMatters: string;
@@ -111,9 +114,9 @@ export type ResearchDraftContent = {
   editorial?: import("./research-writing").ResearchEditorial;
   editorialReview?: import("./research-writing").ResearchEditorialReview;
   sourceContext?: {
-    publishedAt?: string;
+    publishedAt?: string | null;
     discoveredAt?: string;
-    signalKind?: "evergreen_newly_discovered" | "fresh";
+    signalKind?: import("./research-dates").ResearchSignalKind;
   };
   targets: Array<{
     channelId: string;
