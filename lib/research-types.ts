@@ -25,6 +25,12 @@ export type ResearchSourceSeed = {
   discoveryProvider?: "treg" | "hackernews";
   discoverySearchType?: "web" | "news";
   discoveryBlockedHosts?: string[];
+  referencePacket?: {
+    id: string;
+    enabled: boolean;
+    sourceIds: string[];
+    relationship: { type: 'same_publisher' | 'same_product' | 'same_repository' | 'configured_reference'; reason: string };
+  };
 };
 export type ResearchSource = ResearchSourceSeed & {
   lastCollectedAt: number | null;

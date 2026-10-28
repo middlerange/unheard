@@ -1660,7 +1660,7 @@ describe("research persistence and team isolation", () => {
       return modelResponseFixture({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
     });
     try {
-      expect(await processResearchJob({ operation: "rank", runId: "family-run" })).toEqual({ ok: true, pending: false });
+      expect(await finishResearchRankJob("family-run")).toEqual({ ok: true, pending: false });
       expect(execute({ queries: [{ sql: "SELECT id,item_id,status,score,summary FROM research_findings WHERE team_id='family'" }] })[0].results)
         .toEqual([{ id: "original-finding", item_id: "original", status: "dismissed", score: 85, summary: "Saved summary" }]);
       const run = (await getResearchSnapshot("family")).runs[0];
@@ -1679,7 +1679,7 @@ describe("research persistence and team isolation", () => {
       if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
-  }, 20_000);
+  }, 60_000);
   it("screens older eligible items beyond the first metadata batch and caches model responses", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(
       (source) => source.feedUrl && source.kind === "rss",

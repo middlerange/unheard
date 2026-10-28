@@ -7,9 +7,13 @@ import { researchSelectionAudience, RESEARCH_SELECTION_VIEW_VERSION } from "./re
 import { cacheValidResearchEvidenceItems, researchEvidenceFailures, researchEvidenceItemCacheId, reuseResearchEvidenceItems, validateResearchEvidenceCacheValue, type EvidenceCacheInput, type EvidenceCacheValue, type EvidenceFailure } from "./research-evidence-cache";
 import { repairResearchCitation, RESEARCH_QUOTE_REPAIR_INSTRUCTIONS, sameContextQuoteFailure, verifyResearchEvidenceFailure } from "./research-quote-repair";
 import { coverResearchEvidence, ResearchCoveragePending, RESEARCH_COVERAGE_VERSION, type ResearchCoverageAccess } from "./research-coverage";
-import { reviewResearchSources, ResearchSourceReviewPending, RESEARCH_SOURCE_REVIEW_VERSION, type ResearchSourceReviewRequest } from "./research-source-review";
+import { reviewResearchSources, ResearchSourceReviewPending, RESEARCH_SOURCE_REVIEW_VERSION, type ResearchSourceReviewRequest, type ResearchSourceReviewPolicy } from "./research-source-review";
 import { RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS } from "./research-source-review-model";
 import { RESEARCH_SOURCE_DEPTH_VERSION, RESEARCH_SOURCE_DEPTH_INSTRUCTIONS, RESEARCH_SOURCE_DEPTH_SONNET_INSTRUCTIONS, researchSourceDepthSchema, researchSourceDepthRequestMetadata, normalizeResearchSourceDepth } from "./research-source-depth-model";
+import { researchAttributedQuoteRanges, researchSourceDepthQuotePolicy, researchSourceQuoteDepthRequestMetadata,
+  RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION, RESEARCH_SOURCE_DEPTH_QUOTES_VERSION, RESEARCH_SOURCE_DEPTH_QUOTES_SONNET_INSTRUCTIONS } from "./research-source-depth-quotes";
+import { reviewResearchSourcePackets, configuredResearchPacketDefinitions, researchPacketsFromDefinitions } from "./research-source-packets";
+import type { ResearchSourcePacket } from "./research-source-packet-model";
 import { researchFindingDates, researchItemSignalKind } from "./research-dates";
 import { getDraftResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
 import { hasUsablePewResearchBody, isPewResearchSource } from "./research-pew";
@@ -1160,7 +1164,8 @@ async function cachedModel(
     await recordPhase("coverage", RESEARCH_COVERAGE_VERSION, [], covered.manifestIds, false);
     const reviewAccess = {
       ...storage,
-      generate: async (request: ResearchSourceReviewRequest) => (await callResearchModel(request.instructions, request.data, request.schema, outputTokens,
+      generate: async (request: ResearchSourceReviewRequest) => (await callResearchModel(request.instructions, request.data, request.schema,
+        typeof request.data.items[0]?.reviewOutputTokens === "number" ? request.data.items[0].reviewOutputTokens : outputTokens,
         { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? "replay_review_evidence" : "review_evidence" }, request.model)).value,
     };
     const reviewed = await reviewResearchSources(sources, { ...covered.value, coverageManifestIds: covered.manifestIds }, reviewAccess);
@@ -1171,15 +1176,32 @@ async function cachedModel(
     });
     await recordPhase(activeReviewPhase.name, activeReviewPhase.version, [], checked.manifestIds, false);
     activeReviewPhase = { name: "source-depth", version: RESEARCH_SOURCE_DEPTH_VERSION };
-    let depthModel: string | undefined;
+    let depthModel: string | undefined, depthGroupingVersion: string | undefined;
     if (run.mode === "replay") {
-      const config = await read(`research-replay:${run.id}:config`) as { depthModel?: unknown } | null;
+      const config = await read(`research-replay:${run.id}:config`) as { depthModel?: unknown; depthGroupingVersion?: unknown } | null;
       if (config?.depthModel !== undefined) {
         if (config.depthModel !== "gpt-6-sol" && config.depthModel !== "claude-sonnet-5-5") throw new Error("Unknown frozen depth-review model");
         depthModel = config.depthModel;
       }
+      if (config?.depthGroupingVersion !== undefined) {
+        if (config.depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION) throw new Error("Unknown frozen quote grouping policy");
+        depthGroupingVersion = config.depthGroupingVersion;
+      }
+    } else {
+      const policyId = `research-depth-policy:${run.id}`;
+      let policy = await read(policyId) as { model?: string; groupingVersion?: string } | null;
+      if (!policy) {
+        policy = { ...(process.env.RESEARCH_DEPTH_MODEL ? { model: process.env.RESEARCH_DEPTH_MODEL } : {}),
+          ...(process.env.RESEARCH_DEPTH_GROUPING_VERSION ? { groupingVersion: process.env.RESEARCH_DEPTH_GROUPING_VERSION } : {}) };
+        await storage.writeImmutable(policyId, policy);
+        policy = await read(policyId) as typeof policy;
+      }
+      depthModel = policy?.model; depthGroupingVersion = policy?.groupingVersion;
+      if (depthModel !== undefined && depthModel !== "gpt-6-sol" && depthModel !== "claude-sonnet-5-5") throw new Error("Unknown configured depth-review model");
+      if (depthGroupingVersion !== undefined && depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION) throw new Error("Unknown configured quote grouping policy");
     }
-    const expanded = await reviewResearchSources(sources, checked.value, reviewAccess, {
+    if (depthGroupingVersion && depthModel !== "claude-sonnet-5-5") throw new Error("Quote grouping requires the explicit Sonnet research grader");
+    const depthPolicy: ResearchSourceReviewPolicy = {
       version: RESEARCH_SOURCE_DEPTH_VERSION, instructions: depthModel === "claude-sonnet-5-5" ? RESEARCH_SOURCE_DEPTH_SONNET_INSTRUCTIONS : RESEARCH_SOURCE_DEPTH_INSTRUCTIONS,
       ...(depthModel ? { model: depthModel } : {}),
       sourceSchema: researchSourceDepthSchema,
@@ -1188,7 +1210,21 @@ async function cachedModel(
         return { groups, depth, ...(depthModel === "claude-sonnet-5-5" ? { reviewTransport: "anthropic-tool-v1" } : {}) };
       },
       normalize: normalizeResearchSourceDepth,
-    });
+    };
+    if (depthGroupingVersion) {
+      activeReviewPhase.version = RESEARCH_SOURCE_DEPTH_QUOTES_VERSION;
+      const quotePolicy: ResearchSourceReviewPolicy = { ...researchSourceDepthQuotePolicy,
+        model: depthModel, instructions: RESEARCH_SOURCE_DEPTH_QUOTES_SONNET_INSTRUCTIONS,
+        requestMetadata: async source => {
+          const { groups, depth } = await researchSourceQuoteDepthRequestMetadata(source);
+          const reviewOutputTokens = Math.max(outputTokens, 1024 * (Object.keys(groups).length + 1) + 2048);
+          if (reviewOutputTokens > 128_000) throw new Error("Required quote groups exceed the model output budget; no groups were dropped");
+          return { groups, depth, reviewTransport: "anthropic-tool-v1", reviewOutputTokens };
+        },
+      };
+      depthPolicy.policyForSource = source => researchAttributedQuoteRanges(source.content).length ? quotePolicy : depthPolicy;
+    }
+    const expanded = await reviewResearchSources(sources, checked.value, reviewAccess, depthPolicy);
     await recordPhase(activeReviewPhase.name, activeReviewPhase.version, [], expanded.manifestIds, false);
     return expanded.value;
   } catch (error) {
@@ -1198,6 +1234,21 @@ async function cachedModel(
   }
 }
 export { cachedModel as cachedResearchModel, baseCachedModel as cachedResearchBaseModel };
+export async function cachedResearchSourcePackets(run: typeof research_runs.$inferSelect, packets: ResearchSourcePacket[], budget = { remaining: 2 }) {
+  const db = await getDb(), audience = await getFrozenResearchAudience(run);
+  return reviewResearchSourcePackets(packets, {
+    context: { teamId: run.team_id, model: RESEARCH_MODEL, promptVersion: RESEARCH_PROMPT_VERSION,
+      system: RESEARCH_EVIDENCE_INSTRUCTIONS, audience, selectionViewVersion: RESEARCH_SELECTION_VIEW_VERSION,
+      selectionAudience: researchSelectionAudience(audience), schemaForItem: id => evidenceJsonSchemaForItems([id], audience.publishingProfiles.map(profile => profile.id)) },
+    budget, model: "claude-sonnet-5-5", outputTokens: RESEARCH_EVIDENCE_OUTPUT_TOKENS,
+    read: async id => { const row = await db.select().from(research_cache).where(and(eq(research_cache.id, id), eq(research_cache.team_id, run.team_id))).get(); return row ? JSON.parse(row.value) : null; },
+    claim: async (id, value) => (await db.insert(research_cache).values({ id, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now() }).onConflictDoNothing().returning({ id: research_cache.id })).length === 1,
+    save: async (id, expected, value) => (await db.update(research_cache).set({ value: JSON.stringify(value) }).where(and(eq(research_cache.id, id), eq(research_cache.team_id, run.team_id), eq(research_cache.value, JSON.stringify(expected)))).returning({ id: research_cache.id })).length === 1,
+    writeImmutable: async (id, value) => { await db.insert(research_cache).values({ id, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now() }).onConflictDoNothing(); },
+    generate: async (request, outputTokens) => (await callResearchModel(request.instructions, request.data, request.schema, outputTokens,
+      { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? "replay_packet_evidence" : "packet_evidence" }, request.model)).value,
+  });
+}
 type ResearchRankDiagnostics = ResearchRunDiagnostics & Required<Pick<ResearchRunDiagnostics, "evidenceCount" | "rejectedStories" | "screenedCount">>;
 type ResearchRankProgress = {
   candidateIds?: string[];
@@ -1207,6 +1258,7 @@ type ResearchRankProgress = {
   nextOffset: number;
   diagnostics: ResearchRankDiagnostics;
   coverageWarning: string | null;
+  referencePacketsComplete?: boolean;
 };
 const MAX_RANK_EVIDENCE_BATCHES = 3;
 const MAX_RANK_ROUTING_BATCHES = 3;
@@ -1255,6 +1307,102 @@ async function researchRoutingPlan(run: typeof research_runs.$inferSelect, ids: 
     || plan.decisions.some(decision => !["direct_evidence", "metadata_screen", "unavailable"].includes(decision.route))
     || JSON.stringify(plan.screenInput?.map(item => item.id)) !== JSON.stringify(screenIds)) throw new Error("Saved research routing plan does not match its frozen candidate batch");
   return plan;
+}
+
+async function saveQualifiedResearchFindings(run: typeof research_runs.$inferSelect, batch: Array<typeof research_items.$inferSelect>,
+  accepted: ReturnType<typeof validateResearchEvidence>, diagnostics: ResearchRankDiagnostics,
+  packetProofs: Awaited<ReturnType<typeof cachedResearchSourcePackets>>['packetProofs'] = []) {
+  const db = await getDb();
+  for (const finding of accepted) {
+    const item = batch.find((item) => item.id === finding.itemId)!;
+    const modelFamilyKey = finding.familyKey
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+    if (!modelFamilyKey) continue;
+    const packetProof = packetProofs.find(proof => proof.primarySourceId === item.id && proof.familyKey.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") === modelFamilyKey);
+    const familyKey = packetProof ? `packet-${packetProof.packetId}-${modelFamilyKey}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") : modelFamilyKey;
+    const bundleId = `research-family-sources:${run.id}:${familyKey}`;
+    const existingBundle = await db.select().from(research_cache).where(and(
+      eq(research_cache.id, bundleId), eq(research_cache.team_id, run.team_id),
+    )).get();
+    const members = new Map<string, { itemId: string; evidence: string }>(
+      (existingBundle ? JSON.parse(existingBundle.value).items : []).map((member: { itemId: string; evidence: string }) => [member.itemId, member]),
+    );
+    members.set(item.id, { itemId: item.id, evidence: finding.evidence });
+    for (const source of packetProof?.sources ?? []) if (source.passages[0]) members.set(source.sourceId, { itemId: source.sourceId, evidence: source.passages[0].text });
+    const bundle = JSON.stringify({ items: [...members.values()] });
+    await db.insert(research_cache).values({
+      id: bundleId, team_id: run.team_id, value: bundle, created_at: Date.now(),
+    }).onConflictDoUpdate({ target: research_cache.id, set: { value: bundle } });
+    const familyOwner = await db.select({ id: research_findings.id, itemId: research_findings.item_id })
+      .from(research_findings).where(and(
+        eq(research_findings.team_id, run.team_id),
+        eq(research_findings.family_key, familyKey),
+      )).get();
+    if (familyOwner && familyOwner.itemId !== item.id) {
+      diagnostics.rejectedStories.push({
+        title: item.title, score: finding.score,
+        reason: "This story family already has a saved finding from another source; retained that finding and its review state.",
+      });
+      continue;
+    }
+    const legacyId = await researchHash(`${run.team_id}:${item.id}`);
+    const legacyFinding = await db.select().from(research_findings).where(and(
+      eq(research_findings.id, legacyId), eq(research_findings.team_id, run.team_id),
+    )).get();
+    const findingId = familyOwner?.id || (finding.isAdditional || legacyFinding && legacyFinding.family_key !== familyKey
+      ? await researchHash(`${run.team_id}:${item.id}:angle:${familyKey}`) : legacyId);
+    const existingFinding = findingId === legacyId ? legacyFinding : await db.select().from(research_findings).where(and(
+      eq(research_findings.id, findingId), eq(research_findings.team_id, run.team_id),
+    )).get();
+    if (packetProof) {
+      const proofId = `research-packet-finding-proof:${run.id}:${findingId}:${await researchHash(JSON.stringify(packetProof))}`;
+      await db.insert(research_cache).values({ id: proofId, team_id: run.team_id, value: JSON.stringify({ finding, packetProof }), created_at: Date.now() }).onConflictDoNothing();
+    }
+    if (existingFinding) await saveResearchFindingSnapshot(existingFinding);
+    const qualified: ResearchFindingRow = {
+      id: findingId, team_id: run.team_id, run_id: run.id, item_id: item.id,
+      source_id: item.source_id, title: item.title, url: item.canonical_url,
+      published_at: item.published_at ?? item.collected_at,
+      source_published_at: item.published_at, source_discovered_at: item.collected_at,
+      source_content_changed_at: item.content_changed_at,
+      signal_kind: researchItemSignalKind(item, run),
+      status: existingFinding?.status || "new", idea_id: existingFinding?.idea_id || null,
+      created_at: existingFinding?.created_at ?? Date.now(), content_type: item.content_type, transcript_status: item.transcript_status,
+      score: finding.score, summary: finding.summary, why_it_matters: finding.whyItMatters,
+      content_angle: finding.contentAngle, evidence: finding.evidence, limitations: packetProof ? `${finding.limitations}\nPublic supporting sources: ${packetProof.sources.map(source => source.url).join(" ; ")}` : finding.limitations,
+      family_key: familyKey,
+    };
+    await saveResearchFindingSnapshot(packetProof ? { ...qualified, source_packet_proofs: [packetProof],
+      source_packet_id: packetProof.packetId, source_packet_model_family: finding.familyKey } : qualified);
+    await db
+      .insert(research_findings)
+      .values(qualified)
+      .onConflictDoUpdate({
+        target: research_findings.id,
+        set: {
+          run_id: run.id,
+          score: finding.score,
+          summary: finding.summary,
+          why_it_matters: finding.whyItMatters,
+          content_angle: finding.contentAngle,
+          evidence: finding.evidence,
+          limitations: packetProof ? `${finding.limitations}\nPublic supporting sources: ${packetProof.sources.map(source => source.url).join(" ; ")}` : finding.limitations,
+          family_key: familyKey,
+          source_id: qualified.source_id,
+          title: qualified.title,
+          url: qualified.url,
+          published_at: qualified.published_at,
+          source_published_at: qualified.source_published_at,
+          source_discovered_at: qualified.source_discovered_at,
+          source_content_changed_at: qualified.source_content_changed_at,
+          signal_kind: qualified.signal_kind,
+          content_type: qualified.content_type,
+          transcript_status: qualified.transcript_status,
+        },
+      });
+  }
 }
 
 async function rankRun(run: typeof research_runs.$inferSelect) {
@@ -1451,88 +1599,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
           reason,
         });
       }
-      for (const finding of accepted) {
-        const item = batch.find((item) => item.id === finding.itemId)!;
-        const familyKey = finding.familyKey
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, "-")
-          .replace(/^-|-$/g, "");
-        if (!familyKey) continue;
-        const bundleId = `research-family-sources:${run.id}:${familyKey}`;
-        const existingBundle = await db.select().from(research_cache).where(and(
-          eq(research_cache.id, bundleId), eq(research_cache.team_id, run.team_id),
-        )).get();
-        const members = new Map<string, { itemId: string; evidence: string }>(
-          (existingBundle ? JSON.parse(existingBundle.value).items : []).map((member: { itemId: string; evidence: string }) => [member.itemId, member]),
-        );
-        members.set(item.id, { itemId: item.id, evidence: finding.evidence });
-        const bundle = JSON.stringify({ items: [...members.values()] });
-        await db.insert(research_cache).values({
-          id: bundleId, team_id: run.team_id, value: bundle, created_at: Date.now(),
-        }).onConflictDoUpdate({ target: research_cache.id, set: { value: bundle } });
-        const familyOwner = await db.select({ id: research_findings.id, itemId: research_findings.item_id })
-          .from(research_findings).where(and(
-            eq(research_findings.team_id, run.team_id),
-            eq(research_findings.family_key, familyKey),
-          )).get();
-        if (familyOwner && familyOwner.itemId !== item.id) {
-          diagnostics.rejectedStories.push({
-            title: item.title, score: finding.score,
-            reason: "This story family already has a saved finding from another source; retained that finding and its review state.",
-          });
-          continue;
-        }
-        const legacyId = await researchHash(`${run.team_id}:${item.id}`);
-        const legacyFinding = await db.select().from(research_findings).where(and(
-          eq(research_findings.id, legacyId), eq(research_findings.team_id, run.team_id),
-        )).get();
-        const findingId = familyOwner?.id || (finding.isAdditional || legacyFinding && legacyFinding.family_key !== familyKey
-          ? await researchHash(`${run.team_id}:${item.id}:angle:${familyKey}`) : legacyId);
-        const existingFinding = findingId === legacyId ? legacyFinding : await db.select().from(research_findings).where(and(
-          eq(research_findings.id, findingId), eq(research_findings.team_id, run.team_id),
-        )).get();
-        if (existingFinding) await saveResearchFindingSnapshot(existingFinding);
-        const qualified: ResearchFindingRow = {
-          id: findingId, team_id: run.team_id, run_id: run.id, item_id: item.id,
-          source_id: item.source_id, title: item.title, url: item.canonical_url,
-          published_at: item.published_at ?? item.collected_at,
-          source_published_at: item.published_at, source_discovered_at: item.collected_at,
-          source_content_changed_at: item.content_changed_at,
-          signal_kind: researchItemSignalKind(item, run),
-          status: existingFinding?.status || "new", idea_id: existingFinding?.idea_id || null,
-          created_at: existingFinding?.created_at ?? Date.now(), content_type: item.content_type, transcript_status: item.transcript_status,
-          score: finding.score, summary: finding.summary, why_it_matters: finding.whyItMatters,
-          content_angle: finding.contentAngle, evidence: finding.evidence, limitations: finding.limitations,
-          family_key: familyKey,
-        };
-        await saveResearchFindingSnapshot(qualified);
-        await db
-          .insert(research_findings)
-          .values(qualified)
-          .onConflictDoUpdate({
-            target: research_findings.id,
-            set: {
-              run_id: run.id,
-              score: finding.score,
-              summary: finding.summary,
-              why_it_matters: finding.whyItMatters,
-              content_angle: finding.contentAngle,
-              evidence: finding.evidence,
-              limitations: finding.limitations,
-              family_key: familyKey,
-              source_id: qualified.source_id,
-              title: qualified.title,
-              url: qualified.url,
-              published_at: qualified.published_at,
-              source_published_at: qualified.source_published_at,
-              source_discovered_at: qualified.source_discovered_at,
-              source_content_changed_at: qualified.source_content_changed_at,
-              signal_kind: qualified.signal_kind,
-              content_type: qualified.content_type,
-              transcript_status: qualified.transcript_status,
-            },
-          });
-      }
+      await saveQualifiedResearchFindings(run, batch, accepted, diagnostics);
     }
     diagnostics.evidenceCount += batch.length;
     progress.nextOffset += ids.length;
@@ -1548,6 +1615,45 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
   if (progress.nextOffset < progress.selectedIds.length) return { ok: true, pending: true };
   if (!progress.selectedIds.length && diagnostics.screenedCount) {
     diagnostics.outcome = `Screened ${diagnostics.screenedCount} eligible items; none had a strong profile-relevant angle.`;
+    await persistProgress(progress);
+  }
+  if (!progress.referencePacketsComplete && RESEARCH_SOURCE_SEEDS.some(seed => seed.referencePacket?.enabled)) {
+    const packetPlanId = `research-reference-packets:${run.id}:plan`;
+    const readPacketRecord = async (id: string) => db.select().from(research_cache).where(and(eq(research_cache.id, id), eq(research_cache.team_id, run.team_id))).get();
+    let packetPlanRow = await readPacketRecord(packetPlanId);
+    if (!packetPlanRow) {
+      const activeSourceIds = JSON.parse(run.source_ids) as string[];
+      const configuredSeeds = RESEARCH_SOURCE_SEEDS.filter(seed => seed.referencePacket?.enabled && activeSourceIds.includes(seed.id));
+      const memberSeedIds = [...new Set(configuredSeeds.flatMap(seed => [seed.id, ...seed.referencePacket!.sourceIds]))];
+      const urls = RESEARCH_SOURCE_SEEDS.filter(seed => memberSeedIds.includes(seed.id)).map(seed => canonicalResearchUrl(seed.url));
+      const contextItems = urls.length ? await db.select().from(research_items).where(and(eq(research_items.team_id, run.team_id), inArray(research_items.canonical_url, urls))).all() : [];
+      const packetItems = contextItems.map(item => ({ id: item.id, sourceId: item.source_id, url: item.canonical_url, publishedAt: item.published_at,
+        discoveredAt: item.collected_at, content: item.content, contentChangedAt: item.content_changed_at }));
+      const definitionPlan = configuredResearchPacketDefinitions(RESEARCH_SOURCE_SEEDS, packetItems, candidateIds, activeSourceIds, progress.discoveryCutoff ?? run.created_at);
+      const packets = researchPacketsFromDefinitions(definitionPlan.definitions, packetItems);
+      const snapshot = { version: "configured-public-reference-packets-v1", runId: run.id, teamId: run.team_id, candidateIds,
+        cutoff: progress.discoveryCutoff ?? run.created_at, packets, skipped: definitionPlan.skipped, items: contextItems };
+      const value = { ...snapshot, snapshotHash: await researchHash(JSON.stringify(snapshot)) };
+      const serialized = JSON.stringify(value);
+      if (new TextEncoder().encode(serialized).length > 1_800_000) throw new Error("Public reference packet snapshot exceeds the storage budget");
+      await db.insert(research_cache).values({ id: packetPlanId, team_id: run.team_id, value: serialized, created_at: Date.now() }).onConflictDoNothing();
+      packetPlanRow = await readPacketRecord(packetPlanId);
+    }
+    if (!packetPlanRow) throw new Error("Reference packet plan was not saved");
+    const packetPlan = JSON.parse(packetPlanRow.value) as { version: string; runId: string; teamId: string; candidateIds: string[]; packets: ResearchSourcePacket[]; skipped: Array<{ id: string; reason: string }>; items: Array<typeof research_items.$inferSelect>; snapshotHash: string };
+    const { snapshotHash, ...snapshot } = packetPlan;
+    if (packetPlan.version !== "configured-public-reference-packets-v1" || packetPlan.runId !== run.id || packetPlan.teamId !== run.team_id
+      || JSON.stringify(packetPlan.candidateIds) !== JSON.stringify(candidateIds) || snapshotHash !== await researchHash(JSON.stringify(snapshot))) throw new Error("Reference packet plan differs from the frozen run");
+    try {
+      const output = await cachedResearchSourcePackets(run, packetPlan.packets, coverageBudget);
+      await saveQualifiedResearchFindings(run, packetPlan.items, output.acceptedIdeas.map(finding => ({ ...finding, isAdditional: true })), diagnostics, output.packetProofs);
+      const resultId = `research-reference-packets:${run.id}:result`, value = JSON.stringify(output);
+      await db.insert(research_cache).values({ id: resultId, team_id: run.team_id, value, created_at: Date.now() }).onConflictDoNothing();
+      if ((await readPacketRecord(resultId))?.value !== value) throw new Error("Reference packet output changed on resume");
+    } catch (error) { if (error instanceof ResearchCoveragePending) return { ok: true, pending: true, retryAfterMs: error.retryAfterMs }; throw error; }
+    for (const skipped of packetPlan.skipped) diagnostics.rejectedStories.push({ title: skipped.id, score: null, reason: skipped.reason });
+    progress.referencePacketsComplete = true;
+    diagnostics.outcome = `${diagnostics.outcome ?? ""} Related public-source packets were assessed with original source citations.`;
     await persistProgress(progress);
   }
   const failed = await db

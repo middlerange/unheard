@@ -1423,6 +1423,20 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "product-manager-toolkit-reference",
+    "referencePacket": {
+      "id": "product-toolkit-public-skill-documents",
+      "enabled": false,
+      "sourceIds": [
+        "product-manager-toolkit-reference",
+        "reference-06eb34f276f2",
+        "reference-a876caf12602",
+        "reference-aaab58134cd6"
+      ],
+      "relationship": {
+        "type": "same_repository",
+        "reason": "README and public method documents in the same product-manager-toolkit repository. These describe reusable methods; they do not establish adoption or business outcomes."
+      }
+    },
     "name": "Product Manager Toolkit — public methods and skills",
     "url": "https://github.com/imohammadfaraz/product-manager-toolkit",
     "kind": "web",
@@ -1619,6 +1633,18 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "reference-1a8f9fbb2860",
+    "referencePacket": {
+      "id": "pricing-research-and-model-options",
+      "enabled": false,
+      "sourceIds": [
+        "reference-1a8f9fbb2860",
+        "reference-6233b26ae14d"
+      ],
+      "relationship": {
+        "type": "same_publisher",
+        "reason": "Public pricing guidance by the same publisher: model options and the separate pricing research process. Preserve each article’s date and distinguish an editorial synthesis from an author-stated combined workflow."
+      }
+    },
     "name": "Reference — your pricing is broken",
     "url": "https://www.growthunhinged.com/p/your-pricing-is-broken",
     "kind": "web",
@@ -1641,6 +1667,18 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "reference-268173540fbd",
+    "referencePacket": {
+      "id": "ownable-authority-public-references",
+      "enabled": false,
+      "sourceIds": [
+        "reference-268173540fbd",
+        "ownable-idea-reference"
+      ],
+      "relationship": {
+        "type": "configured_reference",
+        "reason": "The interview explicitly identifies Katelyn Bourgoin and Unignorable; the owned offer describes the same practitioner’s approach. These are related attributed public references, not evidence of client outcomes or of either page deriving from the other."
+      }
+    },
     "name": "Reference — the 6 types of ownable ideas and how to find yours with katelyn bourgoin founder of unignorable",
     "url": "https://exitfive.com/podcast/the-6-types-of-ownable-ideas-and-how-to-find-yours-with-katelyn-bourgoin-founder-of-unignorable/",
     "kind": "web",
@@ -1653,6 +1691,20 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "reference-665e44daf7ae",
+    "referencePacket": {
+      "id": "ryze-connector-and-action-documentation",
+      "enabled": false,
+      "sourceIds": [
+        "reference-665e44daf7ae",
+        "ryze-public-marketing-permissions",
+        "ryze-public-managed-campaigns",
+        "reference-be33c89758a9"
+      ],
+      "relationship": {
+        "type": "same_product",
+        "reason": "Public documentation for the named Ryze product and its Instinct connector. Preserve documented permissions and human approval; cross-page capability linkage is an explicitly bounded integration inference, not independently observed connector execution."
+      }
+    },
     "name": "Reference — instinct for ads and seo",
     "url": "https://www.get-ryze.ai/instinct-for-ads-and-seo",
     "kind": "web",
@@ -1675,6 +1727,18 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "reference-e66aa2c96d92",
+    "referencePacket": {
+      "id": "advertising-research-access-boundaries",
+      "enabled": false,
+      "sourceIds": [
+        "reference-e66aa2c96d92",
+        "reference-2843b8f34586"
+      ],
+      "relationship": {
+        "type": "same_product",
+        "reason": "The same product publisher describes its public entry tier and its plan access and usage boundaries. Compare only documented capabilities and limits; do not infer conversion, revenue or competitive superiority."
+      }
+    },
     "name": "Reference — top 5 best free ad spy tools",
     "url": "https://www.trendtrack.io/blog-post/top-5-best-free-ad-spy-tools",
     "kind": "web",
@@ -1950,6 +2014,18 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "reference-2ac1625f4e6f",
+    "referencePacket": {
+      "id": "product-operating-loop-and-prioritization",
+      "enabled": false,
+      "sourceIds": [
+        "reference-2ac1625f4e6f",
+        "reference-40780c0da1a3"
+      ],
+      "relationship": {
+        "type": "same_publisher",
+        "reason": "Public operating-model and prioritization articles from the same publisher. Keep described methods, author claims and editorial connections distinct from independently demonstrated outcomes."
+      }
+    },
     "name": "Velociti — AI product operating system",
     "url": "https://www.velocitipm.com/blog/the-ai-product-operating-system-why-knowing-what-to-build-is-the-only-moat-left",
     "kind": "web",
@@ -2039,5 +2115,16 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "enabled": true,
     "priority": 2,
     "notes": "Publisher-indexed public original product guide. Current reference with unknown original publication date; record real first observation and actual body changes separately. Attribute described capabilities and workflow; do not infer measured effectiveness. Known-guide coverage is not blind discovery."
+  },
+  {
+    "id": "saastr-agent-oversight-reference",
+    "name": "SaaStr — agent oversight and rollout pace",
+    "url": "https://www.saastr.com/right-now-managing-ai-agents-is-about-as-much-work-as-managing-humans/",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Public first-party operating account. Preserve the original January 2026 publication date and actual first observation. Attribute staffing, productivity and pipeline claims to SaaStr; they are not independently measured outcomes. Monitor the documented oversight, training and rollout constraints. This known-page reference backfill does not prove independent discovery during a later social-post window."
   }
 ];

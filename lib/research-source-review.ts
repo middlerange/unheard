@@ -15,6 +15,7 @@ export type ResearchSourceReviewPolicy = {
   version: string; instructions: string; model?: string;
   sourceSchema?: (source: ResearchSourceReviewSource, profileIds: string[]) => Record<string, unknown>;
   requestMetadata?: (source: ResearchSourceReviewSource) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  policyForSource?: (source: ResearchSourceReviewSource) => ResearchSourceReviewPolicy;
   normalize?: (raw: unknown, sources: ResearchSourceReviewSource[], profileIds: string[]) => ResearchSourceReviewResult | Promise<ResearchSourceReviewResult>;
 };
 export type SourceReviewMultiProof = ResearchSourceReviewProof & { reviewManifestId: string };
@@ -82,28 +83,30 @@ export async function reviewResearchSources(items: ResearchSourceReviewInput[], 
     if (!parent && !failure) throw new Error("Source review requires a valid covered parent or verified source failure");
     const passages = researchSourceReviewPassages(source.content), catalogSource: ResearchSourceReviewSource = { ...source, passages };
     const { content: _content, excerpt: _excerpt, publicText: _publicText, sourceSections: _sections, ...metadata } = source;
-    const extraMetadata = policy.requestMetadata ? await policy.requestMetadata(catalogSource) : {};
+    const effectivePolicy = policy.policyForSource?.(catalogSource) ?? policy;
+    const sourceView = effectivePolicy.version === policy.version ? view : { ...view, sourceReviewVersion: effectivePolicy.version };
+    const extraMetadata = effectivePolicy.requestMetadata ? await effectivePolicy.requestMetadata(catalogSource) : {};
     if (!extraMetadata || typeof extraMetadata !== "object" || Array.isArray(extraMetadata)) throw new Error("Source review policy metadata must be an object");
     const protectedKeys = new Set([...Object.keys(source), "id", "content", "excerpt", "publicText", "passages", "sourceSections"]);
     if (Object.keys(extraMetadata).some(key => protectedKeys.has(key))) throw new Error("Source review policy metadata cannot shadow captured source fields");
-    const request: ResearchSourceReviewRequest = { model: policy.model ?? access.context.model, instructions: policy.instructions,
-      schema: policy.sourceSchema ? policy.sourceSchema(catalogSource, profileIds) : researchSourceReviewSchemaForItems([source.id], profileIds),
-      data: { ...view, items: [{ ...metadata, passages, ...extraMetadata }] } };
+    const request: ResearchSourceReviewRequest = { model: effectivePolicy.model ?? access.context.model, instructions: effectivePolicy.instructions,
+      schema: effectivePolicy.sourceSchema ? effectivePolicy.sourceSchema(catalogSource, profileIds) : researchSourceReviewSchemaForItems([source.id], profileIds),
+      data: { ...sourceView, items: [{ ...metadata, passages, ...extraMetadata }] } };
     const parentValue: EvidenceCacheValue = { findings: parent ? [parent] : [], ...(failure ? { evidenceFailures: [failure.failure] } : {}),
       ...(base.citationRepairs?.some(repair => repair.itemId === source.id) ? { citationRepairs: base.citationRepairs.filter(repair => repair.itemId === source.id) } : {}) };
     const bodyHash = await researchHash(source.content), baseCoveredHash = await researchHash(stable(parentValue));
-    const plan = { version: policy.version, teamId: access.context.teamId, sourceId: source.id,
+    const plan = { version: effectivePolicy.version, teamId: access.context.teamId, sourceId: source.id,
       baseCacheId: await researchEvidenceItemCacheId(access.context, source), fullSourceHash: await researchHash(json(source)), bodyHash,
-      fullFrozenAudience: audience, researchView: view, baseCoveredHash, parentValue, parentFailure: failure || null, catalogSource, request };
+      fullFrozenAudience: audience, researchView: sourceView, baseCoveredHash, parentValue, parentFailure: failure || null, catalogSource, request };
     const planHash = await researchHash(json(plan)), planId = `research-source-review-plan:v1:${planHash}`, receiptId = `research-source-review-attempt:v1:${planHash}`;
     await immutable(planId, plan);
-    return { source, parent, failure, catalogSource, request, plan, planHash, planId, receiptId, bodyHash, parentValue };
+    return { source, parent, failure, catalogSource, request, policy: effectivePolicy, plan, planHash, planId, receiptId, bodyHash, parentValue };
   }));
   type Work = (typeof work)[number];
   async function readReceipt(item: Work): Promise<Receipt | null> {
     const receipt = await access.read(item.receiptId) as Receipt | null;
     if (!receipt) return null;
-    if (receipt.version !== policy.version || receipt.planId !== item.planId || receipt.planHash !== item.planHash || receipt.sourceId !== item.source.id || receipt.bodyHash !== item.bodyHash
+    if (receipt.version !== item.policy.version || receipt.planId !== item.planId || receipt.planHash !== item.planHash || receipt.sourceId !== item.source.id || receipt.bodyHash !== item.bodyHash
       || typeof receipt.nonce !== "string" || !receipt.nonce || !Number.isFinite(receipt.startedAt) || receipt.startedAt < 0 || receipt.startedAt > now()
       || !["started", "completed", "failed", "indeterminate"].includes(receipt.state)) throw new Error("Source review receipt does not match its frozen source context");
     if (receipt.state !== "started" && (!Number.isFinite(receipt.completedAt) || receipt.completedAt < receipt.startedAt)) throw new Error("Source review terminal receipt has an invalid time");
@@ -113,8 +116,8 @@ export async function reviewResearchSources(items: ResearchSourceReviewInput[], 
     return receipt;
   }
   async function normalize(item: Work, raw: unknown): Promise<ResearchSourceReviewResult> {
-    if (!policy.normalize) return normalizeResearchSourceReview(raw, [item.catalogSource], profileIds);
-    const result = await policy.normalize(raw, [item.catalogSource], profileIds);
+    if (!item.policy.normalize) return normalizeResearchSourceReview(raw, [item.catalogSource], profileIds);
+    const result = await item.policy.normalize(raw, [item.catalogSource], profileIds);
     if (!result || !Array.isArray(result.findings) || !Array.isArray(result.proofs) || !Array.isArray(result.diagnostics)) throw new Error("Source review policy returned an invalid result");
     const catalogHash = await researchHash(json(item.catalogSource.passages));
     for (const proof of result.proofs) {
@@ -158,7 +161,7 @@ export async function reviewResearchSources(items: ResearchSourceReviewInput[], 
   for (const { item } of waiting.sort((a, b) => Number(b.active) - Number(a.active)).slice(0, 2)) {
     if (!budget.remaining || await readReceipt(item)) continue;
     budget.remaining--;
-    const started: Receipt = { version: policy.version, planId: item.planId, planHash: item.planHash, sourceId: item.source.id, bodyHash: item.bodyHash, nonce: crypto.randomUUID(), startedAt: now(), state: "started" };
+    const started: Receipt = { version: item.policy.version, planId: item.planId, planHash: item.planHash, sourceId: item.source.id, bodyHash: item.bodyHash, nonce: crypto.randomUUID(), startedAt: now(), state: "started" };
     const inserted = await retryResearchStorage(() => access.claim(item.receiptId, started));
     if (!inserted && stable(await access.read(item.receiptId)) !== stable(started)) { budget.remaining++; continue; }
     running.push((async () => {
@@ -205,7 +208,7 @@ export async function reviewResearchSources(items: ResearchSourceReviewInput[], 
       findings.set(item.source.id, assessment); failures.delete(item.source.id);
     }
     const selectedProofs = [...selected.values()].flatMap(choice => choice.proof ? [choice.proof] : []);
-    const manifest = { version: policy.version, teamId: access.context.teamId, sourceId: item.source.id, planId: item.planId,
+    const manifest = { version: item.policy.version, teamId: access.context.teamId, sourceId: item.source.id, planId: item.planId,
       bodyHash: item.bodyHash, baseCoveredHash: item.plan.baseCoveredHash, parent: item.parentValue, parentFailure: item.failure || null,
       receiptId: item.receiptId, receiptHash: await researchHash(json(receipt)), rawReview: receipt.state === "completed" ? receipt.raw : null,
       review: result, terminalState: receipt.state, terminalReason: "reason" in receipt ? receipt.reason : null, selections,

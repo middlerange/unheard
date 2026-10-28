@@ -5,7 +5,9 @@ import { retryResearchStorage } from "./research-storage";
 
 type SourceDateFields = "source_published_at" | "source_discovered_at" | "source_content_changed_at" | "signal_kind";
 export type ResearchFindingRow = Omit<typeof research_findings.$inferSelect, SourceDateFields>
-  & Partial<Pick<typeof research_findings.$inferSelect, SourceDateFields>>;
+  & Partial<Pick<typeof research_findings.$inferSelect, SourceDateFields>>
+  & { source_packet_proofs?: import('./research-source-packet-model').ResearchSourcePacketProof[];
+    source_packet_id?: string; source_packet_model_family?: string };
 
 export function researchFindingSnapshotId(runId: string, findingId: string) {
   return `research-finding-snapshot:${runId}:${findingId}`;

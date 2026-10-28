@@ -13,12 +13,19 @@ import type { EvidenceCacheValue, EvidenceFailure } from './research-evidence-ca
 import { ResearchCoveragePending, RESEARCH_COVERAGE_VERSION, RESEARCH_WINDOW_SCOPE_INSTRUCTIONS } from './research-coverage';
 import { RESEARCH_SOURCE_REVIEW_INSTRUCTIONS, RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS, researchSourceReviewSchemaForItems } from './research-source-review-model';
 import { RESEARCH_SOURCE_DEPTH_PIPELINE_VERSION as RESEARCH_SOURCE_REVIEW_VERSION, RESEARCH_SOURCE_DEPTH_VERSION, RESEARCH_SOURCE_DEPTH_INSTRUCTIONS, RESEARCH_SOURCE_DEPTH_SONNET_INSTRUCTIONS, researchSourceDepthSchema } from './research-source-depth-model';
+import { RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION, RESEARCH_SOURCE_DEPTH_QUOTES_VERSION, RESEARCH_SOURCE_DEPTH_QUOTES_INSTRUCTIONS, RESEARCH_SOURCE_DEPTH_QUOTES_SONNET_INSTRUCTIONS } from './research-source-depth-quotes';
+import { RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS, researchSourcePacketSchema } from './research-source-packet-model';
+import { researchPacketsFromDefinitions } from './research-source-packets';
 import { RESEARCH_MODEL, RESEARCH_PROMPT_VERSION, RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS,
   RESEARCH_SCREEN_BATCH_SIZE, RESEARCH_EVIDENCE_BATCH_SIZE, RESEARCH_EVIDENCE_OUTPUT_TOKENS, RESEARCH_SECTION_COVERAGE_INSTRUCTIONS, researchHash, researchScreeningSchema,
   researchEvidenceSchema, screeningJsonSchemaForItems, evidenceJsonSchemaForItems, validateResearchScreening,
   validateResearchEvidenceCoverage, validateResearchEvidenceProfiles, validateResearchEvidence } from './research-model';
 
 const timestamp = z.number().int().nonnegative();
+const sourcePacketDefinitionSchema = z.object({ id: z.string().min(1).max(200), primarySourceId: z.string().min(1).max(200),
+  sourceIds: z.array(z.string().min(1).max(200)).min(2),
+  relationship: z.object({ type: z.enum(['same_publisher', 'same_product', 'same_repository', 'configured_reference']), reason: z.string().trim().min(20).max(4000) }).strict(),
+}).strict().refine(packet => new Set(packet.sourceIds).size === packet.sourceIds.length && packet.sourceIds.includes(packet.primarySourceId), 'Packet requires distinct sources including its primary');
 const publicUrl = z.string().max(4000).refine(value => { try { assertPublicResearchUrl(value); return true; } catch { return false; } }, 'A public HTTPS source URL is required');
 export const researchReplayItemSchema = z.object({
   id: z.string().min(1).max(200), sourceId: z.string().min(1).max(200), url: publicUrl,
@@ -32,12 +39,16 @@ const prepareSchema = z.object({ operation: z.literal('prepare'), runId: z.uuid(
   windowStart: timestamp, windowEnd: timestamp, inventorySha256: z.string().regex(/^[a-f0-9]{64}$/),
   inventoryCount: z.number().int().positive().max(100000), sourceIds: z.array(z.string().min(1).max(200)).min(1),
   depthModel: z.enum(['gpt-6-sol', 'claude-sonnet-5-5']).optional(),
+  depthGroupingVersion: z.literal(RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION).optional(),
+  sourcePackets: z.array(sourcePacketDefinitionSchema).min(1).optional(),
   freshnessWindowStart: timestamp.optional(), observationWindowStart: timestamp.optional(), observationWindowEnd: timestamp.optional(),
 }).strict().refine(input => input.windowStart < input.windowEnd, 'Window end must follow start')
   .refine(input => input.freshnessWindowStart === undefined || input.freshnessWindowStart >= input.windowStart && input.freshnessWindowStart < input.windowEnd, 'Freshness boundary must be inside the publication window')
   .refine(input => input.observationWindowStart === undefined && input.observationWindowEnd === undefined
     || input.observationWindowStart !== undefined && input.observationWindowEnd !== undefined && input.observationWindowStart < input.observationWindowEnd, 'Observation windows require both ordered boundaries')
-  .refine(input => new Set(input.sourceIds).size === input.sourceIds.length, 'Source IDs must be unique');
+  .refine(input => new Set(input.sourceIds).size === input.sourceIds.length, 'Source IDs must be unique')
+  .refine(input => !input.depthGroupingVersion || input.depthModel === 'claude-sonnet-5-5', 'Quote grouping requires the explicit Sonnet research grader')
+  .refine(input => !input.sourcePackets || new Set(input.sourcePackets.map(packet => packet.id)).size === input.sourcePackets.length, 'Packet IDs must be unique');
 export const researchReplayRequestSchema = z.discriminatedUnion('operation', [prepareSchema,
   z.object({ operation: z.literal('upload'), runId: z.uuid(), chunkIndex: z.number().int().nonnegative(), items: z.array(researchReplayItemSchema).min(1).max(20) }).strict(),
   z.object({ operation: z.literal('start'), runId: z.uuid() }).strict(),
@@ -66,7 +77,7 @@ type Run = typeof research_runs.$inferSelect;
 type Config = Omit<z.infer<typeof prepareSchema>, 'operation'> & { model: string; version: string; contractHash: string; coverageVersion: string; sourceReviewVersion: string; icp: string; articleWatchUrls?: string[] };
 type Entry = { id: string; chunkIndex: number; index: number; route: 'direct_evidence' | 'metadata_screen' | 'excluded'; reason: string | null };
 type Plan = { config: Config; uploadedSha256: string; entries: Entry[]; eligibleIds: string[] };
-type Progress = { screenOffset: number; selectedIds: string[]; evidenceOffset: number; screenedCount: number; evidenceCount: number; qualifiedCount: number; groundingFailureCount?: number };
+type Progress = { screenOffset: number; selectedIds: string[]; evidenceOffset: number; screenedCount: number; evidenceCount: number; qualifiedCount: number; groundingFailureCount?: number; packetsComplete?: boolean };
 const prefix = (runId: string) => `research-replay:${runId}:`;
 async function read(teamId: string, id: string) {
   const db = await getDb();
@@ -79,8 +90,11 @@ async function immutable(teamId: string, id: string, value: unknown) {
   const saved = await read(teamId, id);
   if (!saved || saved.value !== serialized) throw new Error('Replay immutable snapshot differs from the saved input');
 }
-async function contractHash(depthModel?: Config['depthModel']) {
-  return researchHash(JSON.stringify({ model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION,
+function sourceReviewVersion(grouping?: Config['depthGroupingVersion']) {
+  return grouping ? RESEARCH_SOURCE_REVIEW_VERSION.replace(/depth-v1$/, 'depth-quotes-v2') : RESEARCH_SOURCE_REVIEW_VERSION;
+}
+async function contractHash(depthModel?: Config['depthModel'], extensions?: Pick<Config, 'depthGroupingVersion' | 'sourcePackets'>) {
+  const contract = { model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION,
     coverageVersion: RESEARCH_COVERAGE_VERSION, coverageScope: RESEARCH_WINDOW_SCOPE_INSTRUCTIONS,
     sourceReviewVersion: RESEARCH_SOURCE_REVIEW_VERSION, sourceReviewInstructions: RESEARCH_SOURCE_REVIEW_INSTRUCTIONS,
     sourceReviewConsistencyVersion: RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, sourceReviewConsistencyInstructions: RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS,
@@ -92,7 +106,16 @@ async function contractHash(depthModel?: Config['depthModel']) {
     screen: RESEARCH_SCREEN_INSTRUCTIONS, evidence: RESEARCH_EVIDENCE_INSTRUCTIONS,
     sectionInstructions: RESEARCH_SECTION_COVERAGE_INSTRUCTIONS, evidenceOutputTokens: RESEARCH_EVIDENCE_OUTPUT_TOKENS,
     screenSchema: screeningJsonSchemaForItems(['item']), evidenceSchema: evidenceJsonSchemaForItems(['item'], ['profile'], { sectionCoverage: true }),
-    score: RESEARCH_POST_MIN_SCORE, selectionViewVersion: RESEARCH_SELECTION_VIEW_VERSION, route: 'readable-500-pew-guard-v1' }));
+    score: RESEARCH_POST_MIN_SCORE, selectionViewVersion: RESEARCH_SELECTION_VIEW_VERSION, route: 'readable-500-pew-guard-v1' };
+  return researchHash(JSON.stringify(extensions?.depthGroupingVersion || extensions?.sourcePackets ? { ...contract,
+    extensions: { ...(extensions.depthGroupingVersion ? { depthGroupingVersion: extensions.depthGroupingVersion, quotePolicy: RESEARCH_SOURCE_DEPTH_QUOTES_VERSION,
+      quoteInstructions: RESEARCH_SOURCE_DEPTH_QUOTES_INSTRUCTIONS, quoteSonnetInstructions: RESEARCH_SOURCE_DEPTH_QUOTES_SONNET_INSTRUCTIONS, outputBudgetVersion: 'group-count-1024-plus2048-v1' } : {}),
+      ...(extensions.sourcePackets ? { packetVersion: RESEARCH_SOURCE_PACKET_VERSION, packetInstructions: RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
+        packetModel: 'claude-sonnet-5-5', packetOutputTokens: RESEARCH_EVIDENCE_OUTPUT_TOKENS,
+        packetSchema: researchSourcePacketSchema({ id: 'packet', primarySourceId: 'primary',
+          relationship: { type: 'same_publisher', reason: 'Two original public documentation references from one publisher.', sourceIds: ['primary', 'reference'] },
+          sources: ['primary', 'reference'].map(id => ({ id, url: `https://publisher.example/${id}`, publishedAt: null, firstSeen: null, content: 'A public documentation reference describes a bounded workflow.' })),
+        }, ['profile']), sourcePackets: extensions.sourcePackets } : {}) } } : contract));
 }
 export function researchReplayEligibility(item: ResearchReplayItem, config: Pick<Config, 'sourceIds' | 'windowStart' | 'windowEnd'> & Partial<Pick<Config, 'articleWatchUrls' | 'observationWindowStart' | 'observationWindowEnd'>>) {
   if (!config.sourceIds.includes(item.sourceId)) return 'source_not_in_frozen_roster';
@@ -121,7 +144,9 @@ async function loadConfig(run: Run): Promise<Config> {
   const config: Config = JSON.parse(row.value);
   if (config.runId !== run.id || config.icp !== run.icp || config.version !== RESEARCH_PROMPT_VERSION
     || config.depthModel !== undefined && config.depthModel !== 'gpt-6-sol' && config.depthModel !== 'claude-sonnet-5-5'
-    || config.model !== RESEARCH_MODEL || config.coverageVersion !== RESEARCH_COVERAGE_VERSION || config.sourceReviewVersion !== RESEARCH_SOURCE_REVIEW_VERSION || config.contractHash !== await contractHash(config.depthModel)) throw new Error('Replay scoring contract changed; prepare a new replay');
+    || config.depthGroupingVersion !== undefined && config.depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION
+    || config.model !== RESEARCH_MODEL || config.coverageVersion !== RESEARCH_COVERAGE_VERSION || config.sourceReviewVersion !== sourceReviewVersion(config.depthGroupingVersion)
+    || config.contractHash !== await contractHash(config.depthModel, config)) throw new Error('Replay scoring contract changed; prepare a new replay');
   await getFrozenResearchAudience(run);
   return config;
 }
@@ -154,7 +179,7 @@ export async function researchReplayAction(teamId: string, input: unknown) {
     const existing = await db.select().from(research_runs).where(eq(research_runs.id, data.runId)).get();
     if (existing && (existing.team_id !== teamId || existing.mode !== 'replay')) throw new Error('Replay ID is already in use');
     const { operation: _, ...requested } = data;
-    const config: Config = { ...requested, model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION, contractHash: await contractHash(requested.depthModel), coverageVersion: RESEARCH_COVERAGE_VERSION, sourceReviewVersion: RESEARCH_SOURCE_REVIEW_VERSION, icp: original.icp,
+    const config: Config = { ...requested, model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION, contractHash: await contractHash(requested.depthModel, requested), coverageVersion: RESEARCH_COVERAGE_VERSION, sourceReviewVersion: sourceReviewVersion(requested.depthGroupingVersion), icp: original.icp,
       articleWatchUrls: RESEARCH_SOURCE_SEEDS.filter(seed => data.sourceIds.includes(seed.id) && seed.pageMode === 'article').map(seed => canonicalResearchUrl(seed.url)) };
     const createdAt = Date.now(), configId = prefix(data.runId) + 'config';
     await retryResearchStorage(async () => db.batch([
@@ -164,7 +189,9 @@ export async function researchReplayAction(teamId: string, input: unknown) {
     ]));
     const run = await loadRun(teamId, data.runId), saved = await loadConfig(run);
     if (JSON.stringify(config) !== JSON.stringify(saved)) throw new Error('Replay preparation differs from the saved request');
-    return { runId: run.id, status: run.status, model: saved.model, ...(saved.depthModel ? { depthModel: saved.depthModel } : {}), version: saved.version, coverageVersion: saved.coverageVersion, sourceReviewVersion: saved.sourceReviewVersion, uploadChunkSize: 20 };
+    return { runId: run.id, status: run.status, model: saved.model, ...(saved.depthModel ? { depthModel: saved.depthModel } : {}),
+      ...(saved.depthGroupingVersion ? { depthGroupingVersion: saved.depthGroupingVersion } : {}), ...(saved.sourcePackets ? { sourcePacketVersion: RESEARCH_SOURCE_PACKET_VERSION, sourcePacketCount: saved.sourcePackets.length } : {}),
+      version: saved.version, coverageVersion: saved.coverageVersion, sourceReviewVersion: saved.sourceReviewVersion, uploadChunkSize: 20 };
   }
   const run = await loadRun(teamId, data.runId), config = await loadConfig(run);
   if (data.operation === 'upload') {
@@ -186,6 +213,13 @@ export async function researchReplayAction(teamId: string, input: unknown) {
   }));
   const eligibleIds = items.filter(item => !researchReplayEligibility(item, config))
     .sort((a, b) => b.publishedAt! - a.publishedAt! || a.id.localeCompare(b.id)).map(item => item.id);
+  if (config.sourcePackets) {
+    researchPacketsFromDefinitions(config.sourcePackets, items);
+    for (const packet of config.sourcePackets) {
+      if (!eligibleIds.includes(packet.primarySourceId)) throw Error('Packet primary must be eligible in the frozen publication/observation window');
+      if (packet.sourceIds.some(id => { const item = items.find(item => item.id === id)!; return item.publishedAt !== null && item.publishedAt >= config.windowEnd; })) throw Error('Packet reference is published after the frozen publication window');
+    }
+  }
   const plan: Plan = { config, uploadedSha256: await researchHash(JSON.stringify(items)), entries, eligibleIds };
   await immutable(teamId, prefix(run.id) + 'plan', plan);
   await getFrozenResearchAudience(run);
@@ -214,12 +248,13 @@ function evidenceInput(item: ResearchReplayItem, config: Config) {
 export async function processResearchReplay(run: Run, operation: string) {
   if (operation === 'drafts') return { ok: true, auditOnly: true };
   if (['completed', 'failed'].includes(run.status)) return { sourceIds: [], done: true };
-  await loadConfig(run);
+  const config = await loadConfig(run);
   const planRow = await read(run.team_id, prefix(run.id) + 'plan');
   if (!planRow) throw new Error('Replay inventory has not been finalized');
   if (operation === 'plan') return { sourceIds: [], auditOnly: true };
   if (operation !== 'rank') throw new Error('Recall replay does not collect or publish');
   const plan: Plan = JSON.parse(planRow.value), uploaded = await chunks(run), items = uploaded.flatMap(chunk => chunk.items);
+  if (JSON.stringify(plan.config) !== JSON.stringify(config)) throw new Error('Frozen replay plan configuration changed');
   if (await researchHash(JSON.stringify(items)) !== plan.uploadedSha256) throw new Error('Frozen replay corpus changed');
   const itemMap = new Map(items.map(item => [item.id, item])), routeMap = new Map(plan.entries.map(entry => [entry.id, entry]));
   const progressId = prefix(run.id) + 'progress', saved = await read(run.team_id, progressId);
@@ -293,6 +328,20 @@ export async function processResearchReplay(run: Run, operation: string) {
     progress.evidenceCount += assessments.length + evidenceFailures.length;
     if (evidenceFailures.length) progress.groundingFailureCount = (progress.groundingFailureCount || 0) + evidenceFailures.length;
     progress.qualifiedCount += accepted.length;
+    await persist();
+    return { pending: true };
+  }
+  if (plan.config.sourcePackets && !progress.packetsComplete) {
+    const packets = researchPacketsFromDefinitions(plan.config.sourcePackets, items);
+    const { cachedResearchSourcePackets } = await import('./research');
+    let output: Awaited<ReturnType<typeof cachedResearchSourcePackets>>;
+    try { output = await cachedResearchSourcePackets(run, packets); }
+    catch (error) { if (error instanceof ResearchCoveragePending) return { pending: true, retryAfterMs: error.retryAfterMs }; throw error; }
+    await immutable(run.team_id, prefix(run.id) + 'source-packets', { input: items.filter(item => plan.config.sourcePackets!.some(packet => packet.sourceIds.includes(item.id))),
+      sourcePackets: plan.config.sourcePackets, assessments: output.findings, acceptedIdeas: output.acceptedIdeas,
+      packetProofs: output.packetProofs, packetDiagnostics: output.diagnostics, packetManifestIds: output.manifestIds });
+    progress.qualifiedCount += output.acceptedIdeas.length;
+    progress.packetsComplete = true;
     await persist();
     return { pending: true };
   }
