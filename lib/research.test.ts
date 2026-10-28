@@ -380,6 +380,7 @@ describe("research persistence and team isolation", () => {
     };
     const first = makeRun("itemcache-first"), replay = makeRun("itemcache-replay");
     const calls: string[][] = [];
+    let omittedC = false;
     const previousKey = process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_API_KEY = "test-item-cache-only";
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
@@ -387,7 +388,11 @@ describe("research persistence and team isolation", () => {
       const request = JSON.parse(String(init?.body));
       const { items } = JSON.parse(request.messages[0].content) as { items: typeof inputs };
       calls.push(items.map(item => item.id));
-      const returned = calls.length === 1 ? items.slice(0, 2) : items;
+      expect(items).toHaveLength(1);
+      expect(request).not.toHaveProperty("tools");
+      const omit = items[0].id === "itemcache-c" && !omittedC;
+      if (omit) omittedC = true;
+      const returned = omit ? [] : items;
       return modelResponseFixture({ status: "completed", usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ findings: returned.map(item => ({
         itemId: item.id, summary: "Observe behavior before choosing a change.", evidence: item.content,
         contentAngle: "Inspect the actual customer workflow before prioritizing.", whyItMatters: "The observed bottleneck can differ from a feature request.",
@@ -408,7 +413,7 @@ describe("research persistence and team isolation", () => {
       await assess(replay, [inputs[0], changed, inputs[2]]);
       const added = { ...inputs[2], id: "itemcache-new", content: "A new workflow turns an explicit customer goal into an inspectable activation step." };
       await assess(replay, [inputs[0], changed, added]);
-      expect(calls).toEqual([["itemcache-a", "itemcache-b", "itemcache-c"], ["itemcache-c"], ["itemcache-b"], ["itemcache-new"]]);
+      expect(calls).toEqual([["itemcache-a"], ["itemcache-b"], ["itemcache-c"], ["itemcache-c"], ["itemcache-b"], ["itemcache-new"]]);
     } finally {
       fetcher.mockRestore();
       if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = previousKey;
@@ -1366,9 +1371,9 @@ describe("research persistence and team isolation", () => {
         const { summary, evidence, contentAngle, whyItMatters, limitations, ...decision } = assessment;
         return { ...decision, claim: { summary, evidence, contentAngle, whyItMatters, limitations } };
       };
-      expect(request).not.toHaveProperty('output_config');
-      expect(request.tool_choice).toMatchObject({ type: 'tool', name: 'submit_research', disable_parallel_tool_use: true });
-      return Response.json({ id: `msg-distinct-${calls}`, model: 'claude-haiku-5-5', stop_reason: 'tool_use', usage: { input_tokens: 10, output_tokens: 5 }, content: [{ type: 'tool_use', id: `toolu-${calls}`, name: 'submit_research', input: { findings: { [itemId]: { ...nested(primary), additionalIdeas: [nested(additional)], sectionChecks: input.items[0].sourceSections.map((section: { id: string }, index: number) => ({ sectionId: section.id, familyKeys: [index === 0 ? primary.familyKey : additional.familyKey], notPostworthyReason: '' })) } } } }] });
+      expect(request).not.toHaveProperty('tools');
+      expect(request.output_config.format.schema.properties.findings.required).toEqual([itemId]);
+      return Response.json({ id: `msg-distinct-${calls}`, model: 'claude-haiku-5-5', stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 }, content: [{ type: 'text', text: JSON.stringify({ findings: { [itemId]: { ...nested(primary), additionalIdeas: [nested(additional)], sectionChecks: input.items[0].sourceSections.map((section: { id: string }, index: number) => ({ sectionId: section.id, familyKeys: [index === 0 ? primary.familyKey : additional.familyKey], notPostworthyReason: '' })) } } }) }] });
     });
     try {
       await finishResearchRankJob(runIds[0]);

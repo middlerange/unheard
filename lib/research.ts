@@ -960,13 +960,32 @@ async function cachedModel(
     await db.update(research_runs).set({ cache_hits: sql`${research_runs.cache_hits} + 1` }).where(eq(research_runs.id, run.id));
     return valid;
   }
-  const generate = async (items: unknown) => (await callResearchModel(
-    system,
-    { ...selectionAudience, items },
-    stage === "evidence" ? evidenceJsonSchemaForItems((items as EvidenceCacheInput[]).map(item => item.id), enabledProfileIds, { sectionCoverage: true }) : schema,
-    outputTokens,
-    { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? `replay_${stage}` : stage },
-  )).value;
+  const generate = async (items: unknown) => {
+    const usage = { teamId: run.team_id, runId: run.id, stage: "research" as const, operation: run.mode === "replay" ? `replay_${stage}` : stage };
+    if (stage !== "evidence") return (await callResearchModel(
+      system, { ...selectionAudience, items }, schema, outputTokens, usage,
+    )).value;
+    const sources = items as EvidenceCacheInput[];
+    const findings: EvidenceCacheValue["findings"] = [];
+    // Bound provider concurrency, not the number of sources that receive review.
+    const concurrency = 2;
+    for (let start = 0; start < sources.length; start += concurrency) {
+      const results = await Promise.allSettled(sources.slice(start, start + concurrency).map(async item => {
+        const result = await callResearchModel(
+          system, { ...selectionAudience, items: [item] },
+          evidenceJsonSchemaForItems([item.id], enabledProfileIds, { sectionCoverage: true }),
+          outputTokens, usage,
+        );
+        const output = await validateReusable(result.value, [item]) as EvidenceCacheValue;
+        await cacheValidResearchEvidenceItems(output, [item], evidenceAccess);
+        return output.findings[0];
+      }));
+      const failed = results.find(result => result.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
+      findings.push(...results.flatMap(result => result.status === "fulfilled" ? [result.value] : []));
+    }
+    return { findings };
+  };
   if (stage === "evidence") {
     const reused = await reuseResearchEvidenceItems(input as EvidenceCacheInput[], {
       ...evidenceAccess,

@@ -547,7 +547,7 @@ do not copy those keys locally to run an experiment.
 
 ### Distinct ideas and explicit reference watches
 
-Research v24 returns one primary assessment per source and an `additionalIdeas`
+Research v25 returns one primary assessment per source and an `additionalIdeas`
 array for genuinely different supported decisions. Every idea keeps its own
 profile choice, score, exact quote and story family. Several paraphrases of one
 claim do not create several ideas. Family identities retain their saved ideas,
@@ -583,7 +583,7 @@ Source keys, profile choices and local quote/coverage checks remain strict.
 Provider rejection diagnostics retain only an allowlisted configuration category;
 raw provider messages, credentials and prompts are never stored as diagnostics.
 
-Each v24 idea declares its claim basis and checks every supplied publishing
+Each v25 idea declares its claim basis and checks every supplied publishing
 profile independently. The application selects the highest-relevance fitting
 profile and sums the existing rubric: relevance (30), source support (25), useful
 decision (30), honest scope (15). The minimum remains 70, with the same exact quote
@@ -606,3 +606,5 @@ V22 requires keyed responses for every supplied source and audits every detected
 V23 groups the five descriptive claim fields in a shared strict wire record, reducing provider grammar complexity while retaining required source keys, per-profile scoring and section checks. Validation normalizes the record to the same flat stored evidence shape; mixed or malformed nested/flat claims are rejected.
 
 V24 submits evidence through a forced data-only Anthropic tool without provider strict grammar compilation. The application still validates the complete keyed source set, all enabled profiles, quote support, section coverage and scoring before caching or credit. Only research evidence uses this transport; metadata screening keeps its existing response format. A valid tool submission is data returned for validation and does not execute any external action.
+
+V25 assesses each uncached source independently through the smaller strict response schema, with at most two requests in flight. The caller still advances through all sources with no editorial quota. Each successful source is validated and cached immediately; failures stop later groups while preserving completed source records. Larger legacy evidence requests retain the validated tool adapter, while normal pipeline evidence always uses one source per request.

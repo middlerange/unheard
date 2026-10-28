@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ANTHROPIC_RESEARCH_TOOL_NAME, anthropicResearchOutput, anthropicResearchRequest, anthropicResearchSchema } from './research-anthropic';
-import { callResearchModel, RESEARCH_MODEL, evidenceJsonSchema, ResearchModelRateLimitError } from './research-model';
+import { callResearchModel, RESEARCH_MODEL, evidenceJsonSchema, evidenceJsonSchemaForItems, ResearchModelRateLimitError } from './research-model';
 import { beginResearchUsage, finishResearchUsage } from './research-usage';
 
 const rejectionWrites = vi.hoisted(() => vi.fn());
@@ -44,11 +44,29 @@ describe('Claude research transport', () => {
     expect(screening).not.toHaveProperty('tool_choice');
   });
 
-  it.each(['evidence', 'replay_evidence'])('uses forced tool submission only for %s and records a valid single submission as complete', async operation => {
+  it.each(['evidence', 'replay_evidence'])('uses strict schema for a single-source %s request and accepts only schema completion', async operation => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test');
+    const fetcher = mockMessage({ content: [{ type: 'text', text: JSON.stringify(submitted) }] });
+    const usageContext = { ...context, operation };
+    const data = { items: [{ id: 'source' }] }, schema = evidenceJsonSchemaForItems(['source'], ['personal'], { sectionCoverage: true });
+    const result = await callResearchModel('evidence', data, schema, 16384, usageContext);
+    expect(result).toEqual({ value: submitted, inputTokens: 140, outputTokens: 20 });
+    const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
+    expect(body).toHaveProperty('output_config.format.type', 'json_schema');
+    expect(body.output_config.format.schema.properties.findings.required).toEqual(['source']);
+    expect(body).not.toHaveProperty('tools');
+    expect(body).not.toHaveProperty('tool_choice');
+    expect(body.max_tokens).toBe(16384);
+    expect(finishResearchUsage).toHaveBeenCalledWith('usage-id', usageContext, expect.objectContaining({ status: 'completed' }));
+    fetcher.mockResolvedValueOnce(Response.json({ stop_reason: 'tool_use', content: [toolBlock] }));
+    await expect(callResearchModel('evidence', data, schema, 16384, usageContext)).rejects.toThrow('did not complete');
+  });
+
+  it.each(['evidence', 'replay_evidence'])('retains tool submission for multi-source %s requests and records a valid single submission as complete', async operation => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'test');
     const fetcher = mockMessage({ stop_reason: 'tool_use', content: [toolBlock] });
     const usageContext = { ...context, operation };
-    const result = await callResearchModel('evidence', {}, evidenceJsonSchema, 16384, usageContext);
+    const result = await callResearchModel('evidence', { items: [{ id: 'first' }, { id: 'second' }] }, evidenceJsonSchema, 16384, usageContext);
     expect(result).toEqual({ value: submitted, inputTokens: 140, outputTokens: 20 });
     const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
     expect(body).not.toHaveProperty('output_config');

@@ -11,7 +11,7 @@ import { researchSectionInventory, type ResearchSourceSection } from "./research
 export { researchSourceSections } from "./research-sections";
 export { ResearchModelRateLimitError } from "./research-provider-error";
 export const RESEARCH_MODEL = "claude-haiku-5-5";
-export const RESEARCH_PROMPT_VERSION = "research-v24-validated-tool-evidence";
+export const RESEARCH_PROMPT_VERSION = "research-v25-independent-source-evidence";
 export const RESEARCH_SCREEN_BATCH_SIZE = 8;
 export const RESEARCH_EVIDENCE_BATCH_SIZE = 6;
 export const RESEARCH_EVIDENCE_OUTPUT_TOKENS = 16_384;
@@ -310,7 +310,9 @@ export async function callResearchModel(
   model = RESEARCH_MODEL,
 ) {
   const anthropic = model.startsWith("claude-");
-  const anthropicMode = usageContext.operation === "evidence" || usageContext.operation === "replay_evidence" ? "tool" : "schema";
+  const evidenceOperation = usageContext.operation === "evidence" || usageContext.operation === "replay_evidence";
+  const singleSource = data && typeof data === "object" && "items" in data && Array.isArray(data.items) && data.items.length === 1;
+  const anthropicMode = evidenceOperation && !singleSource ? "tool" : "schema";
   const secret = anthropic ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
   const key = process.env[secret];
   if (!key) throw new Error(`Set ${secret} in Cloudflare secrets to run research`);
