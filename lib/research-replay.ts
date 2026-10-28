@@ -245,7 +245,7 @@ export async function processResearchReplay(run: Run, operation: string) {
     if (batch.length) {
       await immutable(run.team_id, prefix(run.id) + 'request:evidence:' + progress.evidenceOffset, { stage: 'evidence', input: batch.map(item => evidenceInput(item, plan.config)) });
       const output = researchEvidenceSchema.parse(await cachedResearchModel(run, 'evidence', batch.map(item => evidenceInput(item, plan.config)), RESEARCH_EVIDENCE_INSTRUCTIONS,
-        evidenceJsonSchemaForItems(batch.map(item => item.id)), 9000));
+        evidenceJsonSchemaForItems(batch.map(item => item.id)), 8192));
       assessments = validateResearchEvidenceCoverage(output.findings, batch.map(item => item.id));
       const audience = await getFrozenResearchAudience(run);
       validateResearchEvidenceProfiles(assessments, audience.publishingProfiles.map(profile => profile.id));

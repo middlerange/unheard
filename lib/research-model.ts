@@ -9,7 +9,7 @@ import { research_cache } from "./schema";
 import { retryResearchStorage } from "./research-storage";
 export { ResearchModelRateLimitError } from "./research-provider-error";
 export const RESEARCH_MODEL = "claude-haiku-5-5";
-export const RESEARCH_PROMPT_VERSION = "research-v16-distinct-grounded-ideas";
+export const RESEARCH_PROMPT_VERSION = "research-v17-shared-idea-schema";
 export const RESEARCH_SCREEN_BATCH_SIZE = 8;
 export const RESEARCH_EVIDENCE_BATCH_SIZE = 6;
 export const RESEARCH_SCREEN_INSTRUCTIONS = `Screen for potential editorial usefulness, not a top-N shortlist. A publishing profile is an alternative destination, not an additional requirement: choose the best-fitting enabled profile. A company account's narrower adoption remit must never veto a useful personal-profile product, growth, founder or marketing insight. Evaluate the actual usable idea rather than the lead sentence, CTA, creator's career milestone or commercial framing. Assess EVERY supplied item independently. Select ALL items that could support a useful, grounded social post for at least ONE supplied publishing profile. Choose the best-fitting profile for each item: fit for a personal practitioner profile is sufficient even if the company profiles would not publish it. Never average fit across profiles, require universal relevance, or narrow a personal profile to a company's product features. There is no quota, competition between items, source diversity requirement or daily publishing limit at this stage. Writing instructions such as one insight or one post apply to each eventual draft, never to the number of items selected.
@@ -363,15 +363,17 @@ export function evidenceJsonSchemaForItems(itemIds: string[], enabledProfileIds?
   const ideaRequired = enabledProfileIds ? ["chosenProfileId", "profileFit", ...required] : required;
   return {
     ...evidenceJsonSchema,
+    $defs: {
+      idea: { type: "object", additionalProperties: false, properties: ideaProperties, required: ideaRequired },
+      sourceAssessment: {
+        type: "object", additionalProperties: false,
+        properties: { ...ideaProperties, additionalIdeas: { type: "array", items: { $ref: "#/$defs/idea" } } },
+        required: [...ideaRequired, "additionalIdeas"],
+      },
+    },
     properties: { findings: {
       type: "object", additionalProperties: false, required: itemIds,
-      properties: Object.fromEntries(itemIds.map(id => [id, {
-        type: "object", additionalProperties: false,
-        properties: { ...ideaProperties, additionalIdeas: { type: "array", items: {
-          type: "object", additionalProperties: false, properties: ideaProperties, required: ideaRequired,
-        } } },
-        required: [...ideaRequired, "additionalIdeas"],
-      }])),
+      properties: Object.fromEntries(itemIds.map(id => [id, { $ref: "#/$defs/sourceAssessment" }])),
     } },
   };
 }

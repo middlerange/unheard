@@ -7,6 +7,7 @@ export type CollectedItem = {
   publishedAt: number | null;
   content?: string;
   contentProvenance?: "public_feed" | "article" | "transcript" | "abstract";
+  retrievalNote?: string;
   contentType: "article" | "video";
   transcriptStatus: "not_applicable" | "unavailable" | "available";
 };
@@ -82,7 +83,11 @@ export async function fetchResearchText(
       const target = response.headers.get("location");
       await response.body?.cancel();
       if (!target) throw new Error("Redirect without a destination");
-      url = assertPublicResearchUrl(new URL(target, url).href, allowedHosts);
+      let destination: URL;
+      try { destination = new URL(target, url); }
+      catch { throw new Error("Redirect destination is invalid"); }
+      try { url = assertPublicResearchUrl(destination.href, allowedHosts); }
+      catch { throw new Error(`Source redirect rejected (host: ${destination.hostname}); only public HTTPS URLs on approved source domains are allowed`); }
       continue;
     }
     if (!response.ok) {

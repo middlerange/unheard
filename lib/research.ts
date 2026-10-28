@@ -1152,7 +1152,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       }));
       const output = researchEvidenceSchema.parse(await cachedModel(
         run, "evidence", input, RESEARCH_EVIDENCE_INSTRUCTIONS,
-        evidenceJsonSchemaForItems(batch.map(item => item.id)), 9000,
+        evidenceJsonSchemaForItems(batch.map(item => item.id)), 8192,
       ));
       validateResearchEvidenceCoverage(output.findings, batch.map(item => item.id));
       const accepted = validateResearchEvidence(output.findings, batch.map(item => ({ id: item.id, content: item.content! })));

@@ -4,6 +4,19 @@ const knownCodes = new Set([
   'invalid_request_error', 'authentication_error', 'permission_error',
   'not_found_error', 'overloaded_error', 'server_error', 'context_length_exceeded',
 ]);
+type ConfigurationIssue = 'schema_complexity' | 'output_token_limit' | 'unsupported_schema' | 'unsupported_api_version' | 'request_format';
+
+function classifyConfigurationIssue(message: unknown): ConfigurationIssue | null {
+  if (typeof message !== 'string') return null;
+  const patterns: Array<[ConfigurationIssue, RegExp]> = [
+    ['schema_complexity', /\b(?:schemas?|(?:compiled\s+)?grammar)\b.{0,160}\b(?:too (?:complex|large)|complexity limit|compilation timeout)\b/i],
+    ['output_token_limit', /\bmax_(?:output_)?tokens\b.{0,160}(?:\b(?:maximum|limit|exceeds?|too (?:large|high)|out of range|greater than|less than|at most)\b|<=)/i],
+    ['unsupported_schema', /(?:\b(?:schema|additionalProperties|anyOf|allOf|oneOf)\b.{0,120}\b(?:unsupported|not supported|not allowed|must be false|unknown keyword)\b|\bunsupported\b.{0,80}\b(?:schema|schema keyword)\b)/i],
+    ['unsupported_api_version', /(?:\b(?:anthropic-version|api[_ -]version)\b.{0,120}\b(?:unsupported|invalid|not supported|unrecognized|not recognized|required|missing)\b|\b(?:invalid|unsupported|missing)\b.{0,80}\b(?:anthropic-version|api[_ -]version)\b)/i],
+    ['request_format', /(?:\b(?:messages?|system|output_config|output_format|response_format|thinking|service_tier|tools?)\b.{0,120}\b(?:extra inputs? (?:are )?not permitted|(?:field )?required|invalid (?:type|value)|must be|input should be|not permitted|not allowed|not supported|unknown (?:field|parameter))\b|\b(?:invalid|malformed) (?:request body|json)\b)/i],
+  ];
+  return patterns.find(([, pattern]) => pattern.test(message))?.[0] ?? null;
+}
 
 function duration(value: string | null) {
   if (!value || !/^(?:\d+(?:\.\d+)?(?:ms|s|m|h))+$/.test(value)) return null;
@@ -49,9 +62,11 @@ export async function readResearchProviderResponse(response: Response) {
 /** Retain useful rejection diagnostics without response messages, prompts or credentials. */
 export async function researchProviderRejection(response: Response, provider: string, now = Date.now()) {
   const inspected = await readResearchProviderResponse(response);
-  const body = inspected.body as { error?: { code?: unknown; type?: unknown } } | null;
+  const body = inspected.body as { error?: { code?: unknown; type?: unknown; message?: unknown } } | null;
   const safeCode = (value: unknown) => typeof value === 'string' && knownCodes.has(value) ? value : null;
   const code = safeCode(body?.error?.code), type = safeCode(body?.error?.type);
+  const configurationIssue = response.status === 400 && (code === 'invalid_request_error' || type === 'invalid_request_error')
+    ? classifyConfigurationIssue(body?.error?.message) : null;
   const quota = [code, type].some(value => value === 'insufficient_quota' || value === 'billing_hard_limit_reached');
   const codeAbsent = body?.error?.code === undefined || body?.error?.code === null;
   const rateCode = code === 'rate_limit_exceeded' || code === 'rate_limit_error';
@@ -69,9 +84,9 @@ export async function researchProviderRejection(response: Response, provider: st
     return value && /^\d+$/.test(value) ? [[name, Number(value)]] : [];
   }));
   const diagnostic = { provider, httpStatus: response.status, code, type, requestId, temporary, retryAfterMs, limits,
-    contentType: inspected.contentType, bodyKind: inspected.bodyKind };
+    contentType: inspected.contentType, bodyKind: inspected.bodyKind, configurationIssue };
   const suffix = temporary ? ` Wait ${Math.ceil(retryAfterMs! / 1000)} seconds before continuing the rejected request.`
-    : quota ? ' Check provider billing or account quota.' : ' Check model access and account limits.';
+    : quota ? ' Check provider billing or account quota.' : configurationIssue ? ' Check request configuration.' : ' Check model access and account limits.';
   const message = `${provider} request rejected (HTTP ${response.status}${code || type ? `; ${code || type}` : ''}).${suffix}`;
   return { diagnostic, error: temporary ? new ResearchModelRateLimitError(message, retryAfterMs!) : new Error(message) };
 }

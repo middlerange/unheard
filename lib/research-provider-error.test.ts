@@ -31,6 +31,50 @@ it('records only allowed diagnostic fields and never echoes provider credentials
   expect(result.diagnostic).toMatchObject({ code: null, type: null, requestId: null, limits: {} });
 });
 
+it.each([
+  ['Schema is too complex for compilation.', 'schema_complexity'],
+  ['The compiled grammar is too large.', 'schema_complexity'],
+  ['max_tokens must be less than or equal to 8192.', 'output_token_limit'],
+  ['max_output_tokens exceeds the maximum supported value.', 'output_token_limit'],
+  ['JSON schema: allOf with $ref is not supported.', 'unsupported_schema'],
+  ['additionalProperties must be false.', 'unsupported_schema'],
+  ['Invalid header anthropic-version: unsupported version.', 'unsupported_api_version'],
+  ['messages.0.content: Input should be a valid list.', 'request_format'],
+  ['output_config.format: Field required.', 'request_format'],
+  ['The request could not be processed.', null],
+])('retains only a fixed configuration category for a known 400: %s', async (message, expected) => {
+  const result = await researchProviderRejection(Response.json({ error: { type: 'invalid_request_error', message } }, { status: 400 }), 'Anthropic');
+  expect(result.diagnostic.configurationIssue).toBe(expected);
+  expect(result.diagnostic.temporary).toBe(false);
+  expect(result.error).not.toBeInstanceOf(ResearchModelRateLimitError);
+  expect(JSON.stringify(result.diagnostic) + result.error.message).not.toContain(message);
+  if (expected) expect(result.error.message).toContain('Check request configuration.');
+});
+
+it('does not classify configuration from unknown codes, other statuses or non-string messages', async () => {
+  for (const [status, type, message] of [
+    [400, 'future_request_error', 'Schema is too complex for compilation.'],
+    [401, 'invalid_request_error', 'Schema is too complex for compilation.'],
+    [429, 'invalid_request_error', 'Schema is too complex for compilation.'],
+    [400, 'invalid_request_error', { schema: 'too complex', private: 'Do not retain' }],
+  ] as const) {
+    const result = await researchProviderRejection(Response.json({ error: { type, message } }, { status }), 'Anthropic');
+    expect(result.diagnostic.configurationIssue).toBeNull();
+  }
+});
+
+it('never retains secret-containing provider messages even when they identify a schema problem', async () => {
+  const secret = 'sk-private-key-and-embedded-prompt';
+  const message = `Schema is too complex for compilation. Authorization: ${secret}; private source and prompt follow.`;
+  const result = await researchProviderRejection(Response.json({ error: { type: 'invalid_request_error', message }, prompt: secret }, { status: 400 }), 'Anthropic');
+  expect(result.diagnostic.configurationIssue).toBe('schema_complexity');
+  const retained = JSON.stringify(result.diagnostic) + result.error.message;
+  expect(retained).not.toContain(secret);
+  expect(retained).not.toContain('private source');
+  expect(retained).not.toContain('Authorization');
+  expect(retained).not.toContain(message);
+});
+
 it('supports Anthropic rate-limit types and HTTP-date retry headers without retrying server errors', async () => {
   const now = Date.parse('2026-10-27T09:00:00Z');
   const response = Response.json({ error: { type: 'rate_limit_error' } }, { status: 429, headers: { 'retry-after': 'Tue, 27 Oct 2026 09:01:00 GMT' } });

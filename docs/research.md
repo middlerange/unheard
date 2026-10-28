@@ -547,7 +547,7 @@ do not copy those keys locally to run an experiment.
 
 ### Distinct ideas and explicit reference watches
 
-Research v16 returns one primary assessment per source and an `additionalIdeas`
+Research v17 returns one primary assessment per source and an `additionalIdeas`
 array for genuinely different supported decisions. Every idea keeps its own
 profile choice, score, exact quote and story family. Several paraphrases of one
 claim do not create several ideas. Family identities retain their saved ideas,
@@ -576,3 +576,9 @@ coverage of known references, not independent discovery recall on unseen items.
 Hacker News queries split nonoverlapping timestamp ranges when reported results
 exceed the provider's pagination ceiling. Readable results survive a failed
 partition; a saturated one-second range remains explicitly incomplete.
+
+The strict output schema shares nonrecursive `$defs` for primary and additional
+ideas instead of repeating the full nullable-profile grammar for every source.
+Source keys, profile choices and local quote/coverage checks remain strict.
+Provider rejection diagnostics retain only an allowlisted configuration category;
+raw provider messages, credentials and prompts are never stored as diagnostics.

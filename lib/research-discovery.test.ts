@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { collectDiscoveredResearchSource, fetchDiscoveredResearchArticle } from "./research-discovery";
 import type { ResearchSourceSeed } from "./research-types";
 
@@ -13,6 +13,7 @@ function article(date?: string) {
   return `${date ? `<meta property="article:published_time" content="${date}">` : ""}<main><h1>Original user study</h1><p>${"Measured original evidence. ".repeat(40)}</p></main>`;
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+beforeEach(() => vi.stubEnv("TREG_TOKEN", ""));
 describe("topic-driven public discovery", () => {
   it("checks original publication dates and bodies instead of trusting search recency or snippets", async () => {
     vi.stubEnv("TREG_TOKEN", "test-only-search-token");

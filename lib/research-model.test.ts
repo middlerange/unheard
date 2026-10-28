@@ -22,13 +22,14 @@ const items = [{ id: "study", content: `The research suggests policy has not kep
 describe("v15 chosen-profile evidence protocol", () => {
   it("requires profile choice and rationale before claim and score, including in Anthropic's wire schema", () => {
     const wire = evidenceJsonSchemaForItems(["study"], ["company", "personal"]);
-    const schema = wire.properties.findings.properties.study;
+    const schema = wire.$defs.sourceAssessment;
+    expect(wire.properties.findings.properties.study).toEqual({ $ref: "#/$defs/sourceAssessment" });
     expect(Object.keys(schema.properties)).toEqual(["chosenProfileId", "profileFit", "summary", "evidence", "contentAngle", "whyItMatters", "limitations", "familyKey", "score", "additionalIdeas"]);
     expect(schema.required.slice(0, 2)).toEqual(["chosenProfileId", "profileFit"]);
     expect(schema.properties.chosenProfileId).toEqual({ anyOf: [{ type: "string", enum: ["company", "personal"] }, { type: "null" }] });
     const converted = anthropicResearchSchema(wire) as typeof wire;
-    expect(Object.keys(converted.properties.findings.properties.study.properties)).toEqual(Object.keys(schema.properties));
-    expect(converted.properties.findings.properties.study.required).toContain("chosenProfileId");
+    expect(Object.keys(converted.$defs.sourceAssessment.properties)).toEqual(Object.keys(schema.properties));
+    expect(converted.$defs.sourceAssessment.required).toContain("chosenProfileId");
   });
   it("accepts a personal distribution decision independently and preserves a genuine no-fit rejection", () => {
     const decision = { ...finding, chosenProfileId: "personal", profileFit: "The personal profile covers distribution; inspect the effect on qualified website visits. Company onboarding scope is irrelevant to this choice." };
@@ -57,6 +58,16 @@ describe("v15 chosen-profile evidence protocol", () => {
 });
 
 describe("distinct supported ideas from one public source", () => {
+  it("shares nonrecursive wire definitions instead of multiplying nullable grammar branches per source",()=>{
+    const schema=anthropicResearchSchema(evidenceJsonSchemaForItems(Array.from({length:6},(_,i)=>`source-${i}`),["personal","company"])) as ReturnType<typeof evidenceJsonSchemaForItems>;
+    let unions=0,arrays=0;
+    function visit(value:unknown){if(!value||typeof value!=="object")return;const x=value as Record<string,unknown>;if(x.anyOf)unions++;if(x.type==="array")arrays++;for(const child of Object.values(x))if(Array.isArray(child))child.forEach(visit);else visit(child);}
+    visit(schema);
+    expect(unions).toBe(2);expect(arrays).toBe(1);
+    expect(schema.$defs.sourceAssessment.properties.additionalIdeas.items).toEqual({$ref:"#/$defs/idea"});
+    expect(schema.$defs.idea).not.toHaveProperty("additionalIdeas");
+    expect(Object.keys(schema.properties.findings.properties)).toHaveLength(6);
+  });
   const secondQuote = "Teams should measure channel adoption separately from reported impact.";
   const extra = { ...finding, evidence: secondQuote, familyKey: "channel-impact", chosenProfileId: "personal", profileFit: "The personal profile covers distribution decisions." };
   const { itemId: _id, ...additional } = extra;
@@ -238,7 +249,7 @@ it("normalizes keyed evidence while retaining legacy cached arrays and quote val
 
 it("places the supported claim, exact evidence and limitations before the final evidence score", () => {
   const fields = ["summary", "evidence", "contentAngle", "whyItMatters", "limitations", "familyKey", "score"];
-  const schema = evidenceJsonSchemaForItems(["study"]).properties.findings.properties.study;
+  const schema = evidenceJsonSchemaForItems(["study"]).$defs.sourceAssessment;
   expect(Object.keys(schema.properties)).toEqual([...fields, "additionalIdeas"]);
   expect(schema.required).toEqual([...fields, "additionalIdeas"]);
   expect(Object.keys(researchEvidenceSchema.parse({ findings: [finding] }).findings[0])).toEqual(["itemId", ...fields]);

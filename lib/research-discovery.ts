@@ -5,6 +5,7 @@ import {
 } from "./research-collectors";
 import type { ResearchSourceSeed } from "./research-types";
 import { fetchPewResearchArticle, isPewResearchSource } from "./research-pew";
+import { canUseFreePublicWatchFetch, fetchFreePublicWatchHtml, PUBLIC_FETCH_RETRIEVAL_NOTE } from "./research-public-fetch";
 
 type SearchHit = { url: string; title: string; snippet?: string };
 type SearchResults = { hits: SearchHit[]; warnings: string[]; pages: number; exhaustive: boolean };
@@ -20,10 +21,11 @@ export async function fetchDiscoveredResearchArticle(
   source: ResearchSourceSeed,
   target: DiscoveryArticleTarget,
   windowEnd: number,
+  htmlOverride?: string,
 ): Promise<CollectedItem> {
   if (isPewResearchSource(source)) return fetchPewResearchArticle(source, target.url, windowEnd);
   const candidateSource = { ...source, url: target.url, feedUrl: undefined };
-  const html = await fetchResearchText(target.url, sourceHosts(source.kind === "search" ? candidateSource : source));
+  const html = htmlOverride ?? await fetchResearchText(target.url, sourceHosts(source.kind === "search" ? candidateSource : source));
   const url = new URL(target.url);
   const arxivId = url.hostname === "arxiv.org"
     ? url.pathname.match(/^\/(abs|html)\/(\d{4}\.\d{4,5})(?:v\d+)?\/?$/) : null;
@@ -206,7 +208,14 @@ export async function collectDiscoveredResearchSource(
   options: { deferArticleFetch?: boolean } = {},
 ): Promise<DiscoveryCollection> {
   if (source.kind === "web" && source.pageMode === "article") {
-    return { items: [await fetchDiscoveredResearchArticle(source, { url: source.url, title: source.name }, windowEnd)], warning: null };
+    const target = { url: source.url, title: source.name };
+    try { return { items: [await fetchDiscoveredResearchArticle(source, target, windowEnd)], warning: null }; }
+    catch (error) {
+      if (isPewResearchSource(source) || !canUseFreePublicWatchFetch(source, error)) throw error;
+      const html = await fetchFreePublicWatchHtml(source);
+      const item = await fetchDiscoveredResearchArticle(source, target, windowEnd, html);
+      return { items: [{ ...item, retrievalNote: PUBLIC_FETCH_RETRIEVAL_NOTE }], warning: PUBLIC_FETCH_RETRIEVAL_NOTE };
+    }
   }
   if (source.kind !== "search") {
     let collection: DiscoveryCollection;
