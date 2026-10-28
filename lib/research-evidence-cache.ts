@@ -2,7 +2,10 @@ import { matchResearchQuote, researchEvidenceSchema, researchHash, validateResea
 import { RESEARCH_POST_MIN_SCORE } from "./research-policy";
 
 export type EvidenceCacheInput = { id: string; content?: string; [key: string]: unknown };
-type CitationRepair = { itemId: string; familyKey: string; original: string; selected: string; method: "ordered_omission_to_contiguous_span" | "leading_determiner_to_contiguous_span" };
+export type CitationRepair = { itemId: string; familyKey: string; original: string; selected: string } & (
+  { method: "ordered_omission_to_contiguous_span" | "leading_determiner_to_contiguous_span" }
+  | { method: "model_passage_selection"; requestId: string; passageId: number; start: number; end: number; bodyHash: string; gradeHash: string }
+);
 export type EvidenceCacheValue = { findings: ResearchEvidence[]; citationRepairs?: CitationRepair[] };
 export type EvidenceCacheContext = {
   teamId: string;
@@ -37,7 +40,7 @@ function citationText(value: string) {
   return { text: chars.join(""), positions };
 }
 
-function canonicalCitation(content: string, evidence: string): { selected: string; method: CitationRepair["method"] | null } | null {
+function canonicalCitation(content: string, evidence: string): { selected: string; method: "ordered_omission_to_contiguous_span" | "leading_determiner_to_contiguous_span" | null } | null {
   const exact = matchResearchQuote(content, evidence);
   if (exact) return exact.length <= 600 ? { selected: evidence, method: null } : null;
   const closingMarks: Record<string, string> = { '"': '"', "'": "'", "“": "”", "‘": "’" };
@@ -72,7 +75,7 @@ export function canonicalResearchCitation(content: string, evidence: string): st
   return canonicalCitation(content, evidence)?.selected ?? null;
 }
 
-export function validateResearchEvidenceCacheValue(value: unknown, items: EvidenceCacheInput[], enabledProfileIds: string[]): EvidenceCacheValue {
+function canonicalEvidenceCacheValue(value: unknown, items: EvidenceCacheInput[], enabledProfileIds: string[], unsupported?: (family: string) => void): EvidenceCacheValue {
   const output = researchEvidenceSchema.parse(value);
   const findings = validateResearchEvidenceCoverage(output.findings, items.map(item => item.id));
   validateResearchEvidenceProfiles(findings, enabledProfileIds);
@@ -82,7 +85,10 @@ export function validateResearchEvidenceCacheValue(value: unknown, items: Eviden
     for (const idea of [primary, ...(primary.additionalIdeas || [])]) {
       if (idea.score < RESEARCH_POST_MIN_SCORE) continue;
       const citation = canonicalCitation(bodies.get(primary.itemId) || "", idea.evidence);
-      if (!citation) throw new Error(`Research evidence has an unsupported passing quote for source ${primary.itemId}`);
+      if (!citation) {
+        if (unsupported) { unsupported(idea.familyKey); continue; }
+        throw new Error(`Research evidence has an unsupported passing quote for source ${primary.itemId}`);
+      }
       if (citation.method) {
         repairs.push({ itemId: primary.itemId, familyKey: idea.familyKey, original: idea.evidence, selected: citation.selected, method: citation.method });
         idea.evidence = citation.selected;
@@ -91,6 +97,19 @@ export function validateResearchEvidenceCacheValue(value: unknown, items: Eviden
   }
   if (value && typeof value === "object" && "citationRepairs" in value && Array.isArray(value.citationRepairs)) {
     for (const repair of value.citationRepairs) {
+      if (repair?.method === "model_passage_selection") {
+        const primary = findings.find(finding => finding.itemId === repair.itemId);
+        const idea = primary && [primary, ...(primary.additionalIdeas || [])].find(idea => idea.familyKey === repair.familyKey && idea.evidence === repair.selected);
+        if (idea && primary && typeof repair.original === "string" && repair.original.length <= 600
+          && typeof repair.requestId === "string" && repair.requestId.startsWith("quote-repair:v1:")
+          && Number.isInteger(repair.passageId) && repair.passageId >= 0 && Number.isInteger(repair.start) && repair.start >= 0
+          && Number.isInteger(repair.end) && repair.end > repair.start && repair.end - repair.start >= 20 && repair.end - repair.start <= 600
+          && typeof repair.bodyHash === "string" && typeof repair.gradeHash === "string"
+          && (bodies.get(primary.itemId) || "").slice(repair.start, repair.end) === repair.selected)
+          repairs.push({ itemId: primary.itemId, familyKey: idea.familyKey, original: repair.original, selected: repair.selected,
+            method: "model_passage_selection", requestId: repair.requestId, passageId: repair.passageId, start: repair.start, end: repair.end, bodyHash: repair.bodyHash, gradeHash: repair.gradeHash });
+        continue;
+      }
       if (!repair || !["ordered_omission_to_contiguous_span", "leading_determiner_to_contiguous_span"].includes(repair.method) || typeof repair.original !== "string"
         || repair.original.length > 600 || typeof repair.selected !== "string") continue;
       const primary = findings.find(finding => finding.itemId === repair.itemId);
@@ -102,6 +121,16 @@ export function validateResearchEvidenceCacheValue(value: unknown, items: Eviden
     }
   }
   return repairs.length ? { ...output, citationRepairs: repairs } : output;
+}
+
+export function validateResearchEvidenceCacheValue(value: unknown, items: EvidenceCacheInput[], enabledProfileIds: string[]): EvidenceCacheValue {
+  return canonicalEvidenceCacheValue(value, items, enabledProfileIds);
+}
+
+export function prepareResearchQuoteRepair(value: unknown, item: EvidenceCacheInput, enabledProfileIds: string[]) {
+  const invalidFamilies: string[] = [];
+  const parsed = canonicalEvidenceCacheValue(value, [item], enabledProfileIds, family => invalidFamilies.push(family));
+  return { value: parsed, invalidFamilies };
 }
 
 export async function researchEvidenceItemCacheId(context: EvidenceCacheContext, item: EvidenceCacheInput) {

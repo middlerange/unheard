@@ -4,7 +4,8 @@ import { getDb } from "./db/client";
 import { retryResearchStorage } from "./research-storage";
 import { getFrozenResearchAudience } from "./research-audience";
 import { researchSelectionAudience, RESEARCH_SELECTION_VIEW_VERSION } from "./research-selection-audience";
-import { cacheValidResearchEvidenceItems, reuseResearchEvidenceItems, validateResearchEvidenceCacheValue, type EvidenceCacheInput, type EvidenceCacheValue } from "./research-evidence-cache";
+import { cacheValidResearchEvidenceItems, researchEvidenceItemCacheId, reuseResearchEvidenceItems, validateResearchEvidenceCacheValue, type EvidenceCacheInput, type EvidenceCacheValue } from "./research-evidence-cache";
+import { repairResearchCitation, RESEARCH_QUOTE_REPAIR_INSTRUCTIONS, sameContextQuoteFailure } from "./research-quote-repair";
 import { researchFindingDates, researchItemSignalKind } from "./research-dates";
 import { getDraftResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
 import { hasUsablePewResearchBody, isPewResearchSource } from "./research-pew";
@@ -996,6 +997,36 @@ async function cachedModel(
     await db.update(research_runs).set({ cache_hits: sql`${research_runs.cache_hits} + 1` }).where(eq(research_runs.id, run.id));
     return valid;
   }
+  let invalidQuoteRecords: Promise<Array<{ id: string; value: string }>> | undefined;
+  const priorQuoteGrade = async (item: EvidenceCacheInput) => {
+    const prefix = `invalid:${id}:`;
+    invalidQuoteRecords ||= db.select({ id: research_cache.id, value: research_cache.value }).from(research_cache)
+      .where(and(eq(research_cache.team_id, run.team_id), sql`substr(${research_cache.id}, 1, ${prefix.length}) = ${prefix}`))
+      .orderBy(desc(research_cache.created_at)).all();
+    return sameContextQuoteFailure(await invalidQuoteRecords, id, item, enabledProfileIds);
+  };
+  const repairQuote = async (raw: unknown, item: EvidenceCacheInput) => repairResearchCitation(
+    raw, item, enabledProfileIds, await researchEvidenceItemCacheId(evidenceAccess.context, item), {
+      read: async receiptId => {
+        const row = await db.select().from(research_cache)
+          .where(and(eq(research_cache.id, receiptId), eq(research_cache.team_id, run.team_id))).get();
+        return row ? JSON.parse(row.value) : null;
+      },
+      claim: async (receiptId, receipt) => {
+        const inserted = await retryResearchStorage(async () => db.insert(research_cache).values({
+          id: receiptId, team_id: run.team_id, value: JSON.stringify(receipt), created_at: Date.now(),
+        }).onConflictDoNothing().returning({ id: research_cache.id }));
+        return inserted.length === 1;
+      },
+      save: async (receiptId, receipt) => retryResearchStorage(async () => db.update(research_cache)
+        .set({ value: JSON.stringify(receipt) }).where(and(eq(research_cache.id, receiptId), eq(research_cache.team_id, run.team_id)))),
+      select: async (data, repairSchema, tokens) => (await callResearchModel(
+        RESEARCH_QUOTE_REPAIR_INSTRUCTIONS, data, repairSchema, tokens,
+        { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? "replay_quote_repair" : "quote_repair" },
+      )).value,
+      validate: async value => await validateReusable(value, [item]) as EvidenceCacheValue,
+    },
+  );
   const generate = async (items: unknown) => {
     const usage = { teamId: run.team_id, runId: run.id, stage: "research" as const, operation: run.mode === "replay" ? `replay_${stage}` : stage };
     if (stage !== "evidence") return (await callResearchModel(
@@ -1007,12 +1038,17 @@ async function cachedModel(
     const concurrency = 2;
     for (let start = 0; start < sources.length; start += concurrency) {
       const results = await Promise.allSettled(sources.slice(start, start + concurrency).map(async item => {
-        const result = await callResearchModel(
+        let raw = await priorQuoteGrade(item);
+        if (raw === null) raw = (await callResearchModel(
           system, { ...selectionAudience, items: [item] },
-          evidenceJsonSchemaForItems([item.id], enabledProfileIds, { sectionCoverage: true }),
-          outputTokens, usage,
-        );
-        const output = await validateReusable(result.value, [item]) as EvidenceCacheValue;
+          evidenceJsonSchemaForItems([item.id], enabledProfileIds, { sectionCoverage: true }), outputTokens, usage,
+        )).value;
+        let output: EvidenceCacheValue;
+        try { output = await validateReusable(raw, [item]) as EvidenceCacheValue; }
+        catch (error) {
+          if (!(error instanceof Error) || error.message !== `Research evidence has an unsupported passing quote for source ${item.id}`) throw error;
+          output = await repairQuote(raw, item);
+        }
         await cacheValidResearchEvidenceItems(output, [item], evidenceAccess);
         return output.findings[0];
       }));
