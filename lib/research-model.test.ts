@@ -51,9 +51,10 @@ describe("independent profile checks and claim-based evidence", () => {
   it("requires every profile check before claim scoring, including in Anthropic's wire schema", () => {
     const wire = evidenceJsonSchemaForItems(["study"], ["company", "personal"]);
     const schema = wire.$defs.sourceAssessment;
-    expect(wire.properties.findings.items).toEqual({ $ref: "#/$defs/sourceAssessment" });
-    expect(Object.keys(schema.properties)).toEqual(["itemId", "claimBasis", "profileChecks", "summary", "evidence", "contentAngle", "whyItMatters", "limitations", "familyKey", "qualityComponents", "additionalIdeas"]);
-    expect(schema.required.slice(1, 3)).toEqual(["claimBasis", "profileChecks"]);
+    expect(wire.properties.findings.properties.study).toEqual({ $ref: "#/$defs/sourceAssessment" });
+    expect(wire.properties.findings.required).toEqual(["study"]);
+    expect(Object.keys(schema.properties)).toEqual(["claimBasis", "profileChecks", "summary", "evidence", "contentAngle", "whyItMatters", "limitations", "familyKey", "qualityComponents", "additionalIdeas"]);
+    expect(schema.required.slice(0, 2)).toEqual(["claimBasis", "profileChecks"]);
     expect(wire.$defs.profileCheck.properties.profileId.enum).toEqual(["company", "personal"]);
     expect(wire.$defs.profileChecks.items).toEqual({ $ref: "#/$defs/profileCheck" });
     expect(schema.properties).not.toHaveProperty("chosenProfileId");
@@ -94,10 +95,11 @@ describe("distinct supported ideas from one public source", () => {
     let unions=0,arrays=0;
     function visit(value:unknown){if(!value||typeof value!=="object")return;const x=value as Record<string,unknown>;if(x.anyOf)unions++;if(x.type==="array")arrays++;for(const child of Object.values(x))if(Array.isArray(child))child.forEach(visit);else visit(child);}
     visit(schema);
-    expect(unions).toBe(0);expect(arrays).toBe(3);
+    expect(unions).toBe(0);expect(arrays).toBe(2);
     expect(schema.$defs.sourceAssessment.properties.additionalIdeas.items).toEqual({$ref:"#/$defs/idea"});
     expect(schema.$defs.idea).not.toHaveProperty("additionalIdeas");
-    expect(schema.$defs.sourceAssessment.properties.itemId.enum).toHaveLength(6);
+    expect(schema.properties.findings.required).toHaveLength(6);
+    expect(schema.$defs.sourceAssessment.properties).not.toHaveProperty("itemId");
   });
   const secondQuote = "Teams should measure channel adoption separately from reported impact.";
   const extra = { ...finding, evidence: secondQuote, familyKey: "channel-impact", chosenProfileId: "personal", profileFit: "The personal profile covers distribution decisions." };
@@ -269,11 +271,11 @@ it("normalizes keyed evidence while retaining legacy cached arrays and quote val
   expect(validateResearchEvidenceCoverage(normalized.findings, [itemId])).toEqual([finding]);
   expect(validateResearchEvidence(normalized.findings, items)).toEqual([finding]);
   const schema = evidenceJsonSchemaForItems([itemId, "other"]);
-  expect(schema.$defs.sourceAssessment.properties.itemId.enum).toEqual([itemId, "other"]);
-  expect(schema.properties.findings.items).toEqual({ $ref: "#/$defs/sourceAssessment" });
-  expect(schema.$defs.sourceAssessment.required).toContain("itemId");
+  expect(schema.properties.findings.required).toEqual([itemId, "other"]);
+  expect(schema.properties.findings.properties[itemId]).toEqual({ $ref: "#/$defs/sourceAssessment" });
+  expect(schema.$defs.sourceAssessment.required).not.toContain("itemId");
   const converted = anthropicResearchSchema(schema) as typeof schema;
-  expect(converted.$defs.sourceAssessment.properties.itemId.enum).toEqual([itemId, "other"]);
+  expect(converted.properties.findings.required).toEqual([itemId, "other"]);
   expect(() => validateResearchEvidenceCoverage(normalized.findings, [itemId, "other"])).toThrow("every input exactly once");
   expect(() => researchEvidenceSchema.parse({ findings: { [itemId]: { ...assessment, itemId: "forged" } } })).toThrow();
   const ungrounded = researchEvidenceSchema.parse({ findings: { [itemId]: { ...assessment, evidence: "" } } });
@@ -283,8 +285,8 @@ it("normalizes keyed evidence while retaining legacy cached arrays and quote val
 it("places the supported claim, exact evidence and limitations before the final evidence score", () => {
   const fields = ["summary", "evidence", "contentAngle", "whyItMatters", "limitations", "familyKey", "score"];
   const schema = evidenceJsonSchemaForItems(["study"]).$defs.sourceAssessment;
-  expect(Object.keys(schema.properties)).toEqual(["itemId", ...fields, "additionalIdeas"]);
-  expect(schema.required).toEqual(["itemId", ...fields, "additionalIdeas"]);
+  expect(Object.keys(schema.properties)).toEqual([...fields, "additionalIdeas"]);
+  expect(schema.required).toEqual([...fields, "additionalIdeas"]);
   expect(Object.keys(researchEvidenceSchema.parse({ findings: [finding] }).findings[0])).toEqual(["itemId", ...fields]);
   expect(validateResearchEvidence([{ ...finding, evidence: "Unverified efficacy that the source does not contain." }], items)).toEqual([]);
 });

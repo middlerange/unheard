@@ -39,7 +39,7 @@ describe('recall evaluator production audience contract', () => {
   });
   it('requires a real chosen-profile enum and validates it even for a cached structured response', () => {
     const schema = recallEvidenceSchema('current', ['source'], ['company', 'personal']);
-    expect(schema.properties.findings).toMatchObject({ type: 'array', items: { $ref: '#/$defs/sourceAssessment' } });
+    expect(schema.properties.findings).toMatchObject({ type: 'object', required: ['source'], properties: { source: { $ref: '#/$defs/sourceAssessment' } } });
     expect(schema.$defs.sourceAssessment.required).toEqual(expect.arrayContaining(['claimBasis', 'profileChecks', 'qualityComponents']));
     expect(schema.$defs.profileCheck.properties.profileId.enum).toEqual(['company', 'personal']);
     expect(() => parseRecallEvidence('current', { findings: [assessment] }, ['source'], ['company', 'personal'])).toThrow('choose a supplied');

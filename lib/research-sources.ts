@@ -1983,5 +1983,53 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "enabled": true,
     "priority": 2,
     "notes": "Explicit original report watch. Preserve publication date and survey population/denominators; inspect distinct findings rather than treating the report as one conclusion. Known reference coverage is not independent discovery."
+  },
+  {
+    "id": "sequoia-training-data-original-interviews",
+    "name": "Sequoia Training Data — original interviews",
+    "url": "https://sequoiacap.com/series/training-data",
+    "kind": "web",
+    "pageMode": "index",
+    "articlePathPrefixes": [
+      "/podcast"
+    ],
+    "category": "industry",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Publisher-advertised original public interview series. Collect publisher episode links and public text, preserving original dates and visible scope. Interviews are attributed practitioner evidence rather than proof of universal business outcomes."
+  },
+  {
+    "id": "reference-0cc221e230a1",
+    "name": "Sequoia — Josh Woodward: Agents and Google Mariner public chapter",
+    "url": "https://sequoiacap.com/podcast/training-data-josh-woodward",
+    "kind": "web",
+    "pageMode": "article",
+    "articleSectionHeading": "Agents and Google Mariner",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Explicit known public chapter watch. Read only the uniquely titled publisher chapter, preserve original publication/unknown dates, and do not claim a whole-interview reading or independent discovery. Publisher chapter selection is structural; it does not supply desired claims or grading answers."
+  },
+  {
+    "id": "reference-2b1bd5928808",
+    "name": "Fyxer — public dashboard tour",
+    "url": "https://docs.fyxer.com/get-started/dashboard-tour.md",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Publisher-indexed public original product guide. Current reference with unknown original publication date; record real first observation and actual body changes separately. Attribute described capabilities and workflow; do not infer measured effectiveness. Known-guide coverage is not blind discovery."
+  },
+  {
+    "id": "reference-5d5e651e782c",
+    "name": "Fyxer — public daily workflow checklist",
+    "url": "https://docs.fyxer.com/get-started/checklist.md",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Publisher-indexed public original product guide. Current reference with unknown original publication date; record real first observation and actual body changes separately. Attribute described capabilities and workflow; do not infer measured effectiveness. Known-guide coverage is not blind discovery."
   }
 ];

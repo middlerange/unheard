@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   articleResearchDate,
+  articleResearchSection,
   articleResearchText,
   collectResearchSource,
   discoverResearchLinks,
@@ -24,6 +25,47 @@ const evidence = "A public research finding about customer adoption and product 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("public research evidence and publication dates", () => {
+  it("reads a late public chapter before applying the body cap and preserves its source wording", () => {
+    const chapter = '<h4>Evidence &amp; decisions</h4><p>The customer said “not yet”; keep that uncertainty.</p><ul><li>Observe the actual use.</li><li>Retain the contradictory result.</li></ul>';
+    const html = `<title>An original interview | Publisher</title><main><h1>An original interview</h1><p>${"Earlier source material. ".repeat(2000)}</p>${chapter}<h4>Another chapter</h4><p>Unrelated later answer.</p></main>`;
+    expect(articleResearchText(html)).not.toContain("The customer said");
+    const result = articleResearchSection(html, "  Evidence   & decisions  ");
+    expect(result).toMatchObject({ title: "An original interview — Evidence & decisions", heading: "Evidence & decisions" });
+    expect(result.content).toBe(readableResearchText(chapter));
+    expect(result.content).not.toContain("Earlier source material");
+    expect(result.content).not.toContain("Unrelated later answer");
+    expect(articleResearchSection(`<main><h1>Original interview</h1><h2>Long chapter</h2><p>${"Long source paragraph. ".repeat(2000)}</p></main>`, "Long chapter").content).toHaveLength(14_000);
+  });
+
+  it.each([2, 3, 4])("ends a chapter at the next same-or-higher h%s while including its child headings", level => {
+    const chapter = '<h4>Selected chapter</h4><p>Original answer.</p><h5>Detail</h5><p>Child answer.</p><h6>More detail</h6><p>Last child answer.</p>';
+    const html = `<article><h1>Original interview</h1>${chapter}<h${level}>Next chapter</h${level}><p>Other answer.</p></article>`;
+    expect(articleResearchSection(html, "Selected chapter").content).toBe(readableResearchText(chapter));
+  });
+
+  it("fails for missing, duplicate or unscoped chapter headings without borrowing navigation or related cards", () => {
+    const article = '<main><h1>Original interview</h1><h3>Actual chapter</h3><p>Source answer.</p></main>';
+    expect(() => articleResearchSection(article, "Missing chapter")).toThrow("not found");
+    expect(() => articleResearchSection(article.replace('</main>', '<h4>Actual chapter</h4><p>Second answer.</p></main>'), "Actual chapter")).toThrow("ambiguous");
+    expect(() => articleResearchSection(`<nav><h2>Missing chapter</h2></nav>${article}`, "Missing chapter")).toThrow("not found");
+    expect(() => articleResearchSection(article.replace('</main>', '<article><h2>Missing chapter</h2>Related story.</article></main>'), "Missing chapter")).toThrow("not found");
+    expect(() => articleResearchSection('<main><h2>Actual chapter</h2><p>No identified article.</p></main>', "Actual chapter")).toThrow("no confident article heading");
+    expect(() => articleResearchSection('<h1>Unscoped page</h1><h2>Actual chapter</h2><p>No article region or matching page title.</p>', "Actual chapter")).toThrow("no confident article heading");
+    expect(() => articleResearchSection(article, "actual chapter")).toThrow("not found");
+    expect(() => articleResearchSection(article, "  ")).toThrow("nonempty");
+    expect(articleResearchSection(`<nav><h2>Actual chapter</h2></nav>${article}`, "Actual chapter").content).toBe("Actual chapter\n\nSource answer.");
+  });
+
+  it("collects an explicit chapter with the whole original page date and explicit section provenance", async () => {
+    const html = `<meta property="article:published_time" content="2025-03-18T09:00:00Z"><main><h1>Original interview</h1><p>${"Earlier content. ".repeat(2000)}</p><h3>Public chapter</h3><p>${evidence}</p></main>`;
+    const fetcher = vi.fn(async () => new Response(html));
+    vi.stubGlobal("fetch", fetcher);
+    const [item] = await collectResearchSource({ ...source, pageMode: "article", articleSectionHeading: "Public chapter" });
+    expect(item).toMatchObject({ title: "Original interview — Public chapter", contentProvenance: "public_section", publishedAt: Date.parse("2025-03-18T09:00:00Z") });
+    expect(item.content).toBe(`Public chapter\n\n${evidence.trim()}`);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps five report conclusions separate in article and public feed bodies", () => {
     const sections = [
       ["Insight 1: Investment priorities", "Respondents plan to increase AI search investment; this measures intended spending, not channel returns."],

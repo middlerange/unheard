@@ -10,7 +10,7 @@ import { assertPublicResearchUrl, canonicalResearchUrl } from './research-collec
 import { hasUsablePewResearchBody } from './research-pew';
 import { RESEARCH_POST_MIN_SCORE } from './research-policy';
 import { RESEARCH_MODEL, RESEARCH_PROMPT_VERSION, RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS,
-  RESEARCH_SCREEN_BATCH_SIZE, RESEARCH_EVIDENCE_BATCH_SIZE, researchHash, researchScreeningSchema,
+  RESEARCH_SCREEN_BATCH_SIZE, RESEARCH_EVIDENCE_BATCH_SIZE, RESEARCH_EVIDENCE_OUTPUT_TOKENS, RESEARCH_SECTION_COVERAGE_INSTRUCTIONS, researchHash, researchScreeningSchema,
   researchEvidenceSchema, screeningJsonSchemaForItems, evidenceJsonSchemaForItems, validateResearchScreening,
   validateResearchEvidenceCoverage, validateResearchEvidenceProfiles, validateResearchEvidence } from './research-model';
 
@@ -77,7 +77,8 @@ async function immutable(teamId: string, id: string, value: unknown) {
 async function contractHash() {
   return researchHash(JSON.stringify({ model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION,
     screen: RESEARCH_SCREEN_INSTRUCTIONS, evidence: RESEARCH_EVIDENCE_INSTRUCTIONS,
-    screenSchema: screeningJsonSchemaForItems(['item']), evidenceSchema: evidenceJsonSchemaForItems(['item'], ['profile']),
+    sectionInstructions: RESEARCH_SECTION_COVERAGE_INSTRUCTIONS, evidenceOutputTokens: RESEARCH_EVIDENCE_OUTPUT_TOKENS,
+    screenSchema: screeningJsonSchemaForItems(['item']), evidenceSchema: evidenceJsonSchemaForItems(['item'], ['profile'], { sectionCoverage: true }),
     score: RESEARCH_POST_MIN_SCORE, selectionViewVersion: RESEARCH_SELECTION_VIEW_VERSION, route: 'readable-500-pew-guard-v1' }));
 }
 export function researchReplayEligibility(item: ResearchReplayItem, config: Pick<Config, 'sourceIds' | 'windowStart' | 'windowEnd'> & Partial<Pick<Config, 'articleWatchUrls' | 'observationWindowStart' | 'observationWindowEnd'>>) {
@@ -246,7 +247,7 @@ export async function processResearchReplay(run: Run, operation: string) {
     if (batch.length) {
       await immutable(run.team_id, prefix(run.id) + 'request:evidence:' + progress.evidenceOffset, { stage: 'evidence', input: batch.map(item => evidenceInput(item, plan.config)) });
       const output = researchEvidenceSchema.parse(await cachedResearchModel(run, 'evidence', batch.map(item => evidenceInput(item, plan.config)), RESEARCH_EVIDENCE_INSTRUCTIONS,
-        evidenceJsonSchemaForItems(batch.map(item => item.id)), 8192));
+        evidenceJsonSchemaForItems(batch.map(item => item.id)), RESEARCH_EVIDENCE_OUTPUT_TOKENS));
       assessments = validateResearchEvidenceCoverage(output.findings, batch.map(item => item.id));
       const audience = await getFrozenResearchAudience(run);
       validateResearchEvidenceProfiles(assessments, audience.publishingProfiles.map(profile => profile.id));

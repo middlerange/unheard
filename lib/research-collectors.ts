@@ -6,7 +6,7 @@ export type CollectedItem = {
   excerpt: string;
   publishedAt: number | null;
   content?: string;
-  contentProvenance?: "public_feed" | "article" | "transcript" | "abstract";
+  contentProvenance?: "public_feed" | "article" | "public_section" | "transcript" | "abstract";
   retrievalNote?: string;
   contentType: "article" | "video";
   transcriptStatus: "not_applicable" | "unavailable" | "available";
@@ -286,17 +286,20 @@ function htmlElements(html: string, name: string) {
   return elements.sort((a, b) => a.start - b.start);
 }
 
-function articleRegion(html: string): string {
+function articleRegion(html: string, requireHeading = false): string {
   const clean = html.replace(/<!--[\s\S]*?-->|<(script|style|nav|footer|aside)\b(?:"[^"]*"|'[^']*'|[^'">])*>[\s\S]*?<\/\1>/gi, " ");
   const mains = htmlElements(clean, "main");
   const articles = htmlElements(clean, "article");
   const headings = htmlElements(clean, "h1");
   const title = plainResearchText(clean.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "").toLowerCase();
-  const matchingHeading = headings.find(heading => {
+  const matchingHeadings = headings.filter(heading => {
     const text = plainResearchText(heading.content).toLowerCase();
     return text.length >= 12 && (title === text || title.startsWith(`${text} |`) || title.startsWith(`${text} —`) || title.startsWith(`${text} -`));
   });
+  const matchingHeading = matchingHeadings[0];
   const contains = (element: { start: number; end: number }, heading: { start: number; end: number }) => element.start <= heading.start && element.end >= heading.end;
+  const containedHeadings = headings.filter(candidate => [...mains, ...articles].some(region => contains(region, candidate)));
+  if (requireHeading && (matchingHeadings.length > 1 || !matchingHeading && containedHeadings.length !== 1)) return "";
   const heading = matchingHeading
     || headings.find(candidate => mains.some(main => contains(main, candidate)))
     || headings.find(candidate => articles.some(article => contains(article, candidate)));
@@ -308,7 +311,50 @@ function articleRegion(html: string): string {
     // Some newsletter pages have no semantic wrapper; require the page's own title.
     if (matchingHeading) return clean.slice(matchingHeading.start);
   }
+  if (requireHeading) return "";
   return mains[0]?.content || articles.sort((a, b) => b.content.length - a.content.length)[0]?.content || "";
+}
+
+export class ResearchArticleSectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ResearchArticleSectionError";
+  }
+}
+
+export function assertResearchArticleSectionWatch(source: ResearchSourceSeed) {
+  if (source.articleSectionHeading !== undefined && (source.kind !== "web" || source.pageMode !== "article" || source.feedUrl))
+    throw new ResearchArticleSectionError("Public chapter watches require an explicit web article source without a feed");
+}
+
+export function articleResearchSection(html: string, requestedHeading: string) {
+  const normalize = (text: string) => plainResearchText(text).normalize("NFKC").replace(/\s+/g, " ").trim();
+  const requested = normalize(requestedHeading);
+  if (!requested) throw new ResearchArticleSectionError("Public chapter watch requires a nonempty publisher heading");
+  let region = articleRegion(html, true);
+  if (!region) throw new ResearchArticleSectionError("Public chapter watch has no confident article heading");
+  const pageTitle = plainResearchText(html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "").toLowerCase();
+  const articleHeadings = htmlElements(region, "h1");
+  const matchingTitles = articleHeadings.filter(heading => {
+    const text = plainResearchText(heading.content).toLowerCase();
+    return text.length >= 12 && (pageTitle === text || [" |", " —", " -"].some(separator => pageTitle.startsWith(text + separator)));
+  });
+  const articleHeading = matchingTitles.length === 1 ? matchingTitles[0] : articleHeadings.length === 1 ? articleHeadings[0] : undefined;
+  if (!articleHeading) throw new ResearchArticleSectionError("Public chapter watch has no confident article heading");
+  const title = plainResearchText(articleHeading.content);
+  // Embedded related articles are not chapters of the enclosing article.
+  const children = htmlElements(region, "article");
+  for (const child of children.filter(candidate => !children.some(parent => parent.start < candidate.start && parent.end >= candidate.end)).sort((a, b) => b.start - a.start))
+    region = region.slice(0, child.start) + " " + region.slice(child.end);
+  const headings = [1, 2, 3, 4, 5, 6].flatMap(level => htmlElements(region, `h${level}`).map(heading => ({ ...heading, level }))).sort((a, b) => a.start - b.start);
+  const matches = headings.filter(heading => heading.level >= 2 && normalize(heading.content) === requested);
+  if (matches.length !== 1)
+    throw new ResearchArticleSectionError(matches.length ? "Public chapter heading is ambiguous" : "Public chapter heading was not found in the article");
+  const selected = matches[0];
+  const end = headings.find(heading => heading.start > selected.start && heading.level <= selected.level)?.start ?? region.length;
+  const heading = plainResearchText(selected.content);
+  const content = readableResearchText(region.slice(selected.start, end));
+  return { title: `${title} — ${heading}`.slice(0, 300), heading, content };
 }
 
 function publisherBylineDate(html: string, articleUrl: string | undefined, now: number): number | null {
@@ -489,6 +535,17 @@ export function discoverResearchLinks(
 export async function collectResearchSource(
   source: ResearchSourceSeed,
 ): Promise<CollectedItem[]> {
+  assertResearchArticleSectionWatch(source);
+  if (source.articleSectionHeading !== undefined) {
+    const html = await fetchResearchText(source.url, sourceHosts(source));
+    const section = articleResearchSection(html, source.articleSectionHeading);
+    return [{
+      url: canonicalResearchUrl(source.url), title: section.title, excerpt: section.content.slice(0, 1600),
+      publishedAt: articleResearchDate(html, source.url),
+      ...(section.content.length >= 500 ? { content: section.content } : {}),
+      contentProvenance: "public_section", contentType: "article", transcriptStatus: "not_applicable",
+    }];
+  }
   if (source.feedUrl)
     return parseResearchFeed(
       await fetchResearchText(source.feedUrl, sourceHosts(source)),

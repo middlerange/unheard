@@ -282,6 +282,41 @@ describe("topic-driven public discovery", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it.each([undefined, "2025-03-18T09:00:00Z"])("captures the configured late chapter with its original page date: %s", async date => {
+    const url = "https://research.example/interview";
+    const body = "The original speaker describes an observed result, its uncertainty, and the next test. ".repeat(12);
+    const html = `${date ? `<meta property="article:published_time" content="${date}">` : ""}<title>Original practitioner interview | Publisher</title><main><h1>Original practitioner interview</h1><p>${"Earlier material. ".repeat(2000)}</p><h4>Decisions from evidence</h4><p>${body}</p><h4>Different subject</h4><p>Do not borrow this answer.</p></main>`;
+    const fetcher = vi.fn(async () => new Response(html));
+    vi.stubGlobal("fetch", fetcher);
+    const result = await collectDiscoveredResearchSource({ ...source, kind: "web", url, pageMode: "article", articleSectionHeading: "Decisions from evidence" }, start, end, new Set(), { deferArticleFetch: true });
+    expect(result.items[0]).toMatchObject({ url, title: "Original practitioner interview — Decisions from evidence", contentProvenance: "public_section", publishedAt: date ? Date.parse(date) : null });
+    expect(result.items[0].content).toBe(`Decisions from evidence\n\n${body.trim()}`);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails a missing or ambiguous chapter instead of fetching a fallback body or retaining the article prefix", async () => {
+    vi.stubEnv("TREG_TOKEN", "must-not-be-called");
+    const url = "https://research.example/interview";
+    const chapterSource = { ...source, kind: "web" as const, url, pageMode: "article" as const, articleSectionHeading: "Required chapter" };
+    for (const headings of ["<h2>Other chapter</h2>", "<h2>Required chapter</h2><h3>Required chapter</h3>"]) {
+      const fetcher = vi.fn(async () => new Response(`<main><h1>Original interview</h1><p>${"A substantial but unrelated prefix. ".repeat(40)}</p>${headings}</main>`));
+      vi.stubGlobal("fetch", fetcher);
+      await expect(collectDiscoveredResearchSource(chapterSource, start, end, new Set())).rejects.toThrow(/chapter heading/);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("limits chapter selection to explicit web article watches on their configured URL", async () => {
+    const url = "https://research.example/interview";
+    const chapterSource = { ...source, kind: "web" as const, url, pageMode: "article" as const, articleSectionHeading: "Public chapter" };
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    for (const invalid of [{ ...chapterSource, pageMode: "index" as const }, { ...chapterSource, kind: "search" as const }, { ...chapterSource, feedUrl: `${url}/feed` }])
+      await expect(collectDiscoveredResearchSource(invalid, start, end, new Set())).rejects.toThrow("explicit web article");
+    await expect(fetchDiscoveredResearchArticle(chapterSource, { url: "https://research.example/other" }, end)).rejects.toThrow("explicitly configured article");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it('extracts the public repository README rather than surrounding repository chrome', async () => {
     const url = 'https://github.com/example/public-toolkit';
     const fetcher = vi.fn(async (input: string | URL) => {

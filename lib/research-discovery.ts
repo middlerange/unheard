@@ -1,5 +1,6 @@
 import {
-  articleResearchDate, articleResearchText, articleResearchTitle, assertPublicResearchUrl,
+  articleResearchDate, articleResearchSection, articleResearchText, articleResearchTitle, assertPublicResearchUrl,
+  assertResearchArticleSectionWatch, ResearchArticleSectionError,
   canonicalResearchUrl, collectResearchSource, fetchResearchText,
   discoverResearchLinks, parseResearchDate, plainResearchText, sourceHosts, type CollectedItem,
 } from "./research-collectors";
@@ -23,7 +24,10 @@ export async function fetchDiscoveredResearchArticle(
   windowEnd: number,
   htmlOverride?: string,
 ): Promise<CollectedItem> {
-  if (isPewResearchSource(source)) return fetchPewResearchArticle(source, target.url, windowEnd);
+  assertResearchArticleSectionWatch(source);
+  if (source.articleSectionHeading !== undefined && canonicalResearchUrl(target.url) !== canonicalResearchUrl(source.url))
+    throw new ResearchArticleSectionError("Public chapter watches only apply to their explicitly configured article");
+  if (isPewResearchSource(source) && source.articleSectionHeading === undefined) return fetchPewResearchArticle(source, target.url, windowEnd);
   const candidateSource = { ...source, url: target.url, feedUrl: undefined };
   const html = htmlOverride ?? await fetchResearchText(target.url, sourceHosts(source.kind === "search" ? candidateSource : source));
   const url = new URL(target.url);
@@ -35,17 +39,18 @@ export async function fetchDiscoveredResearchArticle(
   const abstractOnly = arxivId?.[1] === "abs";
   const repositoryReadme = url.hostname === "github.com" && /^\/[^/]+\/[^/]+\/?$/.test(url.pathname)
     ? html.match(/<article\b[^>]*class=["'][^"']*\bmarkdown-body\b[^"']*["'][^>]*>[\s\S]*?<\/article>/i)?.[0] : undefined;
-  const content = (abstractOnly ? researchAbstractText(html) : articleResearchText(repositoryReadme || html)).slice(0, 14_000);
+  const section = source.articleSectionHeading === undefined ? null : articleResearchSection(html, source.articleSectionHeading);
+  const content = (section?.content ?? (abstractOnly ? researchAbstractText(html) : articleResearchText(repositoryReadme || html))).slice(0, 14_000);
   const heading = arxivId
     ? html.match(/<h1\b[^>]*class=["'][^"']*\b(?:title|ltx_title_document)\b[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i)?.[1]
     : articleResearchTitle(repositoryReadme || html);
   const pageTitle = plainResearchText(heading || "").replace(/^Title:\s*/i, "");
   return {
     url: target.url,
-    title: (pageTitle || plainResearchText(target.title || "")).slice(0, 300),
+    title: (section?.title || pageTitle || plainResearchText(target.title || "")).slice(0, 300),
     excerpt: content.slice(0, 1600),
     publishedAt,
-    contentProvenance: abstractOnly ? "abstract" : "article",
+    contentProvenance: section ? "public_section" : abstractOnly ? "abstract" : "article",
     ...(content.length >= 500 ? { content } : {}),
     contentType: "article",
     transcriptStatus: "not_applicable",
@@ -207,11 +212,12 @@ export async function collectDiscoveredResearchSource(
   blockedHosts: Set<string>,
   options: { deferArticleFetch?: boolean } = {},
 ): Promise<DiscoveryCollection> {
+  assertResearchArticleSectionWatch(source);
   if (source.kind === "web" && source.pageMode === "article") {
     const target = { url: source.url, title: source.name };
     try { return { items: [await fetchDiscoveredResearchArticle(source, target, windowEnd)], warning: null }; }
     catch (error) {
-      if (isPewResearchSource(source) || !canUseFreePublicWatchFetch(source, error)) throw error;
+      if (error instanceof ResearchArticleSectionError || isPewResearchSource(source) || !canUseFreePublicWatchFetch(source, error)) throw error;
       const html = await fetchFreePublicWatchHtml(source);
       const item = await fetchDiscoveredResearchArticle(source, target, windowEnd, html);
       return { items: [{ ...item, retrievalNote: PUBLIC_FETCH_RETRIEVAL_NOTE }], warning: PUBLIC_FETCH_RETRIEVAL_NOTE };

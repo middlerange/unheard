@@ -14,6 +14,7 @@ export type ResearchSourceSeed = {
   channelId?: string;
   articlePathPrefixes?: string[];
   pageMode?: "index" | "article";
+  articleSectionHeading?: string;
   backfillUrls?: string[];
   maxDiscoveryLinks?: number;
   discoveryQueries?: string[];

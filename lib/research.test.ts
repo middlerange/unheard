@@ -97,6 +97,7 @@ import {
   researchSourceErrorMessage,
   updateResearchSettings,
   updateResearchSource,
+  cachedResearchModel,
 } from "./research";
 async function finishResearchDraftJob(runId: string) {
   let result = await processResearchDraftJob(runId);
@@ -362,6 +363,53 @@ describe("research persistence and team isolation", () => {
     rmSync(folder, { recursive: true, force: true });
     globalThis.__contentHubResearchWorkflow__ = undefined;
   });
+  it("reuses per-source evidence after an incomplete batch, reordered replay and one changed body", async () => {
+    const profileId = RESEARCH_AUDIENCE_ONLY_PROFILE_ID;
+    const inputs = ["a", "b", "c"].map(id => ({
+      id: `itemcache-${id}`, title: `Workflow ${id}`, sourceId: "test-public-publisher", publishedAt: 1000,
+      discoveredAt: 2000, signalKind: "dated_reference", contentProvenance: "article",
+      content: `The ${id} workflow checks actual customer behavior before selecting a product change.`,
+    }));
+    const makeRun = (id: string) => {
+      execute({ queries: [{ sql: "INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp) VALUES(?,'a','replay','ranking',14,0,?)", params: [id, "Independent cache integration audience for concrete product decisions."] }] });
+      return execute({ queries: [{ sql: "SELECT * FROM research_runs WHERE id=?", params: [id] }] })[0].results[0];
+    };
+    const first = makeRun("itemcache-first"), replay = makeRun("itemcache-replay");
+    const calls: string[][] = [];
+    const previousKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = "test-item-cache-only";
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      expect(String(url)).toBe("https://api.anthropic.com/v1/messages");
+      const request = JSON.parse(String(init?.body));
+      const { items } = JSON.parse(request.messages[0].content) as { items: typeof inputs };
+      calls.push(items.map(item => item.id));
+      const returned = calls.length === 1 ? items.slice(0, 2) : items;
+      return modelResponseFixture({ status: "completed", usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ findings: returned.map(item => ({
+        itemId: item.id, summary: "Observe behavior before choosing a change.", evidence: item.content,
+        contentAngle: "Inspect the actual customer workflow before prioritizing.", whyItMatters: "The observed bottleneck can differ from a feature request.",
+        limitations: "A described workflow, without measured business outcomes.", familyKey: item.id, additionalIdeas: [],
+        claimBasis: "described_method", profileChecks: [{ profileId, fits: true, relevance: 25, reason: "A concrete product judgment decision." }],
+        qualityComponents: { sourceSupport: 23, usefulDecision: 25, scopeHonesty: 14 },
+      })) }) }] }] });
+    });
+    const assess = (run: typeof first, items: typeof inputs) => cachedResearchModel(run, "evidence", items, RESEARCH_EVIDENCE_INSTRUCTIONS, {}, 8192);
+    try {
+      await expect(assess(first, inputs)).rejects.toThrow("every input exactly once");
+      const saved = execute({ queries: [{ sql: "SELECT value FROM research_cache WHERE team_id='a' AND id LIKE 'evidence-item:v1:%'", params: [] }] })[0].results;
+      expect(saved.map((row: { value: string }) => JSON.parse(row.value).findings[0].itemId).filter((id: string) => id.startsWith("itemcache-"))).toEqual(expect.arrayContaining(["itemcache-a", "itemcache-b"]));
+      expect(execute({ queries: [{ sql: "SELECT findings_count FROM research_runs WHERE id=?", params: [first.id] }] })[0].results[0].findings_count).toBe(0);
+      const result = researchEvidenceSchema.parse(await assess(replay, [...inputs].reverse()));
+      expect(result.findings.map(finding => finding.itemId)).toEqual(["itemcache-c", "itemcache-b", "itemcache-a"]);
+      const changed = { ...inputs[1], content: "The changed workflow requires human approval before an agent publishes the campaign." };
+      await assess(replay, [inputs[0], changed, inputs[2]]);
+      const added = { ...inputs[2], id: "itemcache-new", content: "A new workflow turns an explicit customer goal into an inspectable activation step." };
+      await assess(replay, [inputs[0], changed, added]);
+      expect(calls).toEqual([["itemcache-a", "itemcache-b", "itemcache-c"], ["itemcache-c"], ["itemcache-b"], ["itemcache-new"]]);
+    } finally {
+      fetcher.mockRestore();
+      if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = previousKey;
+    }
+  }, 30_000);
   it("scores with frozen structured profiles and reuses the paid response after live profile edits", async () => {
     const team = "structured-audience", now = Date.now();
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.enabled && source.kind === "rss" && source.feedUrl)!;
@@ -1261,6 +1309,7 @@ describe("research persistence and team isolation", () => {
       'A separate preview lets users inspect useful output before connecting their data.',
       'An explicit confirmation gate keeps the final publication under human control.',
     ];
+    const sourceBody = (firstQuote: string) => `Finding 1: An explicit user control\n\n${(firstQuote + ' ').repeat(10)}\n\nFinding 2: An inspectable preview\n\n${(quotes[1] + ' ').repeat(10)}`;
     const runIds = [`${team}-first`, `${team}-second`];
     const profiles = [
       { id: 'company-linkedin', platform: 'linkedin', groupName: 'company' },
@@ -1277,7 +1326,7 @@ describe("research persistence and team isolation", () => {
         sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'scan',?,1,0,?,?,1,?)", params: [id, team, index === 0 ? 'collecting' : 'completed', now + index, capturedIcp, JSON.stringify([seed.id])],
       })),
       ...runIds.map(id => ({ sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: [`${id}:${seed.id}`, id, seed.id] })),
-      { sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,'article')", params: [itemId, team, seed.id, `${new URL(seed.url).origin}/distinct-decision-report`, 'Independently supported workflow decisions', quotes[0], now - 1000, now, quotes.slice(0, 2).join(' ').repeat(10)] },
+      { sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,'article')", params: [itemId, team, seed.id, `${new URL(seed.url).origin}/distinct-decision-report`, 'Independently supported workflow decisions', quotes[0], now - 1000, now, sourceBody(quotes[0])] },
     ] });
     const idea = (familyKey: string, evidence: string, suppliedProfiles: Array<{ id: string; groupName: string }>) => ({
       familyKey, evidence, claimBasis: 'described_method',
@@ -1302,12 +1351,14 @@ describe("research persistence and team isolation", () => {
         expect(profile).not.toHaveProperty('systemPrompt');
       }
       expect(request.output_config.format.schema.$defs.profileCheck.properties.profileId.enum).toEqual(profiles.map(profile => profile.id));
+      expect(input.items[0].sourceSections).toHaveLength(2);
+      expect(request.output_config.format.schema.$defs.sourceAssessment.required).toContain('sectionChecks');
       const primary = ++calls === 1 ? idea('consent-review', quotes[0], input.publishingProfiles) : idea('publication-confirmation', quotes[2], input.publishingProfiles);
       const additional = idea('preview-before-connection', quotes[1], input.publishingProfiles);
       for (const assessment of [primary, additional]) {
         for (const derived of ['score', 'chosenProfileId', 'profileFit']) expect(assessment).not.toHaveProperty(derived);
       }
-      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify({ findings: [{ itemId, ...primary, additionalIdeas: [additional] }] }) }] }] });
+      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify({ findings: { [itemId]: { ...primary, additionalIdeas: [additional], sectionChecks: input.items[0].sourceSections.map((section: { id: string }, index: number) => ({ sectionId: section.id, familyKeys: [index === 0 ? primary.familyKey : additional.familyKey], notPostworthyReason: '' })) } } }) }] }] });
     });
     try {
       await finishResearchRankJob(runIds[0]);
@@ -1331,7 +1382,7 @@ describe("research persistence and team isolation", () => {
       ] }).map((result: { results: unknown[] }) => result.results);
       execute({ queries: [
         { sql: "UPDATE research_runs SET status='collecting' WHERE id=?", params: [runIds[1]] },
-        { sql: 'UPDATE research_items SET content=? WHERE id=?', params: [quotes.join(' ').repeat(10), itemId] },
+        { sql: 'UPDATE research_items SET content=? WHERE id=?', params: [sourceBody(quotes[2]), itemId] },
       ] });
       await finishResearchRankJob(runIds[1]);
       const newPrimaryId = await researchHash(`${team}:${itemId}:angle:publication-confirmation`);

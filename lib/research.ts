@@ -3,7 +3,8 @@ import { z } from "zod";
 import { getDb } from "./db/client";
 import { retryResearchStorage } from "./research-storage";
 import { getFrozenResearchAudience } from "./research-audience";
-import { researchSelectionAudience } from "./research-selection-audience";
+import { researchSelectionAudience, RESEARCH_SELECTION_VIEW_VERSION } from "./research-selection-audience";
+import { cacheValidResearchEvidenceItems, reuseResearchEvidenceItems, validateResearchEvidenceCacheValue, type EvidenceCacheInput, type EvidenceCacheValue } from "./research-evidence-cache";
 import { researchFindingDates, researchItemSignalKind } from "./research-dates";
 import { getDraftResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
 import { hasUsablePewResearchBody, isPewResearchSource } from "./research-pew";
@@ -52,6 +53,10 @@ import {
   RESEARCH_PROMPT_VERSION,
   RESEARCH_SCREEN_BATCH_SIZE,
   RESEARCH_EVIDENCE_BATCH_SIZE,
+  RESEARCH_EVIDENCE_OUTPUT_TOKENS,
+  RESEARCH_SECTION_COVERAGE_INSTRUCTIONS,
+  researchSourceSections,
+  validateResearchSectionCoverage,
   RESEARCH_SCREEN_INSTRUCTIONS,
   RESEARCH_EVIDENCE_INSTRUCTIONS,
   researchScreeningSchema,
@@ -60,7 +65,6 @@ import {
   screeningJsonSchemaForItems,
   validateResearchEvidence,
   validateResearchEvidenceCoverage,
-  validateResearchEvidenceProfiles,
   validateResearchScreening,
 } from "./research-model";
 export { RESEARCH_MODEL } from "./research-model";
@@ -720,7 +724,12 @@ async function collectForRun(
         .get();
       if (inserted) count++;
       else {
-        const preserveEvidence = sql`${item.contentProvenance === "public_feed" || item.contentProvenance === "abstract" ? 1 : 0} AND ${research_items.content_provenance} IN ('article', 'transcript')`;
+        const hasConfiguredChapter = RESEARCH_SOURCE_SEEDS.some(seed => seed.enabled && seed.pageMode === "article"
+          && seed.articleSectionHeading && canonicalResearchUrl(seed.url) === item.url);
+        const preserveEvidence = sql`(${item.contentProvenance === "public_feed" || item.contentProvenance === "abstract" ? 1 : 0}
+          AND ${research_items.content_provenance} IN ('article', 'transcript', 'public_section'))
+          OR (${hasConfiguredChapter && item.contentProvenance !== "public_section" ? 1 : 0}
+          AND ${research_items.content_provenance} = 'public_section')`;
         await db
           .update(research_items)
           .set({
@@ -880,9 +889,14 @@ async function cachedModel(
   schema: Record<string, unknown>,
   outputTokens: number,
 ) {
+  if (stage === "evidence") {
+    input = (input as EvidenceCacheInput[]).map(item => researchSourceSections({ ...item, content: typeof item.content === "string" ? item.content : null }));
+    system = `${system}\n\n${RESEARCH_SECTION_COVERAGE_INSTRUCTIONS}`;
+  }
   const db = await getDb();
   const audience = await getFrozenResearchAudience(run);
   const enabledProfileIds = audience.publishingProfiles.map(profile => profile.id);
+  const selectionAudience = researchSelectionAudience(audience);
   const id = await researchHash(
     JSON.stringify([
       run.team_id,
@@ -891,61 +905,90 @@ async function cachedModel(
       audience,
       stage,
       input,
+      ...(stage === "evidence" ? [system, RESEARCH_SELECTION_VIEW_VERSION, selectionAudience,
+        (input as EvidenceCacheInput[]).map(item => evidenceJsonSchemaForItems([item.id], enabledProfileIds, { sectionCoverage: true }))] : []),
     ]),
   );
-  async function validateReusable(value: unknown) {
+  async function recordInvalid(value: unknown, error: unknown, cacheId = id) {
+    await db.insert(research_cache).values({
+      id: `invalid:${cacheId}:${Date.now()}:${crypto.randomUUID()}`, team_id: run.team_id,
+      value: JSON.stringify({ invalid: true, stage, response: value, reason: error instanceof Error ? error.message : "Invalid assessment coverage" }), created_at: Date.now(),
+    }).onConflictDoNothing();
+    await db.delete(research_cache).where(and(eq(research_cache.id, cacheId), eq(research_cache.team_id, run.team_id)));
+  }
+  async function validateReusable(value: unknown, expectedInput = input, saveInvalid = true) {
     try {
-      const ids = (input as Array<{ id: string }>).map(item => item.id);
+      const items = expectedInput as EvidenceCacheInput[];
+      const ids = items.map(item => item.id);
       if (stage === "screen") validateResearchScreening(researchScreeningSchema.parse(value), ids);
       if (stage === "evidence") {
-        const findings = validateResearchEvidenceCoverage(researchEvidenceSchema.parse(value).findings, ids);
-        validateResearchEvidenceProfiles(findings, enabledProfileIds);
+        const output = validateResearchEvidenceCacheValue(value, items, enabledProfileIds);
+        const sectionInputs = items.map(item => researchSourceSections({ ...item, content: typeof item.content === "string" ? item.content : null }));
+        const checked = sectionInputs.filter(item => item.sourceSections.length > 0 || output.findings.find(finding => finding.itemId === item.id)?.sectionChecks !== undefined);
+        validateResearchSectionCoverage(output.findings.filter(finding => checked.some(item => item.id === finding.itemId)), checked);
+        return output;
       }
+      return value;
     } catch (error) {
-      await db.insert(research_cache).values({
-        id: `invalid:${id}:${Date.now()}`, team_id: run.team_id,
-        value: JSON.stringify({ invalid: true, stage, response: value, reason: error instanceof Error ? error.message : "Invalid assessment coverage" }), created_at: Date.now(),
-      }).onConflictDoNothing();
-      await db.delete(research_cache).where(and(eq(research_cache.id, id), eq(research_cache.team_id, run.team_id)));
+      if (saveInvalid) await recordInvalid(value, error);
       throw error;
     }
   }
-  const cached = await db
-    .select()
-    .from(research_cache)
-    .where(
-      and(eq(research_cache.id, id), eq(research_cache.team_id, run.team_id)),
-    )
-    .get();
+  const writeCache = async (cacheId: string, value: unknown) => {
+    await retryResearchStorage(async () => db.insert(research_cache).values({
+      id: cacheId, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now(),
+    }).onConflictDoNothing());
+  };
+  const evidenceAccess = {
+    context: {
+      teamId: run.team_id, model: RESEARCH_MODEL, promptVersion: RESEARCH_PROMPT_VERSION,
+      system, audience, selectionViewVersion: RESEARCH_SELECTION_VIEW_VERSION, selectionAudience,
+      schemaForItem: (itemId: string) => evidenceJsonSchemaForItems([itemId], enabledProfileIds, { sectionCoverage: true }),
+    },
+    validate: async (value: unknown, items: EvidenceCacheInput[], saveInvalid = true) =>
+      await validateReusable(value, items, saveInvalid) as EvidenceCacheValue,
+    write: writeCache,
+  };
+  const cached = await db.select().from(research_cache)
+    .where(and(eq(research_cache.id, id), eq(research_cache.team_id, run.team_id))).get();
   if (cached) {
-    const value = JSON.parse(cached.value) as unknown;
-    await validateReusable(value);
-    await db
-      .update(research_runs)
-      .set({ cache_hits: sql`${research_runs.cache_hits} + 1` })
-      .where(eq(research_runs.id, run.id));
-    return value;
+    let value: unknown;
+    try { value = JSON.parse(cached.value); }
+    catch (error) { await recordInvalid(cached.value, error); throw error; }
+    if (stage === "evidence") await cacheValidResearchEvidenceItems(value, input as EvidenceCacheInput[], evidenceAccess);
+    const valid = await validateReusable(value);
+    await db.update(research_runs).set({ cache_hits: sql`${research_runs.cache_hits} + 1` }).where(eq(research_runs.id, run.id));
+    return valid;
   }
-  const result = await callResearchModel(
+  const generate = async (items: unknown) => (await callResearchModel(
     system,
-    { ...researchSelectionAudience(audience), items: input },
-    stage === "evidence" ? evidenceJsonSchemaForItems((input as Array<{ id: string }>).map(item => item.id), enabledProfileIds) : schema,
+    { ...selectionAudience, items },
+    stage === "evidence" ? evidenceJsonSchemaForItems((items as EvidenceCacheInput[]).map(item => item.id), enabledProfileIds, { sectionCoverage: true }) : schema,
     outputTokens,
     { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? `replay_${stage}` : stage },
-  );
-  await validateReusable(result.value);
-  const cacheValue = JSON.stringify(result.value);
-  const cachedAt = Date.now();
-  await retryResearchStorage(async () => db
-    .insert(research_cache)
-    .values({
-      id,
-      team_id: run.team_id,
-      value: cacheValue,
-      created_at: cachedAt,
-    })
-    .onConflictDoNothing());
-  return result.value as unknown;
+  )).value;
+  if (stage === "evidence") {
+    const reused = await reuseResearchEvidenceItems(input as EvidenceCacheInput[], {
+      ...evidenceAccess,
+      read: async cacheId => {
+        const row = await db.select().from(research_cache)
+          .where(and(eq(research_cache.id, cacheId), eq(research_cache.team_id, run.team_id))).get();
+        if (!row) return null;
+        try { return JSON.parse(row.value) as unknown; }
+        catch { return row.value; }
+      },
+      discard: (cacheId, value, error) => recordInvalid(value, error, cacheId),
+      generate,
+    });
+    if (reused.cacheHits) await db.update(research_runs)
+      .set({ cache_hits: sql`${research_runs.cache_hits} + ${reused.cacheHits}` }).where(eq(research_runs.id, run.id));
+    await writeCache(id, reused.value);
+    return reused.value;
+  }
+  const value = await generate(input);
+  await validateReusable(value);
+  await writeCache(id, value);
+  return value;
 }
 export { cachedModel as cachedResearchModel };
 type ResearchRankDiagnostics = ResearchRunDiagnostics & Required<Pick<ResearchRunDiagnostics, "evidenceCount" | "rejectedStories" | "screenedCount">>;
@@ -1170,7 +1213,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       }));
       const output = researchEvidenceSchema.parse(await cachedModel(
         run, "evidence", input, RESEARCH_EVIDENCE_INSTRUCTIONS,
-        evidenceJsonSchemaForItems(batch.map(item => item.id)), 8192,
+        evidenceJsonSchemaForItems(batch.map(item => item.id)), RESEARCH_EVIDENCE_OUTPUT_TOKENS,
       ));
       validateResearchEvidenceCoverage(output.findings, batch.map(item => item.id));
       const accepted = validateResearchEvidence(output.findings, batch.map(item => ({ id: item.id, content: item.content! })));
