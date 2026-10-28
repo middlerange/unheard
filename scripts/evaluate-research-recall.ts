@@ -1,6 +1,6 @@
 import { anthropicResearchRequest, anthropicResearchOutput, type AnthropicResearchResponse } from '../lib/research-anthropic';
 import { RESEARCH_POST_MIN_SCORE } from '../lib/research-policy';
-import { recallEvaluationContext, recallEvidenceRoute, recallEvidenceSchema, parseRecallEvidence, assertRecallReplayCompatible, type RecallVariant } from './evaluate-research-recall-context';
+import { recallEvaluationContext, recallEvidenceRoute, recallEvidenceSchema, parseRecallEvidence, assertRecallReplayCompatible, assertRecallModelCallAllowed, type RecallVariant } from './evaluate-research-recall-context';
 import { mkdir, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { RESEARCH_MODEL, RESEARCH_SCREEN_BATCH_SIZE, researchScreeningSchema, validateResearchScreening, RESEARCH_PROMPT_VERSION, RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS, screeningJsonSchema, screeningJsonSchemaForItems, matchResearchQuote, researchHash, type ResearchEvidence } from '../lib/research-model';
@@ -10,6 +10,12 @@ type Assessment = ResearchEvidence & { grounded: boolean };
 type Case = { id: string; label: 'positive' | 'negative'; title: string; source_text: string; split: string; family_id: string; content_provenance?: string; source_urls?: string[]; source_id?: string; date?: string; source_date?: string };
 const args = process.argv.slice(2);
 function argument(name: string, fallback?: string) { const index = args.indexOf(`--${name}`); const value = index < 0 ? fallback : args[index + 1]; if (!value) throw new Error(`Missing --${name}`); return value; }
+const allowModelCalls = args.includes('--allow-model-calls');
+if (allowModelCalls && args.includes('--cache-only')) throw new Error('--cache-only cannot be combined with --allow-model-calls');
+if (allowModelCalls && !args.includes('--max-new-calls')) throw new Error('Declare --max-new-calls before allowing paid qualification requests');
+const maxNewCalls = Number(argument('max-new-calls', '0'));
+if (!Number.isInteger(maxNewCalls) || maxNewCalls < 0) throw new Error('--max-new-calls must be a nonnegative integer');
+let newCalls = 0;
 const benchmarkPath = argument('benchmark'), output = argument('out'), variant = argument('variant', 'current') as RecallVariant, split = argument('split', 'development');
 if (!['baseline', 'current'].includes(variant)) throw new Error('--variant must be baseline or current');
 const threshold = Number(argument('threshold', variant === 'baseline' ? '80' : String(RESEARCH_POST_MIN_SCORE)));
@@ -45,9 +51,11 @@ async function model(stage: string, instructions: string, items: unknown[], sche
   const hash = await researchHash(JSON.stringify({ model: RESEARCH_MODEL, instructions, input, schema, maxOutputTokens }));
   const file = join(output, 'calls', `${hash}.json`);
   if (await Bun.file(file).exists()) { const saved = await Bun.file(file).json(); if (saved.status === 'completed') { calls.push({ stage, cache: true, usage: saved.usage, file }); return saved.value as ModelValue; } if (saved.status === 'parse_error' && args.includes('--retry-invalid-output') && !await Bun.file(file + '.failed.json').exists()) { await Bun.write(file + '.failed.json', JSON.stringify(saved, null, 2)); } else throw new Error(`Previous call has unresolved outcome: ${file}`); }
+  assertRecallModelCallAllowed(allowModelCalls, maxNewCalls, newCalls);
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) throw new Error('ANTHROPIC_API_KEY unavailable');
   await Bun.write(file, JSON.stringify({ stage, status: 'pending', started_at: new Date().toISOString(), request_hash: hash }, null, 2));
+  newCalls++;
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST', signal: AbortSignal.timeout(90_000), headers: { 'x-api-key': key, 'anthropic-version': '2026-10-21', 'Content-Type': 'application/json' },
     body: JSON.stringify(anthropicResearchRequest(RESEARCH_MODEL, instructions, payload, schema, maxOutputTokens)),
@@ -93,6 +101,6 @@ for (let start = 0; start < reviewed.length; start += 6) {
 }
 const results = cases.map(item => { const assessment = assessments.get(item.id); return { id: item.id, label: item.label, family_id: item.family_id, split: item.split, title: item.title, screened: selected.has(item.id), route: routes.get(item.id), model_screened: routes.get(item.id) === 'metadata_screen', score: assessment?.score ?? null, grounded: assessment?.grounded ?? false, qualified: !!(assessment?.grounded && assessment.score >= threshold), useful: !!(assessment?.grounded && assessment.score >= 70), assessment: assessment ?? null }; });
 function metrics(rows: typeof results) { const positive = rows.filter(row => row.label === 'positive'), negative = rows.filter(row => row.label === 'negative'); const tp = positive.filter(row => row.qualified).length, fp = negative.filter(row => row.qualified).length; return { cases: rows.length, positive: positive.length, negative: negative.length, selected: rows.filter(row => row.screened).length, qualified: tp + fp, true_positive: tp, false_positive: fp, false_negative: positive.length - tp, screening_recall: positive.length ? positive.filter(row => row.screened).length / positive.length : null, qualification_recall: positive.length ? tp / positive.length : null, precision: tp + fp ? tp / (tp + fp) : null, false_positive_rate: negative.length ? fp / negative.length : null, grounding_failures: rows.filter(row => row.score !== null && !row.grounded).length }; }
-const report = { evaluated_at: new Date().toISOString(), variant, prompt_version: version, qualification_threshold: threshold, model: RESEARCH_MODEL, split, measurement: 'Classifier recall conditional on supplied source text. Current routes usable bodies directly to profile-aware evidence assessment; incomplete bodies use model screening. Collection availability and date-window eligibility are separate audits. Historical screened/screening_recall fields mean selected for evidence, including direct routes; inspect route/model_screened and routing counts for actual screening. Labels and engagement are excluded from model inputs.', benchmark_sha256: await researchHash(await Bun.file(benchmarkPath).text()), context_sha256: await researchHash(variant === 'baseline' ? context.icp : JSON.stringify(evaluationContext.payload)), audience_contract: variant === 'current' ? evaluationContext.payload : null, routing: { direct_evidence: items.filter(item => routes.get(item.id) === 'direct_evidence').length, model_screened: screenMetadata.length }, metrics: metrics(results), results, calls };
+const report = { evaluated_at: new Date().toISOString(), newModelCalls: newCalls, maxNewCalls, cacheOnly: !allowModelCalls, variant, prompt_version: version, qualification_threshold: threshold, model: RESEARCH_MODEL, split, measurement: 'Classifier recall conditional on supplied source text. Current routes usable bodies directly to profile-aware evidence assessment; incomplete bodies use model screening. Collection availability and date-window eligibility are separate audits. Historical screened/screening_recall fields mean selected for evidence, including direct routes; inspect route/model_screened and routing counts for actual screening. Labels and engagement are excluded from model inputs.', benchmark_sha256: await researchHash(await Bun.file(benchmarkPath).text()), context_sha256: await researchHash(variant === 'baseline' ? context.icp : JSON.stringify(evaluationContext.payload)), audience_contract: variant === 'current' ? evaluationContext.payload : null, routing: { direct_evidence: items.filter(item => routes.get(item.id) === 'direct_evidence').length, model_screened: screenMetadata.length }, metrics: metrics(results), results, calls };
 await Bun.write(join(output, 'evaluation.json'), JSON.stringify(report, null, 2));
-console.log(JSON.stringify({ variant, version, threshold, split, metrics: report.metrics, report: join(output, 'evaluation.json') }));
+console.log(JSON.stringify({ variant, version, threshold, split, newModelCalls: newCalls, maxNewCalls, cacheOnly: !allowModelCalls, metrics: report.metrics, report: join(output, 'evaluation.json') }));

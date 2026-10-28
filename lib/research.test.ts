@@ -565,6 +565,44 @@ describe("research persistence and team isolation", () => {
       globalThis.__contentHubResearchWorkflow__ = previousWorkflow;
     }
   });
+  it("keeps automatic-drafting preferences isolated and skips writing calls during qualification-only scans", async () => {
+    const team = "qualification-only", previousWorkflow = globalThis.__contentHubResearchWorkflow__;
+    execute({ queries: [{ sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)", params: [team, team, team] }] });
+    const dispatch = vi.fn(async () => ({}));
+    globalThis.__contentHubResearchWorkflow__ = { create: dispatch };
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-research-key");
+    vi.stubEnv("OPENAI_API_KEY", "");
+    const fetcher = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected provider or Slack call"));
+    try {
+      await initializeResearch(team);
+      const initial = (await getResearchSnapshot(team)).settings;
+      expect(initial.autoDrafts).toBe(true);
+      await updateResearchSettings(team, { autoDrafts: false });
+      const settings = (await getResearchSnapshot(team)).settings;
+      expect(settings).toEqual({ ...initial, autoDrafts: false });
+      expect((await getResearchSnapshot("b")).settings.autoDrafts).toBe(true);
+      const { run } = await createResearchRun(team, { days: 1, mode: "scan" }, true);
+      expect(run.editorial).toBe(false);
+      execute({ queries: [{ sql: "UPDATE research_runs SET status='completed' WHERE id=?", params: [run.id] }] });
+      expect(await processResearchDraftJob(run.id)).toEqual({ drafted: 0, skipped: true });
+      for (const table of ["research_drafts", "research_usage"]) {
+        expect(execute({ queries: [{ sql: `SELECT COUNT(*) count FROM ${table} WHERE team_id=?`, params: [team] }] })[0].results[0].count).toBe(0);
+      }
+      expect(fetcher).not.toHaveBeenCalled();
+      await updateResearchSettings(team, { autoDrafts: true });
+      await expect(createResearchRun(team, { days: 1, mode: "scan" }, true)).rejects.toThrow("OPENAI_API_KEY");
+      vi.stubEnv("OPENAI_API_KEY", "test-writing-key");
+      const writing = await createResearchRun(team, { days: 1, mode: "scan" }, true);
+      expect(writing.run.editorial).toBe(true);
+      await updateResearchSettings(team, { autoDrafts: false });
+      expect((await getResearchSnapshot(team)).runs.find(item => item.id === writing.run.id)?.editorial).toBe(true);
+      expect(dispatch).toHaveBeenCalledTimes(2);
+    } finally {
+      fetcher.mockRestore();
+      vi.unstubAllEnvs();
+      globalThis.__contentHubResearchWorkflow__ = previousWorkflow;
+    }
+  }, 30_000);
   it('validates explicit source subsets before dispatch and preserves preferences and the all-enabled default', async () => {
     const teamId = 'source-subset';
     const seeds = RESEARCH_SOURCE_SEEDS.filter(source => source.enabled).slice(0, 3);

@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { assertRecallReplayCompatible, parseRecallEvidence, recallEvaluationContext, recallEvidenceRoute, recallEvidenceSchema } from './evaluate-research-recall-context';
+import { assertRecallReplayCompatible, assertRecallModelCallAllowed, parseRecallEvidence, recallEvaluationContext, recallEvidenceRoute, recallEvidenceSchema } from './evaluate-research-recall-context';
+
+describe('qualification evaluation paid-call guard', () => {
+  it('defaults to cache-only and refuses any cache miss before requesting a key or making a call', () => {
+    expect(() => assertRecallModelCallAllowed(false, 0, 0)).toThrow('Cache-only');
+  });
+  it('requires explicit permission and stops exactly at the declared new-call scope', () => {
+    expect(() => assertRecallModelCallAllowed(true, 3, 2)).not.toThrow();
+    expect(() => assertRecallModelCallAllowed(true, 3, 3)).toThrow('budget reached');
+    expect(() => assertRecallModelCallAllowed(true, 0, 0)).toThrow('budget reached');
+    expect(() => assertRecallModelCallAllowed(true, Infinity, 0)).toThrow('nonnegative integer');
+  });
+});
 
 const profiles = [
   { id: 'company', name: 'Company', platform: 'linkedin', groupName: 'company', systemPrompt: 'Product onboarding only.' },

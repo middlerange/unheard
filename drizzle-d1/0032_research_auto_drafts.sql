@@ -1,0 +1,1 @@
+ALTER TABLE research_settings ADD COLUMN auto_drafts INTEGER NOT NULL DEFAULT 1;

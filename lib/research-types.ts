@@ -89,6 +89,7 @@ export type ResearchSnapshot = {
   settings: {
     icp: string;
     dailyEnabled: boolean;
+    autoDrafts: boolean;
     dailyTime: string | null;
     dailyTimezone: string;
     nextDailyAt: number | null;

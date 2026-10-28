@@ -496,3 +496,51 @@ scoring, distinguish exact originals from precursors and topic proxies, and repo
 missing, blocked, undated and out-of-window sources separately. Older originals
 can underpin recent social posts; never redate them into a publication window or
 claim a related article is the same recovered idea.
+
+## Qualification-only calibration
+
+Turn off **Automatically write review drafts** in Research schedule settings
+(`PATCH /api/research` with `{ "autoDrafts": false }`) while testing recall.
+New manual and daily scans still collect and qualify sources, but their captured
+`editorial` flag is false: no writing, repairs, editorial review or Slack delivery
+runs for them. Existing runs and reviews retain their saved behavior. Migration
+`0032_research_auto_drafts.sql` defaults this preference to true for compatibility;
+change it only for the team being calibrated.
+
+First reuse saved source bodies and completed qualification results. Source
+coverage, date eligibility and score-threshold diagnostics need no model calls.
+The following local command reads files only and does not load provider keys:
+
+```sh
+bun scripts/evaluate-qualification-cache.ts \
+  --replay /path/to/completed-normalized-replay.json \
+  --benchmark /path/to/winner-source-join.json \
+  --ideas /path/to/human-idea-comparison.json \
+  --out /path/to/cached-diagnostics.json
+```
+
+The command verifies that the source join and human comparison reference the
+same replay bytes. It retains every benchmark row, requires grounding/profile
+gates, and reports source overlap separately from human-confirmed core ideas.
+Lower-score sensitivity results cannot automatically promote an unreviewed idea,
+change production policy or establish that a new prompt works.
+
+A changed prompt, model, audience or source text needs fresh qualification calls.
+Use a fixed small development set with positive and negative controls first;
+16 readable cases need at most three evidence requests at the current batch size.
+Keep whole source families out of the reserved validation set, retain prior test
+use, and never describe an already inspected set as an untouched blind holdout.
+Only a material improvement should advance to reserved validation and one full
+replay. Keep batches stable and reuse only exact cached model/prompt/audience/
+stage/input matches. Declare the case/request scope before dispatch; stop on no
+improvement, grounding regressions, quota failures or uncertain provider outcomes.
+Do not automatically repeat paid trials. Draft-writing quality is a separate,
+small end-to-end check after qualification is satisfactory.
+
+The older `scripts/evaluate-research-recall.ts` also defaults to cache-only. A
+cache miss stops before reading a provider key or starting a request. Paid local
+evaluation requires both `--allow-model-calls` and an explicit `--max-new-calls N`;
+the guard stops before request N+1. Cache hits do not consume that scope. This
+administrative development guard does not cap normal daily research. Prefer the
+configured Worker's audit-only replay when model-provider keys are kept there;
+do not copy those keys locally to run an experiment.

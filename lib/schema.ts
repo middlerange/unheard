@@ -396,6 +396,7 @@ export const posting_time_analytics = sqliteTable('posting_time_analytics', {
 export const research_settings = sqliteTable('research_settings', {
   team_id: text('team_id').primaryKey().references(() => teams.id, { onDelete: 'cascade' }),
   icp: text('icp').notNull(), daily_enabled: integer('daily_enabled', { mode: 'boolean' }).notNull().default(false),
+  auto_drafts: integer('auto_drafts', { mode: 'boolean' }).notNull().default(true),
   last_daily_at: integer('last_daily_at'), updated_at: integer('updated_at').notNull(),
   daily_time: text('daily_time'), daily_timezone: text('daily_timezone').notNull().default('UTC'),
   next_daily_at: integer('next_daily_at'), daily_claim_id: text('daily_claim_id'), daily_claim_until: integer('daily_claim_until'),

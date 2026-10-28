@@ -202,6 +202,7 @@ export async function getResearchSnapshot(
     settings: {
       icp: settings!.icp,
       dailyEnabled: settings!.daily_enabled,
+      autoDrafts: settings!.auto_drafts,
       dailyTime: settings!.daily_time,
       dailyTimezone: settings!.daily_timezone,
       nextDailyAt: settings!.next_daily_at,
@@ -279,6 +280,7 @@ export async function updateResearchSettings(teamId: string, input: unknown) {
     .object({
       icp: z.string().trim().min(20).max(4000).optional(),
       dailyEnabled: z.boolean().optional(),
+      autoDrafts: z.boolean().optional(),
       dailyTime: z.string()
         .refine(isResearchDailyTime, "Use a daily time in HH:mm format")
         .nullable().optional(),
@@ -307,6 +309,7 @@ export async function updateResearchSettings(teamId: string, input: unknown) {
       ...(data.dailyEnabled !== undefined
         ? { daily_enabled: data.dailyEnabled }
         : {}),
+      ...(data.autoDrafts !== undefined ? { auto_drafts: data.autoDrafts } : {}),
       ...(scheduleChanged ? {
         daily_time: time,
         daily_timezone: timezone,
@@ -382,10 +385,13 @@ export async function createResearchRun(
     );
   if (data.mode === "scan" && !process.env.ANTHROPIC_API_KEY)
     throw new Error("Set ANTHROPIC_API_KEY in Cloudflare secrets to run research");
-  if (data.mode === "scan" && data.days === 1 && editorial && !process.env.OPENAI_API_KEY)
-    throw new Error("Set OPENAI_API_KEY in Cloudflare secrets to generate research drafts");
   await initializeResearch(teamId);
   const db = await getDb();
+  const settings = await db.select().from(research_settings)
+    .where(eq(research_settings.team_id, teamId)).get();
+  const writeDrafts = editorial && settings!.auto_drafts && data.days === 1 && data.mode === "scan";
+  if (writeDrafts && !process.env.OPENAI_API_KEY)
+    throw new Error("Set OPENAI_API_KEY in Cloudflare secrets to generate research drafts");
   if (data.sourceIds) {
     const enabled = await db.select({ seedId: research_sources.seed_id }).from(research_sources).where(and(
       eq(research_sources.team_id, teamId), eq(research_sources.enabled, true),
@@ -421,12 +427,7 @@ export async function createResearchRun(
     }
     return { run: runView(active) };
   }
-  const [settings, sources, profiles] = await Promise.all([
-    db
-      .select()
-      .from(research_settings)
-      .where(eq(research_settings.team_id, teamId))
-      .get(),
+  const [sources, profiles] = await Promise.all([
     db
       .select()
       .from(research_sources)
@@ -464,7 +465,7 @@ export async function createResearchRun(
       mode: data.mode,
       status: "queued",
       days: data.days,
-      editorial: editorial && data.days === 1 && data.mode === "scan",
+      editorial: writeDrafts,
       created_at: Date.now(),
       icp: profiles.length
         ? `${settings!.icp}\n\nPublishing profiles: ${JSON.stringify(profiles)}\nUse each profile systemPrompt to decide relevance. Each draft must choose exactly one account identity group and include its enabled supported channels; never mix account groups in one approval. These profile instructions take precedence over the general audience description when they differ.`

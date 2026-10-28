@@ -4,6 +4,12 @@ import { hasUsablePewResearchBody } from '../lib/research-pew';
 
 export type RecallVariant = 'baseline' | 'current';
 
+export function assertRecallModelCallAllowed(allowModelCalls: boolean, maxNewCalls: number, newCalls: number) {
+  if (!Number.isInteger(maxNewCalls) || maxNewCalls < 0) throw new Error('New-call budget must be a nonnegative integer');
+  if (!allowModelCalls) throw new Error('Cache-only evaluation: an uncached qualification request needs --allow-model-calls and an explicit --max-new-calls budget');
+  if (newCalls >= maxNewCalls) throw new Error('Qualification request budget reached; inspect saved results before increasing --max-new-calls');
+}
+
 export function recallEvaluationContext(variant: RecallVariant, context: { icp?: unknown }) {
   if (typeof context.icp !== 'string' || !context.icp) throw new Error('Context requires icp');
   const audience = variant === 'current' ? parseResearchAudience(context.icp) : null;
