@@ -1348,7 +1348,7 @@ describe("research persistence and team isolation", () => {
       ] }).map((result: { results: unknown[] }) => result.results)).toEqual(prior);
       expect((await getRunResearchFindings(team, runIds[0])).map(finding => finding.id).sort()).toEqual([firstId, secondId].sort());
       expect(execute({ queries: [{ sql: 'PRAGMA foreign_key_check' }] })[0].results).toEqual([]);
-      const cached = execute({ queries: [{ sql: "SELECT value FROM research_cache WHERE team_id=? AND length(id)=64 AND json_type(value,'$.findings')='object'", params: [team] }] })[0].results;
+      const cached = execute({ queries: [{ sql: "SELECT value FROM research_cache WHERE team_id=? AND length(id)=64 AND json_type(value,'$.findings')='array'", params: [team] }] })[0].results;
       expect(cached).toHaveLength(2);
       const normalized = cached.flatMap((row: { value: string }) => researchEvidenceSchema.parse(JSON.parse(row.value)).findings)
         .flatMap((finding: ReturnType<typeof researchEvidenceSchema.parse>['findings'][number]) => [finding, ...(finding.additionalIdeas || [])]);
