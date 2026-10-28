@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { evidenceJsonSchemaForItems } from "./research-model";
+import { evidenceJsonSchemaForItems, matchResearchQuote, researchEvidenceSchema, validateResearchSectionCoverage } from "./research-model";
+import { researchSourceSections } from "./research-sections";
 import {
-  cacheValidResearchEvidenceItems, researchEvidenceItemCacheId, reuseResearchEvidenceItems,
+  cacheValidResearchEvidenceItems, canonicalResearchCitation, researchEvidenceItemCacheId, reuseResearchEvidenceItems,
   validateResearchEvidenceCacheValue, type EvidenceCacheContext, type EvidenceCacheInput,
 } from "./research-evidence-cache";
 
@@ -33,6 +34,100 @@ function harness() {
   const access = { context, validate, write, discard, generate, read: async (id: string) => cache.get(id) ?? null };
   return { cache, access, generate, discard };
 }
+
+describe("explicit omission citation canonicalization", () => {
+  const thesis = "996 is not a competitive advantage.";
+  const content = `I’m not buying it. A longer argument explains sustainable ambition and experienced talent. ${thesis}`;
+  const source = { ...item("elena"), content };
+  const original = `I'm not buying it. ... ${thesis}`;
+
+  it.each(["...", "…"])("replaces a verified %s omission with its longest contiguous source fragment", omission => {
+    const quote = `I'm not buying it. ${omission} ${thesis}`;
+    expect(matchResearchQuote(content, quote)).toBeNull();
+    const result = validateResearchEvidenceCacheValue({ findings: [{ ...assessment(source), evidence: quote }] }, [source], ["personal"]);
+    expect(result.findings[0].evidence).toBe(thesis);
+    expect(result.citationRepairs).toEqual([{ itemId: source.id, familyKey: `workflow-${source.id}`, original: quote, selected: thesis, method: "ordered_omission_to_contiguous_span" }]);
+    expect(matchResearchQuote(content, result.findings[0].evidence)).toBe(thesis);
+  });
+
+  it.each([
+    `I'm inventing it. ... ${thesis}`,
+    `${thesis} ... I'm not buying it.`,
+    "I'm not buying it. ... 996 is a competitive advantage.",
+    "I'm not buying it. ... 997 is not a competitive advantage.",
+    `An absent fragment ... ${thesis}`,
+    `I'm not buying it. ${thesis}`,
+    "I'm not buying it. ... talent",
+    `notable ... ${thesis}`,
+  ])("rejects fabricated, reversed, changed or unmarked fragments: %s", evidence => {
+    expect(() => validateResearchEvidenceCacheValue({ findings: [{ ...assessment(source), evidence }] }, [source], ["personal"])).toThrow("unsupported passing quote");
+  });
+
+  it("requires short fragments to match whole words and preserves Unicode source offsets", () => {
+    expect(canonicalResearchCitation(`Nothing is promised. ${thesis}`, `not ... ${thesis}`)).toBeNull();
+    expect(canonicalResearchCitation(`İ 🧭 ${content}`, original)).toBe(thesis);
+    const wrapped = `“I'm not buying it. … ${thesis}”`;
+    expect(canonicalResearchCitation(content, wrapped)).toBe(thesis);
+  });
+
+  it("leaves a legitimate literal ellipsis exact quote unchanged", () => {
+    const literal = "Wait... then inspect the actual source before making a decision.";
+    const row = { ...source, content: literal };
+    const result = validateResearchEvidenceCacheValue({ findings: [{ ...assessment(row), evidence: literal }] }, [row], ["personal"]);
+    expect(result.findings[0].evidence).toBe(literal);
+    expect(result).not.toHaveProperty("citationRepairs");
+  });
+
+  it.each([false, true])("leaves numeric/category scoring and all editorial fields unchanged (categories:%s)", categories => {
+    const raw = { findings: [{ ...assessment(source), evidence: original, ...(categories ? { qualityComponents: {
+      sourceSupport: "supported_bounded_claim", usefulDecision: "concrete_decision", scopeHonesty: "accurately_bounded",
+    } } : {}) }] };
+    const before = researchEvidenceSchema.parse(raw).findings[0];
+    const after = validateResearchEvidenceCacheValue(raw, [source], ["personal"]).findings[0];
+    expect({ ...after, evidence: original }).toEqual(before);
+    expect(raw.findings[0].evidence).toBe(original);
+  });
+
+  it("normalizes a nested provider claim without changing its categorical assessment", () => {
+    const { itemId: _id, summary, evidence: _evidence, contentAngle, whyItMatters, limitations, ...rest } = assessment(source);
+    const raw = { findings: { [source.id]: { ...rest,
+      claim: { summary, evidence: original, contentAngle, whyItMatters, limitations },
+      qualityComponents: { sourceSupport: "supported_bounded_claim", usefulDecision: "concrete_decision", scopeHonesty: "accurately_bounded" },
+    } } };
+    const before = researchEvidenceSchema.parse(raw).findings[0];
+    const after = validateResearchEvidenceCacheValue(raw, [source], ["personal"]).findings[0];
+    expect(after.evidence).toBe(thesis);
+    expect({ ...after, evidence: original }).toEqual(before);
+    expect(raw.findings[source.id].claim.evidence).toBe(original);
+  });
+
+  it("does not borrow an omitted fragment from another source", () => {
+    const first = { ...item("a"), content: "I'm not buying it. Only this source's own words can support its citation." };
+    const second = { ...item("b"), content: thesis };
+    expect(() => validateResearchEvidenceCacheValue({ findings: [{ ...assessment(first), evidence: original }, assessment(second)] }, [first, second], ["personal"])).toThrow("unsupported passing quote");
+  });
+
+  it("canonicalizes before section validation so cross-section fragments cannot launder a quote", () => {
+    const row = researchSourceSections({ ...item("report"), content: `Insight 1: First result\n\nI'm not buying it. ${"Context for the first result. ".repeat(4)}\n\nInsight 2: Second result\n\n${thesis} ${"Context for the second result. ".repeat(4)}` });
+    const finding = { ...assessment(row), evidence: original, sectionChecks: row.sourceSections.map((section, index) => ({
+      sectionId: section.id, familyKeys: index === 0 ? ["workflow-report"] : [], notPostworthyReason: index === 0 ? "" : "No separate decision supplied.",
+    })) };
+    const result = validateResearchEvidenceCacheValue({ findings: [finding] }, [row], ["personal"]);
+    expect(result.findings[0].evidence).toBe(thesis);
+    expect(() => validateResearchSectionCoverage(result.findings, [row])).toThrow("inside their claimed section body");
+  });
+
+  it("retains validated repair metadata in the private item cache without editorial field changes", async () => {
+    const h = harness();
+    const result = validateResearchEvidenceCacheValue({ findings: [{ ...assessment(source), evidence: original }] }, [source], ["personal"]);
+    await cacheValidResearchEvidenceItems(result, [source], h.access);
+    const saved = h.cache.get(await researchEvidenceItemCacheId(context, source)) as typeof result;
+    expect(saved.citationRepairs).toEqual(result.citationRepairs);
+    const again = validateResearchEvidenceCacheValue(saved, [source], ["personal"]);
+    expect(again).toEqual(saved);
+    expect(again.findings[0].contentAngle).toBe(assessment(source).contentAngle);
+  });
+});
 
 describe("independent source evidence reuse", () => {
   it("reuses two sources in a reordered three-source batch and regenerates only a changed body", async () => {
