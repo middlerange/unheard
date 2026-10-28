@@ -169,6 +169,22 @@ describe('durable research execution', () => {
     expect(invoke.mock.calls.map(([payload]) => payload.operation)).toEqual(['plan', 'rank', 'rank', 'rank', 'drafts']);
   });
 
+  it('waits for an existing evidence request before continuing the same ranking job', async () => {
+    let rankingCalls = 0;
+    const invoke = vi.fn(async (payload: { operation: string }) => {
+      if (payload.operation === 'plan') return { sourceIds: [] };
+      if (payload.operation === 'rank') return ++rankingCalls === 1
+        ? { pending: true, retryAfterMs: 15_000 } : { pending: false };
+      return { drafted: 0 };
+    });
+    const doStep = vi.fn(async (_name: string, _config: unknown, work: () => Promise<unknown>) => work());
+    const sleep = vi.fn(async () => {});
+    expect(await runResearchWorkflow('coverage-wait', { do: doStep, sleep }, invoke)).toEqual({ drafted: 0 });
+    expect(sleep).toHaveBeenCalledExactlyOnceWith('Wait for research evidence after batch 1', '15 seconds');
+    expect(invoke.mock.calls.map(([payload]) => payload.operation)).toEqual(['plan', 'rank', 'rank', 'drafts']);
+    expect(doStep.mock.calls.find(([name]) => name === 'Rank findings batch 2')?.[1]).toMatchObject({ retries: { limit: 0 } });
+  });
+
   it('does not repeat an interrupted paid continuation or draft partial findings', async () => {
     let rankingCalls = 0;
     const invoke = vi.fn(async (payload: { operation: string }) => {

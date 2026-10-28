@@ -10,6 +10,7 @@ import { assertPublicResearchUrl, canonicalResearchUrl } from './research-collec
 import { hasUsablePewResearchBody } from './research-pew';
 import { RESEARCH_POST_MIN_SCORE } from './research-policy';
 import type { EvidenceCacheValue, EvidenceFailure } from './research-evidence-cache';
+import { ResearchCoveragePending, RESEARCH_COVERAGE_VERSION, RESEARCH_WINDOW_SCOPE_INSTRUCTIONS } from './research-coverage';
 import { RESEARCH_MODEL, RESEARCH_PROMPT_VERSION, RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS,
   RESEARCH_SCREEN_BATCH_SIZE, RESEARCH_EVIDENCE_BATCH_SIZE, RESEARCH_EVIDENCE_OUTPUT_TOKENS, RESEARCH_SECTION_COVERAGE_INSTRUCTIONS, researchHash, researchScreeningSchema,
   researchEvidenceSchema, screeningJsonSchemaForItems, evidenceJsonSchemaForItems, validateResearchScreening,
@@ -59,7 +60,7 @@ export async function readResearchReplayRequest(request: Request) {
 }
 export type ResearchReplayItem = z.infer<typeof researchReplayItemSchema>;
 type Run = typeof research_runs.$inferSelect;
-type Config = Omit<z.infer<typeof prepareSchema>, 'operation'> & { model: string; version: string; contractHash: string; icp: string; articleWatchUrls?: string[] };
+type Config = Omit<z.infer<typeof prepareSchema>, 'operation'> & { model: string; version: string; contractHash: string; coverageVersion: string; icp: string; articleWatchUrls?: string[] };
 type Entry = { id: string; chunkIndex: number; index: number; route: 'direct_evidence' | 'metadata_screen' | 'excluded'; reason: string | null };
 type Plan = { config: Config; uploadedSha256: string; entries: Entry[]; eligibleIds: string[] };
 type Progress = { screenOffset: number; selectedIds: string[]; evidenceOffset: number; screenedCount: number; evidenceCount: number; qualifiedCount: number; groundingFailureCount?: number };
@@ -77,6 +78,7 @@ async function immutable(teamId: string, id: string, value: unknown) {
 }
 async function contractHash() {
   return researchHash(JSON.stringify({ model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION,
+    coverageVersion: RESEARCH_COVERAGE_VERSION, coverageScope: RESEARCH_WINDOW_SCOPE_INSTRUCTIONS,
     screen: RESEARCH_SCREEN_INSTRUCTIONS, evidence: RESEARCH_EVIDENCE_INSTRUCTIONS,
     sectionInstructions: RESEARCH_SECTION_COVERAGE_INSTRUCTIONS, evidenceOutputTokens: RESEARCH_EVIDENCE_OUTPUT_TOKENS,
     screenSchema: screeningJsonSchemaForItems(['item']), evidenceSchema: evidenceJsonSchemaForItems(['item'], ['profile'], { sectionCoverage: true }),
@@ -108,7 +110,7 @@ async function loadConfig(run: Run): Promise<Config> {
   if (!row) throw new Error('Replay configuration not found');
   const config: Config = JSON.parse(row.value);
   if (config.runId !== run.id || config.icp !== run.icp || config.version !== RESEARCH_PROMPT_VERSION
-    || config.model !== RESEARCH_MODEL || config.contractHash !== await contractHash()) throw new Error('Replay scoring contract changed; prepare a new replay');
+    || config.model !== RESEARCH_MODEL || config.coverageVersion !== RESEARCH_COVERAGE_VERSION || config.contractHash !== await contractHash()) throw new Error('Replay scoring contract changed; prepare a new replay');
   await getFrozenResearchAudience(run);
   return config;
 }
@@ -141,7 +143,7 @@ export async function researchReplayAction(teamId: string, input: unknown) {
     const existing = await db.select().from(research_runs).where(eq(research_runs.id, data.runId)).get();
     if (existing && (existing.team_id !== teamId || existing.mode !== 'replay')) throw new Error('Replay ID is already in use');
     const { operation: _, ...requested } = data;
-    const config: Config = { ...requested, model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION, contractHash: await contractHash(), icp: original.icp,
+    const config: Config = { ...requested, model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION, contractHash: await contractHash(), coverageVersion: RESEARCH_COVERAGE_VERSION, icp: original.icp,
       articleWatchUrls: RESEARCH_SOURCE_SEEDS.filter(seed => data.sourceIds.includes(seed.id) && seed.pageMode === 'article').map(seed => canonicalResearchUrl(seed.url)) };
     const createdAt = Date.now(), configId = prefix(data.runId) + 'config';
     await retryResearchStorage(async () => db.batch([
@@ -151,7 +153,7 @@ export async function researchReplayAction(teamId: string, input: unknown) {
     ]));
     const run = await loadRun(teamId, data.runId), saved = await loadConfig(run);
     if (JSON.stringify(config) !== JSON.stringify(saved)) throw new Error('Replay preparation differs from the saved request');
-    return { runId: run.id, status: run.status, model: saved.model, version: saved.version, uploadChunkSize: 20 };
+    return { runId: run.id, status: run.status, model: saved.model, version: saved.version, coverageVersion: saved.coverageVersion, uploadChunkSize: 20 };
   }
   const run = await loadRun(teamId, data.runId), config = await loadConfig(run);
   if (data.operation === 'upload') {
@@ -246,11 +248,19 @@ export async function processResearchReplay(run: Run, operation: string) {
     const batch = ids.map(id => itemMap.get(id)!).filter(item => researchReplayRoute(item) === 'direct_evidence');
     let assessments: z.infer<typeof researchEvidenceSchema>['findings'] = [];
     let evidenceFailures: EvidenceFailure[] = [];
+    let coverageManifestIds: string[] = [];
     if (batch.length) {
       await immutable(run.team_id, prefix(run.id) + 'request:evidence:' + progress.evidenceOffset, { stage: 'evidence', input: batch.map(item => evidenceInput(item, plan.config)) });
-      const output = await cachedResearchModel(run, 'evidence', batch.map(item => evidenceInput(item, plan.config)), RESEARCH_EVIDENCE_INSTRUCTIONS,
-        evidenceJsonSchemaForItems(batch.map(item => item.id)), RESEARCH_EVIDENCE_OUTPUT_TOKENS) as EvidenceCacheValue;
+      let output: EvidenceCacheValue;
+      try {
+        output = await cachedResearchModel(run, 'evidence', batch.map(item => evidenceInput(item, plan.config)), RESEARCH_EVIDENCE_INSTRUCTIONS,
+          evidenceJsonSchemaForItems(batch.map(item => item.id)), RESEARCH_EVIDENCE_OUTPUT_TOKENS) as EvidenceCacheValue;
+      } catch (error) {
+        if (error instanceof ResearchCoveragePending) return { pending: true, retryAfterMs: error.retryAfterMs };
+        throw error;
+      }
       evidenceFailures = output.evidenceFailures || [];
+      coverageManifestIds = output.coverageManifestIds || [];
       assessments = validateResearchEvidenceCoverage(output.findings, batch.filter(item => !evidenceFailures.some(failure => failure.itemId === item.id)).map(item => item.id));
       const audience = await getFrozenResearchAudience(run);
       validateResearchEvidenceProfiles(assessments, audience.publishingProfiles.map(profile => profile.id));
@@ -258,6 +268,7 @@ export async function processResearchReplay(run: Run, operation: string) {
     const accepted = validateResearchEvidence(assessments, batch.map(item => ({ id: item.id, content: item.content! })));
     await immutable(run.team_id, prefix(run.id) + 'evidence:' + progress.evidenceOffset, { ids, input: batch.map(item => evidenceInput(item, plan.config)), assessments,
       ...(evidenceFailures.length ? { evidenceFailures } : {}),
+      ...(coverageManifestIds.length ? { coverageManifestIds } : {}),
       acceptedIds: [...new Set(accepted.map(item => item.itemId))], acceptedIdeas: accepted,
       unavailableIds: ids.filter(id => !batch.some(item => item.id === id)), unavailableReason: 'No captured usable public body in the frozen replay corpus; live hydration was not performed.' });
     progress.evidenceOffset += ids.length;

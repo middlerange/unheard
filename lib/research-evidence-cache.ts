@@ -7,7 +7,7 @@ export type CitationRepair = { itemId: string; familyKey: string; original: stri
   { method: "ordered_omission_to_contiguous_span" | "leading_determiner_to_contiguous_span" }
   | { method: "model_passage_selection"; requestId: string; passageId: number; start: number; end: number; bodyHash: string; gradeHash: string }
 );
-export type EvidenceCacheValue = { findings: ResearchEvidence[]; citationRepairs?: CitationRepair[]; evidenceFailures?: EvidenceFailure[] };
+export type EvidenceCacheValue = { findings: ResearchEvidence[]; citationRepairs?: CitationRepair[]; evidenceFailures?: EvidenceFailure[]; coverageManifestIds?: string[] };
 export type EvidenceCacheContext = {
   teamId: string;
   model: string;

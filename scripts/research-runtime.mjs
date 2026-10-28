@@ -65,6 +65,9 @@ export async function runResearchWorkflow(runId, step, invoke) {
     let batch = 1;
     let ranking = await step.do('Rank findings', paidOptions, () => invoke({ operation: 'rank', runId }));
     while (ranking?.pending === true) {
+      if (Number.isFinite(ranking.retryAfterMs) && ranking.retryAfterMs > 0) {
+        await step.sleep(`Wait for research evidence after batch ${batch}`, `${Math.ceil(ranking.retryAfterMs / 1000)} seconds`);
+      }
       batch++;
       ranking = await step.do(`Rank findings batch ${batch}`, paidOptions, () => invoke({ operation: 'rank', runId }));
     }

@@ -6,6 +6,7 @@ import { getFrozenResearchAudience } from "./research-audience";
 import { researchSelectionAudience, RESEARCH_SELECTION_VIEW_VERSION } from "./research-selection-audience";
 import { cacheValidResearchEvidenceItems, researchEvidenceFailures, researchEvidenceItemCacheId, reuseResearchEvidenceItems, validateResearchEvidenceCacheValue, type EvidenceCacheInput, type EvidenceCacheValue, type EvidenceFailure } from "./research-evidence-cache";
 import { repairResearchCitation, RESEARCH_QUOTE_REPAIR_INSTRUCTIONS, sameContextQuoteFailure, verifyResearchEvidenceFailure } from "./research-quote-repair";
+import { coverResearchEvidence, ResearchCoveragePending, RESEARCH_COVERAGE_VERSION } from "./research-coverage";
 import { researchFindingDates, researchItemSignalKind } from "./research-dates";
 import { getDraftResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
 import { hasUsablePewResearchBody, isPewResearchSource } from "./research-pew";
@@ -918,7 +919,7 @@ async function collectForRun(
     .where(eq(research_runs.id, run.id));
   return { collected: count, error };
 }
-async function cachedModel(
+async function baseCachedModel(
   run: typeof research_runs.$inferSelect,
   stage: string,
   input: unknown,
@@ -1038,7 +1039,9 @@ async function cachedModel(
     },
   );
   const generate = async (items: unknown) => {
-    const usage = { teamId: run.team_id, runId: run.id, stage: "research" as const, operation: run.mode === "replay" ? `replay_${stage}` : stage };
+    const focused = stage === "evidence" && Array.isArray(items) && items.length === 1 && Boolean(items[0]?.windowFocus);
+    const operation = focused ? "window_evidence" : stage;
+    const usage = { teamId: run.team_id, runId: run.id, stage: "research" as const, operation: run.mode === "replay" ? `replay_${operation}` : operation };
     if (stage !== "evidence") return (await callResearchModel(
       system, { ...selectionAudience, items }, schema, outputTokens, usage,
     )).value;
@@ -1094,6 +1097,59 @@ async function cachedModel(
   await validateReusable(value);
   await writeCache(id, value);
   return value;
+}
+async function cachedModel(
+  run: typeof research_runs.$inferSelect,
+  stage: string,
+  input: unknown,
+  system: string,
+  schema: Record<string, unknown>,
+  outputTokens: number,
+  budget = { remaining: 2 },
+) {
+  const base = await baseCachedModel(run, stage, input, system, schema, outputTokens);
+  if (stage !== "evidence") return base;
+  const sources = (input as EvidenceCacheInput[]).map(item => {
+    if (typeof item.content !== "string") throw new Error("Evidence coverage requires captured source text");
+    return researchSourceSections({ ...item, content: item.content });
+  });
+  const audience = await getFrozenResearchAudience(run), profileIds = audience.publishingProfiles.map(profile => profile.id);
+  const db = await getDb();
+  const read = async (id: string) => {
+    const row = await db.select().from(research_cache).where(and(eq(research_cache.id, id), eq(research_cache.team_id, run.team_id))).get();
+    return row ? JSON.parse(row.value) as unknown : null;
+  };
+  const context = {
+    teamId: run.team_id, model: RESEARCH_MODEL, promptVersion: RESEARCH_PROMPT_VERSION,
+    system: `${system}\n\n${RESEARCH_SECTION_COVERAGE_INSTRUCTIONS}`, audience,
+    selectionViewVersion: RESEARCH_SELECTION_VIEW_VERSION, selectionAudience: researchSelectionAudience(audience),
+    schemaForItem: (id: string) => evidenceJsonSchemaForItems([id], profileIds, { sectionCoverage: true }),
+  };
+  const pointerId = `${run.mode === "replay" ? "research-replay:" : "research-coverage-run:"}${run.id}:coverage:${await researchHash(JSON.stringify(sources))}`;
+  const recordCoverage = async (planIds: string[], manifestIds: string[], pending: boolean) => {
+    if (!planIds.length && !manifestIds.length) return;
+    const value = JSON.stringify({ version: RESEARCH_COVERAGE_VERSION, planIds, manifestIds, pending });
+    await retryResearchStorage(async () => db.insert(research_cache).values({ id: pointerId, team_id: run.team_id, value, created_at: Date.now() })
+      .onConflictDoUpdate({ target: research_cache.id, set: { value } }));
+  };
+  try {
+    const covered = await coverResearchEvidence(sources, base as EvidenceCacheValue, {
+      context, budget, read,
+      claim: async (id, value) => (await db.insert(research_cache).values({ id, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now() })
+        .onConflictDoNothing().returning({ id: research_cache.id })).length === 1,
+      save: async (id, expected, value) => (await db.update(research_cache).set({ value: JSON.stringify(value) })
+        .where(and(eq(research_cache.id, id), eq(research_cache.team_id, run.team_id), eq(research_cache.value, JSON.stringify(expected))))
+        .returning({ id: research_cache.id })).length === 1,
+      writeImmutable: async (id, value) => { await db.insert(research_cache).values({ id, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now() }).onConflictDoNothing(); },
+      generate: async item => await baseCachedModel(run, "evidence", [item], system,
+        evidenceJsonSchemaForItems([item.id], profileIds, { sectionCoverage: true }), outputTokens) as EvidenceCacheValue,
+    });
+    await recordCoverage([], covered.manifestIds, false);
+    return covered.manifestIds.length ? { ...covered.value, coverageManifestIds: covered.manifestIds } : covered.value;
+  } catch (error) {
+    if (error instanceof ResearchCoveragePending) await recordCoverage(error.planIds, error.manifestIds, true);
+    throw error;
+  }
 }
 export { cachedModel as cachedResearchModel };
 type ResearchRankDiagnostics = ResearchRunDiagnostics & Required<Pick<ResearchRunDiagnostics, "evidenceCount" | "rejectedStories" | "screenedCount">>;
@@ -1157,6 +1213,7 @@ async function researchRoutingPlan(run: typeof research_runs.$inferSelect, ids: 
 
 async function rankRun(run: typeof research_runs.$inferSelect) {
   const db = await getDb();
+  const coverageBudget = { remaining: 2 };
   const progressId = `rank-progress:${run.id}`;
   const saved = await db.select().from(research_cache).where(and(
     eq(research_cache.id, progressId), eq(research_cache.team_id, run.team_id),
@@ -1323,10 +1380,16 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
         signalKind: researchItemSignalKind(item, run),
         content: item.content, contentProvenance: item.content_provenance,
       }));
-      const output = await cachedModel(
-        run, "evidence", input, RESEARCH_EVIDENCE_INSTRUCTIONS,
-        evidenceJsonSchemaForItems(batch.map(item => item.id)), RESEARCH_EVIDENCE_OUTPUT_TOKENS,
-      ) as EvidenceCacheValue;
+      let output: EvidenceCacheValue;
+      try {
+        output = await cachedModel(
+          run, "evidence", input, RESEARCH_EVIDENCE_INSTRUCTIONS,
+          evidenceJsonSchemaForItems(batch.map(item => item.id)), RESEARCH_EVIDENCE_OUTPUT_TOKENS, coverageBudget,
+        ) as EvidenceCacheValue;
+      } catch (error) {
+        if (error instanceof ResearchCoveragePending) return { ok: true, pending: true, retryAfterMs: error.retryAfterMs };
+        throw error;
+      }
       validateResearchEvidenceCoverage(output.findings, batch.filter(item => !output.evidenceFailures?.some(failure => failure.itemId === item.id)).map(item => item.id));
       const accepted = validateResearchEvidence(output.findings, batch.map(item => ({ id: item.id, content: item.content! })));
       for (const item of batch) {
