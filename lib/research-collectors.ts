@@ -52,6 +52,16 @@ export function sourceHosts(source: ResearchSourceSeed) {
   hosts.add(host.startsWith("www.") ? host.slice(4) : `www.${host}`);
   return hosts;
 }
+export function sourceArticleHosts(source: ResearchSourceSeed) {
+  const hosts = sourceHosts(source);
+  for (const host of source.trustedArticleHosts ?? []) {
+    const url = assertPublicResearchUrl(`https://${host}`);
+    if (url.hostname !== host || url.pathname !== "/" || url.search || url.hash || url.port || !/^[a-z0-9.-]+$/.test(host))
+      throw new Error("Trusted article hosts must be exact public hostnames");
+    hosts.add(host);
+  }
+  return hosts;
+}
 export class ResearchRateLimitError extends Error {
   readonly retryAfterMs: number | null;
   constructor(readonly hostname: string, readonly retryAfter: string | null) {
@@ -223,7 +233,7 @@ export function parseResearchFeed(
         : nodeText((link as Record<string, unknown>)?.["@_href"]);
     try {
       const url = canonicalResearchUrl(new URL(raw, source.url).href);
-      assertPublicResearchUrl(url, sourceHosts(source));
+      assertPublicResearchUrl(url, sourceArticleHosts(source));
       const title = plainResearchText(nodeText(entry.title)).slice(0, 300);
       if (!title || !raw) return [];
       const publicBody = source.kind === "youtube" ? "" : readableResearchText(
@@ -504,7 +514,7 @@ export function discoverResearchLinks(
         const url = canonicalResearchUrl(
           new URL(match[2].replace(/&amp;/g, "&"), source.url).href,
         );
-        assertPublicResearchUrl(url, sourceHosts(source));
+        assertPublicResearchUrl(url, sourceArticleHosts(source));
         const path = new URL(url).pathname;
         if (url === canonicalResearchUrl(source.url)
           || /\/(tags?|categor(?:y|ies)|about|contact|privacy|terms|login|sign-?in|subscribe|archive|search|authors?|teams?|people|topics?|careers|jobs|pricing|demo)(\/|$)/i.test(path)
@@ -562,7 +572,7 @@ export async function collectResearchSource(
   const results: PromiseSettledResult<CollectedItem>[] = [];
   for (let start = 0; start < links.length; start += 4) {
     results.push(...await Promise.allSettled(links.slice(start, start + 4).map(async (url) => {
-      const html = await fetchResearchText(url, sourceHosts(source));
+      const html = await fetchResearchText(url, sourceArticleHosts(source));
       const content = articleResearchText(html).slice(0, 14_000);
       return {
         url,

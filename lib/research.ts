@@ -597,6 +597,42 @@ async function collectForRun(
   let error: string | null = null;
   let failed = false;
   try {
+    if (source.hydratePublishedWindowOnly) {
+      const offset = progress?.articleOffset || 0;
+      const queued = [...backoff.targets, ...(progress?.articles?.slice(offset) || []), ...(progress?.deferredArticles || [])];
+      if (queued.length) {
+        const runSources = JSON.parse(run.source_ids) as string[];
+        const references = new Set([
+          ...(source.backfillUrls || []),
+          ...RESEARCH_SOURCE_SEEDS.filter(seed => seed.kind === "web" && seed.pageMode === "article" && runSources.includes(seed.id)).map(seed => seed.url),
+        ].map(canonicalResearchUrl));
+        const urls = [...new Set(queued.map(target => canonicalResearchUrl(target.url)))];
+        const knownDates = await db.select({ url: research_items.canonical_url, publishedAt: research_items.published_at })
+          .from(research_items).where(and(eq(research_items.team_id, run.team_id),
+            sql`${research_items.canonical_url} IN (SELECT value FROM json_each(${JSON.stringify(urls)}))`));
+        const dates = new Map(knownDates.map(item => [item.url, item.publishedAt]));
+        const eligible = (target: DiscoveryArticleTarget) => {
+          const url = canonicalResearchUrl(target.url), publishedAt = dates.get(url);
+          return references.has(url) || publishedAt !== null && publishedAt !== undefined
+            && publishedAt >= run.created_at - run.days * 86_400_000 && publishedAt <= run.created_at;
+        };
+        const retained = backoff.targets.filter(eligible);
+        if (retained.length !== backoff.targets.length) {
+          backoff.targets = retained;
+          for (const [url, target] of deferred) if (!eligible(target)) deferred.delete(url);
+          await saveBackoff();
+        }
+        if (progress) {
+          const articles = progress.articles || [], postponed = progress.deferredArticles || [];
+          const pending = articles.slice(offset).filter(eligible), retainedPostponed = postponed.filter(eligible);
+          if (pending.length !== articles.length - offset || retainedPostponed.length !== postponed.length) {
+            progress.articles = [...articles.slice(0, offset), ...pending];
+            if (progress.deferredArticles) progress.deferredArticles = retainedPostponed;
+            await saveCollectionProgress(progress);
+          }
+        }
+      }
+    }
     const sourceRetryAt = Math.max(...[source.url, source.feedUrl].filter(Boolean).map(url => backoff.retryAtByHost[collectionHost(url!)] || 0));
     if (!progress && source.kind !== "search" && sourceRetryAt > Date.now()) {
       const retryAfterMs = sourceRetryAt - Date.now();
@@ -1098,8 +1134,15 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
     const articleWatches = RESEARCH_SOURCE_SEEDS.filter(source => source.kind === "web" && source.pageMode === "article" && sources.includes(source.id)).map(source => canonicalResearchUrl(source.url));
     const watchedUrls = sql`${research_items.canonical_url} IN (SELECT value FROM json_each(${JSON.stringify(articleWatches)}))`;
     const sourceRoster = or(sql`${research_items.source_id} IN (SELECT value FROM json_each(${JSON.stringify(sources)}))`, watchedUrls);
+    const publishedWindowSources = RESEARCH_SOURCE_SEEDS.filter(source => source.hydratePublishedWindowOnly).map(source => source.id);
+    const sourcePublicationWindow = or(
+      sql`${research_items.source_id} NOT IN (SELECT value FROM json_each(${JSON.stringify(publishedWindowSources)}))`,
+      gte(research_items.published_at, windowStart),
+      watchedUrls,
+    );
     const datedSignal = and(
       lte(research_items.published_at, run.created_at),
+      sourcePublicationWindow,
       or(gte(research_items.published_at, windowStart), and(gte(research_items.collected_at, windowStart), lte(research_items.collected_at, discoveryCutoff))),
     );
     const undatedWatchSignal = articleWatches.length ? and(

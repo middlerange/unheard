@@ -433,3 +433,21 @@ describe("topic-driven public discovery", () => {
   });
 
 });
+
+
+it('limits opted-in feeds to real in-window publication metadata before hydration, without capping eligible articles', async () => {
+  const rssSource: ResearchSourceSeed = { ...source, kind: 'rss', url: 'https://research.example', feedUrl: 'https://research.example/feed', hydratePublishedWindowOnly: true, backfillUrls: ['https://research.example/explicit-historical-original'] };
+  const entry = (id: string, date?: string) => `<item><title>Original ${id}</title><link>https://research.example/${id}</link>${date === undefined ? '' : `<pubDate>${date}</pubDate>`}</item>`;
+  const current = Array.from({ length: 85 }, (_, index) => entry(`current-${index}`, new Date(start + 1).toISOString()));
+  const archived = Array.from({ length: 1334 }, (_, index) => entry(`archive-${index}`, '2020-01-01T00:00:00Z'));
+  const entries = [...archived, ...current, entry('lower-boundary', new Date(start).toISOString()), entry('upper-boundary', new Date(end).toISOString()), entry('future', new Date(end + 1).toISOString()), entry('unknown'), entry('invalid', 'not a date'), `<item><title>Updated only</title><link>https://research.example/updated-only</link><updated>${new Date(end).toISOString()}</updated></item>`];
+  const fetcher = vi.fn(async () => new Response(`<rss><channel>${entries.join('')}</channel></rss>`));
+  vi.stubGlobal('fetch', fetcher);
+  const result = await collectDiscoveredResearchSource(rssSource, start, end, new Set(), { deferArticleFetch: true });
+  expect(result.items).toHaveLength(87);
+  expect(result.items.every(item => item.publishedAt !== null && item.publishedAt >= start && item.publishedAt <= end)).toBe(true);
+  expect(result.pendingArticles).toEqual([{ url: rssSource.backfillUrls![0] }]);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  const defaults = await collectDiscoveredResearchSource({ ...rssSource, hydratePublishedWindowOnly: false }, start, end, new Set(), { deferArticleFetch: true });
+  expect(defaults.items).toHaveLength(entries.length);
+});

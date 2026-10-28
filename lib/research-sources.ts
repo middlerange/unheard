@@ -711,6 +711,8 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "openai-news",
+    "hydratePublishedWindowOnly": true,
+    "freeArticleFallback": true,
     "name": "OpenAI — official news and adoption",
     "url": "https://openai.com/news/",
     "feedUrl": "https://openai.com/news/rss.xml",
@@ -765,6 +767,9 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "google-deepmind-research",
+    "hydratePublishedWindowOnly": true,
+    "freeArticleFallback": true,
+    "trustedArticleHosts": ["blog.google"],
     "name": "Google DeepMind — research and models",
     "url": "https://deepmind.google/blog/",
     "feedUrl": "https://deepmind.google/blog/rss.xml",

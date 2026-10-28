@@ -1,4 +1,4 @@
-import { articleResearchText, articleResearchTitle, assertPublicResearchUrl, canonicalResearchUrl, ResearchRateLimitError, sourceHosts } from './research-collectors';
+import { articleResearchText, articleResearchTitle, assertPublicResearchUrl, canonicalResearchUrl, ResearchArticleSectionError, ResearchRateLimitError, sourceArticleHosts } from './research-collectors';
 import type { ResearchSourceSeed } from './research-types';
 
 export const PUBLIC_FETCH_RETRIEVAL_NOTE = 'Direct fetch failed; public publisher body retrieved via free fetch. Publication dates still require evidence in the original HTML.';
@@ -9,19 +9,20 @@ function restrictedUrl(url: URL) {
   let path: string;
   try { path = decodeURIComponent(url.pathname); } catch { return true; }
   return /\/(?:login|log-in|signin|sign-in|oauth|auth|private|account|checkout|paywall|subscribe)(\/|$)/i.test(path)
+    || /(^|\.)(?:facebook\.com|instagram\.com|threads\.(?:com|net)|tiktok\.com|linkedin\.com|twitter\.com|x\.com|youtube\.com|reddit\.com)$/.test(url.hostname)
     || /\.(?:pdf|zip|gz|mp[34]|webm|mov|wav|ogg|png|jpe?g|gif|webp|avif|svg)$/i.test(path)
     || [...url.searchParams.keys()].some(key => /^(?:access_token|auth(?:_token)?|authorization|api_key|key|token|password|session(?:id)?|signature|sig)$/i.test(key));
 }
 
-export function canUseFreePublicWatchFetch(source: ResearchSourceSeed, error: unknown) {
-  if (source.kind !== 'web' || source.pageMode !== 'article' || !process.env.TREG_TOKEN || error instanceof ResearchRateLimitError
-    || error instanceof Error && /\bHTTP (?:401|402)\b/.test(error.message)) return false;
-  try { return !restrictedUrl(assertPublicResearchUrl(source.url, sourceHosts(source))); }
+export function canUseFreePublicWatchFetch(source: ResearchSourceSeed, error: unknown, allowedHosts?: Set<string>) {
+  if (source.kind !== 'web' || source.pageMode !== 'article' || !process.env.TREG_TOKEN || error instanceof ResearchRateLimitError || error instanceof ResearchArticleSectionError
+    || error instanceof Error && /\bHTTP (?:401|402|429)\b|Source redirect rejected|outside the approved|Only public HTTPS/.test(error.message)) return false;
+  try { return !restrictedUrl(assertPublicResearchUrl(source.url, allowedHosts ?? sourceArticleHosts(source))); }
   catch { return false; }
 }
 
-export async function fetchFreePublicWatchHtml(source: ResearchSourceSeed) {
-  const hosts = sourceHosts(source), target = assertPublicResearchUrl(source.url, hosts), token = process.env.TREG_TOKEN;
+export async function fetchFreePublicWatchHtml(source: ResearchSourceSeed, allowedHosts?: Set<string>) {
+  const hosts = allowedHosts ?? sourceArticleHosts(source), target = assertPublicResearchUrl(source.url, hosts), token = process.env.TREG_TOKEN;
   if (!token || source.kind !== 'web' || source.pageMode !== 'article' || restrictedUrl(target))
     throw new Error('Free public fetch is unavailable for this source');
   const requested = canonicalResearchUrl(target.href);

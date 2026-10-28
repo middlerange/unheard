@@ -47,6 +47,93 @@ describe("profile-specific rubric components",()=>{
   });
 });
 
+describe("categorical source qualification", () => {
+  const components = { sourceSupport: "supported_bounded_claim", usefulDecision: "useful_distinction_or_signal", scopeHonesty: "accurately_bounded" };
+  const profileChecks = { personal: { fits: true, relevance: 16, reason: "A specific adjacent practitioner signal." }, company: { fits: false, relevance: 0, reason: "Outside its remit." } };
+  const candidate = { ...finding, claimBasis: "measured_observation", profileChecks, qualityComponents: components };
+  const parse = (changes: Record<string, unknown> = {}) => researchEvidenceSchema.parse({ findings: [{ ...candidate, ...changes }] }).findings[0];
+
+  it("qualifies an honestly described survey signal at adjacent relevance without requiring outcome proof", () => {
+    const parsed = parse();
+    expect(parsed).toMatchObject({ score: 80, chosenProfileId: "personal", qualificationRubric: "source_qualification_v1",
+      qualityComponents: { sourceSupport: 25, usefulDecision: 24, scopeHonesty: 15 } });
+    expect(validateResearchEvidenceProfiles([parsed], ["company", "personal"])).toHaveLength(1);
+    expect(validateResearchEvidence([parsed], items)).toHaveLength(1);
+  });
+  it.each(["reasoned_position", "described_method", "reported_capability"])("uses the same bounded-source gates for %s", claimBasis => {
+    expect(parse({ claimBasis, qualityComponents: { ...components, usefulDecision: "concrete_decision" } }).score).toBe(86);
+  });
+  it("enforces every categorical gate over all component combinations and the relevance boundary", () => {
+    for (const sourceSupport of ["supported_bounded_claim", "incomplete_support", "unsupported"])
+      for (const usefulDecision of ["concrete_decision", "useful_distinction_or_signal", "generic", "none"])
+        for (const scopeHonesty of ["accurately_bounded", "material_gap", "misleading"])
+          for (const relevance of [0, 15, 16, 30]) {
+            const parsed = parse({ profileChecks: { ...profileChecks, personal: { ...profileChecks.personal, relevance } },
+              qualityComponents: { sourceSupport, usefulDecision, scopeHonesty } });
+            const qualifies = relevance >= 16 && sourceSupport === "supported_bounded_claim"
+              && ["concrete_decision", "useful_distinction_or_signal"].includes(usefulDecision) && scopeHonesty === "accurately_bounded";
+            expect(parsed.score >= 70, JSON.stringify({ relevance, sourceSupport, usefulDecision, scopeHonesty })).toBe(qualifies);
+            if (!relevance) expect(parsed.score).toBe(0);
+          }
+  });
+  it.each([
+    { sourceSupport: "incomplete_support" }, { sourceSupport: "unsupported" },
+    { usefulDecision: "generic" }, { scopeHonesty: "material_gap" },
+  ])("caps a failed gate even when the other components could push its sum over70: %j", changed => {
+    const parsed = parse({ profileChecks: { ...profileChecks, personal: { ...profileChecks.personal, relevance: 30 } },
+      qualityComponents: { ...components, usefulDecision: "concrete_decision", ...changed } });
+    expect(parsed.score).toBe(69);
+    expect(validateResearchEvidence([parsed], items)).toEqual([]);
+  });
+  it("keeps generic bounded hype and no-useful-core claims rejected despite high profile relevance", () => {
+    const hype = parse({ profileChecks: { personal: { ...profileChecks.personal, relevance: 30 } },
+      qualityComponents: { ...components, sourceSupport: "unsupported", usefulDecision: "generic" } });
+    expect(hype.score).toBe(55);
+    expect(parse({ claimBasis: "no_useful_core" }).score).toBe(0);
+    expect(parse({ profileChecks: { personal: { ...profileChecks.personal, fits: false, relevance: 30 } } }).score).toBe(0);
+    expect(validateResearchEvidence([parse({ evidence: "" })], items)).toEqual([]);
+  });
+  it("does not let a supported source rescue another source's unsupported claim", () => {
+    const unsupported = parse({ profileChecks: { personal: { ...profileChecks.personal, relevance: 30 } },
+      qualityComponents: { ...components, sourceSupport: "unsupported", usefulDecision: "concrete_decision" } });
+    const supported = { ...parse(), itemId: "other-source" };
+    const assessed = researchEvidenceSchema.parse({ findings: [unsupported, supported] }).findings;
+    expect(assessed.map(idea => idea.score)).toEqual([69, 80]);
+    expect(validateResearchEvidence(assessed, [...items, { id: "other-source", content: quote }]).map(idea => idea.itemId)).toEqual(["other-source"]);
+  });
+  it("retains the internal rubric marker and exact capped score on normalized-cache reparse", () => {
+    const parsed = parse({ qualityComponents: { ...components, sourceSupport: "incomplete_support", usefulDecision: "concrete_decision" },
+      profileChecks: { personal: { ...profileChecks.personal, relevance: 30 } } });
+    expect(parsed.score).toBe(69);
+    expect(researchEvidenceSchema.parse(JSON.parse(JSON.stringify({ findings: [parsed] }))).findings[0]).toEqual(parsed);
+    const legacy = parse({ qualityComponents: { sourceSupport: 12, usefulDecision: 30, scopeHonesty: 15 },
+      profileChecks: { personal: { ...profileChecks.personal, relevance: 30 } } });
+    expect(legacy.score).toBe(87);
+    expect(legacy).not.toHaveProperty("qualificationRubric");
+    expect(researchEvidenceSchema.parse({ findings: [legacy] }).findings[0]).toEqual(legacy);
+  });
+  it("normalizes nested categorical primary/additional claims independently and never emits the marker in the wire schema", () => {
+    const { itemId: _id, summary, evidence, contentAngle, whyItMatters, limitations, ...rest } = candidate;
+    const claim = { summary, evidence, contentAngle, whyItMatters, limitations };
+    const result = researchEvidenceSchema.parse({ findings: { study: { ...rest, claim, additionalIdeas: [{ ...rest, claim,
+      familyKey: "additional-signal", qualityComponents: { ...components, usefulDecision: "generic" } }] } } }).findings[0];
+    expect(result.score).toBe(80);
+    expect(result.additionalIdeas![0]).toMatchObject({ score: 66, qualificationRubric: "source_qualification_v1" });
+    expect(result).not.toHaveProperty("claim");
+    const wire = evidenceJsonSchemaForItems(["study"], ["personal", "company"], { sectionCoverage: true });
+    expect(wire.$defs.qualityComponents.properties.sourceSupport.enum).toEqual(["supported_bounded_claim", "incomplete_support", "unsupported"]);
+    expect(wire.$defs.qualityComponents.properties.usefulDecision.enum).toEqual(["concrete_decision", "useful_distinction_or_signal", "generic", "none"]);
+    expect(wire.$defs.qualityComponents.properties.scopeHonesty.enum).toEqual(["accurately_bounded", "material_gap", "misleading"]);
+    expect(wire.$defs.idea.properties).not.toHaveProperty("qualificationRubric");
+  });
+  it.each([
+    { ...components, sourceSupport: "unknown" }, { ...components, usefulDecision: 24 },
+    { sourceSupport: "supported_bounded_claim" }, { ...components, extra: "unknown" },
+  ])("rejects unknown, mixed or incomplete category objects %j", qualityComponents => {
+    expect(() => parse({ qualityComponents })).toThrow();
+  });
+});
+
 describe("independent profile checks and claim-based evidence", () => {
   it("requires every profile check before claim scoring, including in Anthropic's wire schema", () => {
     const wire = evidenceJsonSchemaForItems(["study"], ["company", "personal"]);

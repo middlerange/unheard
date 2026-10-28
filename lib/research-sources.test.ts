@@ -104,7 +104,7 @@ describe('research source selection', () => {
     expect(source.notes).toContain('verify its own publication date');
   });
 
-  it('connects original upstream methods and releases while leaving undated artifacts out', () => {
+  it('connects original upstream methods and preserves undated reference boundaries', () => {
     const feeds = RESEARCH_SOURCE_SEEDS.filter(source => ['jeff-gothelf-original', 'aws-ai-development-original', 'gartner-original-public-research'].includes(source.id));
     expect(feeds).toHaveLength(3);
     expect(feeds.every(source => source.enabled && source.kind === 'rss' && source.feedUrl)).toBe(true);
@@ -117,7 +117,20 @@ describe('research source selection', () => {
       ['swan-original-changelog', 'https://www.getswan.com/changelog/the-brain'],
       ['gartner-original-public-research', 'https://www.gartner.com/en/newsroom/press-releases/2025-06-25-gartner-predicts-over-40-percent-of-agentic-ai-projects-will-be-canceled-by-end-of-2027'],
     ]) expect(RESEARCH_SOURCE_SEEDS.find(source => source.id === id)?.backfillUrls).toContain(original);
-    expect(RESEARCH_SOURCE_SEEDS.some(source => source.enabled && /coreyhaines31|outreach2day\.com/.test(source.url))).toBe(false);
+    for (const id of ['marketing-skills-reference', 'outreach2day-product-economics']) {
+      const reference = RESEARCH_SOURCE_SEEDS.find(source => source.id === id);
+      expect(reference).toMatchObject({ enabled: true, kind: 'web', pageMode: 'article' });
+      expect(reference?.notes).toContain('undated reference');
+      expect(reference?.notes).toContain('do not treat a crawl as a launch');
+    }
   });
 
+});
+
+
+it('restricts bounded feed hydration and free article fallback to the two verified publishers', () => {
+  const ids = ['google-deepmind-research', 'openai-news'];
+  expect(RESEARCH_SOURCE_SEEDS.filter(source => source.hydratePublishedWindowOnly).map(source => source.id).sort()).toEqual(ids);
+  expect(RESEARCH_SOURCE_SEEDS.filter(source => source.freeArticleFallback).map(source => source.id).sort()).toEqual(ids);
+  expect(RESEARCH_SOURCE_SEEDS.filter(source => source.trustedArticleHosts?.length).map(source => [source.id, source.trustedArticleHosts])).toEqual([['google-deepmind-research', ['blog.google']]]);
 });

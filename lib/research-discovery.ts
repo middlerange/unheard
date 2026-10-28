@@ -2,7 +2,7 @@ import {
   articleResearchDate, articleResearchSection, articleResearchText, articleResearchTitle, assertPublicResearchUrl,
   assertResearchArticleSectionWatch, ResearchArticleSectionError,
   canonicalResearchUrl, collectResearchSource, fetchResearchText,
-  discoverResearchLinks, parseResearchDate, plainResearchText, sourceHosts, type CollectedItem,
+  discoverResearchLinks, parseResearchDate, plainResearchText, sourceArticleHosts, sourceHosts, type CollectedItem,
 } from "./research-collectors";
 import type { ResearchSourceSeed } from "./research-types";
 import { fetchPewResearchArticle, isPewResearchSource } from "./research-pew";
@@ -29,7 +29,19 @@ export async function fetchDiscoveredResearchArticle(
     throw new ResearchArticleSectionError("Public chapter watches only apply to their explicitly configured article");
   if (isPewResearchSource(source) && source.articleSectionHeading === undefined) return fetchPewResearchArticle(source, target.url, windowEnd);
   const candidateSource = { ...source, url: target.url, feedUrl: undefined };
-  const html = htmlOverride ?? await fetchResearchText(target.url, sourceHosts(source.kind === "search" ? candidateSource : source));
+  const hosts = sourceArticleHosts(source.kind === "search" ? candidateSource : source);
+  assertPublicResearchUrl(target.url, hosts);
+  let html = htmlOverride;
+  let retrievalNote: string | undefined;
+  if (html === undefined) {
+    try { html = await fetchResearchText(target.url, hosts); }
+    catch (error) {
+      const fallbackSource: ResearchSourceSeed = { ...candidateSource, kind: "web", pageMode: "article" };
+      if (source.kind !== "rss" || !source.feedUrl || !source.freeArticleFallback || !canUseFreePublicWatchFetch(fallbackSource, error, hosts)) throw error;
+      html = await fetchFreePublicWatchHtml(fallbackSource, hosts);
+      retrievalNote = PUBLIC_FETCH_RETRIEVAL_NOTE;
+    }
+  }
   const url = new URL(target.url);
   const arxivId = url.hostname === "arxiv.org"
     ? url.pathname.match(/^\/(abs|html)\/(\d{4}\.\d{4,5})(?:v\d+)?\/?$/) : null;
@@ -50,6 +62,7 @@ export async function fetchDiscoveredResearchArticle(
     title: (section?.title || pageTitle || plainResearchText(target.title || "")).slice(0, 300),
     excerpt: content.slice(0, 1600),
     publishedAt,
+    ...(retrievalNote ? { retrievalNote } : {}),
     contentProvenance: section ? "public_section" : abstractOnly ? "abstract" : "article",
     ...(content.length >= 500 ? { content } : {}),
     contentType: "article",
@@ -69,7 +82,7 @@ async function includeResearchBackfills(
   const warnings = collection.warning ? [collection.warning] : [];
   for (const raw of source.backfillUrls) {
     try {
-      const url = canonicalResearchUrl(assertPublicResearchUrl(raw, source.kind === "search" ? undefined : sourceHosts(source)).href);
+      const url = canonicalResearchUrl(assertPublicResearchUrl(raw, source.kind === "search" ? undefined : sourceArticleHosts(source)).href);
       if (!existing.has(url) && !pending.has(url)) pending.set(url, { url });
     } catch {
       warnings.push("A configured original-source backfill URL was rejected as nonpublic or outside the approved publisher.");
@@ -237,6 +250,8 @@ export async function collectDiscoveredResearchSource(
       if (!source.backfillUrls?.length) throw error;
       collection = { items: [], warning: `Source entry point failed (${error instanceof Error ? error.message : "unreadable response"}); explicitly configured original URLs remain available for collection.` };
     }
+    if (source.kind === "rss" && source.feedUrl && source.hydratePublishedWindowOnly)
+      collection.items = collection.items.filter(item => item.publishedAt !== null && item.publishedAt >= windowStart && item.publishedAt <= windowEnd);
     return includeResearchBackfills(source, collection, Boolean(options.deferArticleFetch), windowEnd);
   }
   const queries = source.discoveryQueries ?? [];

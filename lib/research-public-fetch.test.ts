@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { collectDiscoveredResearchSource } from './research-discovery';
+import { collectDiscoveredResearchSource, fetchDiscoveredResearchArticle } from './research-discovery';
 import { fetchFreePublicWatchHtml } from './research-public-fetch';
 import type { ResearchSourceSeed } from './research-types';
 
@@ -121,4 +121,81 @@ it('reports rejected direct redirect hostnames without paths, queries or credent
   expect(error).toBeInstanceOf(Error);
   expect((error as Error).message).toContain('host: foreign.example');
   for (const privateValue of ['user:', 'private-password', 'private-path', 'private-query']) expect((error as Error).message).not.toContain(privateValue);
+});
+
+
+it.each([undefined, '2025-09-01T10:00:00Z'])('hydrates an explicitly approved RSS original with free HTML and original date: %s', async date => {
+  const rssSource: ResearchSourceSeed = { ...source, kind: 'rss', url: 'https://feed.example/news', feedUrl: 'https://feed.example/rss', freeArticleFallback: true, trustedArticleHosts: ['publisher.example'] };
+  const fetcher = vi.fn(async (input: string | URL, options?: RequestInit) => {
+    if (String(input) === source.url) return new Response('', { status: 403 });
+    expect(String(input)).toBe(endpoint);
+    expect(options?.headers).toMatchObject({ 'X-Treg-Route-Max-Cost': '0', 'X-Treg-Route-Waterfall': '0' });
+    expect(JSON.parse(String(options?.body)).urls).toEqual([source.url]);
+    return Response.json({ results: [{ ...record(), text: html(date) }], errors: [] });
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const item = await fetchDiscoveredResearchArticle(rssSource, { url: source.url, title: 'Feed title' }, end);
+  expect(item).toMatchObject({ url: source.url, title: 'Original public framework', content: expect.stringContaining(quote), contentProvenance: 'article', publishedAt: date ? Date.parse(date) : null, retrievalNote: expect.stringContaining('free fetch') });
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
+it.each([401, 402, 429])('does not use an RSS fallback for access or rate limits: %s', async status => {
+  const fetcher = vi.fn(async () => new Response('', { status }));
+  vi.stubGlobal('fetch', fetcher);
+  await expect(fetchDiscoveredResearchArticle({ ...source, kind: 'rss', feedUrl: 'https://publisher.example/feed', freeArticleFallback: true }, { url: source.url }, end)).rejects.toThrow(`HTTP ${status}`);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+it('never self-authorizes a foreign RSS target or proxies a rejected publisher redirect', async () => {
+  const rssSource: ResearchSourceSeed = { ...source, kind: 'rss', feedUrl: 'https://publisher.example/feed', freeArticleFallback: true, trustedArticleHosts: ['blog.google'] };
+  const fetcher = vi.fn(async () => new Response(null, { status: 302, headers: { location: 'https://foreign.example/secret' } }));
+  vi.stubGlobal('fetch', fetcher);
+  await expect(fetchDiscoveredResearchArticle(rssSource, { url: 'https://foreign.example/article' }, end)).rejects.toThrow('outside the approved');
+  expect(fetcher).not.toHaveBeenCalled();
+  await expect(fetchDiscoveredResearchArticle(rssSource, { url: source.url }, end)).rejects.toThrow('Source redirect rejected');
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+it('keeps fallback disabled for RSS without explicit approval and for missing chapters', async () => {
+  const fetcher = vi.fn(async () => new Response('', { status: 403 }));
+  vi.stubGlobal('fetch', fetcher);
+  await expect(fetchDiscoveredResearchArticle({ ...source, kind: 'rss', feedUrl: 'https://publisher.example/feed' }, { url: source.url }, end)).rejects.toThrow('HTTP 403');
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  fetcher.mockImplementation(async () => new Response(html()));
+  await expect(collectDiscoveredResearchSource({ ...source, articleSectionHeading: 'Absent chapter' }, end - 1, end, new Set())).rejects.toThrow('chapter heading');
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
+it.each(['https://x.com/resource', 'https://publisher.example/login'])('does not proxy social or gated RSS pages: %s', url => {
+  const rssSource: ResearchSourceSeed = { ...source, url, kind: 'rss', feedUrl: `${new URL(url).origin}/feed`, freeArticleFallback: true };
+  const fetcher = vi.fn(async () => new Response('', { status: 403 }));
+  vi.stubGlobal('fetch', fetcher);
+  return expect(fetchDiscoveredResearchArticle(rssSource, { url }, end)).rejects.toThrow('HTTP 403');
+});
+
+
+it('accepts only the configured sibling publisher as an RSS free-fetch final host', async () => {
+  const rssSource: ResearchSourceSeed = { ...source, kind: 'rss', feedUrl: 'https://publisher.example/feed', freeArticleFallback: true, trustedArticleHosts: ['blog.google'] };
+  const fetcher = vi.fn(async (input: string | URL) => String(input) === source.url
+    ? new Response('', { status: 403 })
+    : Response.json({ results: [{ ...record(), final_url: 'https://blog.google/official-original', text: html('2026-10-28T10:00:00Z') }], errors: [] }));
+  vi.stubGlobal('fetch', fetcher);
+  const item = await fetchDiscoveredResearchArticle(rssSource, { url: source.url }, end);
+  expect(item).toMatchObject({ url: source.url, publishedAt: Date.parse('2026-10-28T10:00:00Z'), content: expect.stringContaining(quote) });
+  fetcher.mockImplementation(async (input: string | URL) => String(input) === source.url
+    ? new Response('', { status: 403 })
+    : Response.json({ results: [{ ...record(), final_url: 'https://news.blog.google/foreign-original' }], errors: [] }));
+  await expect(fetchDiscoveredResearchArticle(rssSource, { url: source.url }, end)).rejects.toThrow('approved source domains');
+});
+
+
+it('does not invent an extra www alias when an RSS entry uses a trusted article host', async () => {
+  const rssSource: ResearchSourceSeed = { ...source, kind: 'rss', feedUrl: 'https://publisher.example/feed', freeArticleFallback: true, trustedArticleHosts: ['blog.google'] };
+  const target = 'https://blog.google/official-original';
+  const fetcher = vi.fn(async (input: string | URL) => String(input) === target
+    ? new Response('', { status: 403 })
+    : Response.json({ results: [{ ...record(), url: target, final_url: 'https://www.blog.google/official-original' }], errors: [] }));
+  vi.stubGlobal('fetch', fetcher);
+  await expect(fetchDiscoveredResearchArticle(rssSource, { url: target }, end)).rejects.toThrow('approved source domains');
+  expect(fetcher).toHaveBeenCalledTimes(2);
 });

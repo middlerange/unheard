@@ -10,6 +10,7 @@ import {
   plainResearchText,
   readableResearchText,
   sourceHosts,
+  sourceArticleHosts,
   ResearchRateLimitError,
 } from "./research-collectors";
 import { matchResearchQuote } from "./research-model";
@@ -370,4 +371,24 @@ it("collects every returned feed entry beyond the old sixty-item cap", () => {
 it("discovers every matching article beyond both legacy source and forty-link caps", () => {
   const html = `<main>${Array.from({ length: 55 }, (_, i) => `<a href="/research/report-${i}">Detailed original research report ${i}</a>`).join("")}</main>`;
   expect(discoverResearchLinks(html, { ...source, articlePathPrefixes: ["/research/"], maxDiscoveryLinks: 1 })).toHaveLength(55);
+});
+
+
+it('trusts only explicit article hosts without widening the feed entry point', async () => {
+  const publisher = { ...source, feedUrl: 'https://example.com/feed', trustedArticleHosts: ['blog.google'] };
+  expect(sourceHosts(publisher).has('blog.google')).toBe(false);
+  expect(sourceArticleHosts(publisher).has('blog.google')).toBe(true);
+  const xml = `<rss><channel>${['blog.google', 'news.blog.google', 'foreign.example'].map(host => `<item><title>Original research</title><link>https://${host}/article</link></item>`).join('')}</channel></rss>`;
+  expect(parseResearchFeed(xml, publisher).map(item => item.url)).toEqual(['https://blog.google/article']);
+  const redirect = vi.fn(async () => new Response(null, { status: 302, headers: { location: 'https://blog.google/article' } }));
+  await expect(fetchResearchText(publisher.feedUrl, sourceHosts(publisher), redirect)).rejects.toThrow('Source redirect rejected');
+  let requests = 0;
+  const approved = vi.fn(async () => ++requests === 1
+    ? new Response(null, { status: 302, headers: { location: 'https://blog.google/article' } }) : new Response('Original publisher body'));
+  expect(await fetchResearchText(source.url, sourceArticleHosts(publisher), approved)).toBe('Original publisher body');
+  await expect(fetchResearchText(source.url, sourceArticleHosts(publisher), vi.fn(async () => new Response(null, { status: 302, headers: { location: 'https://news.blog.google/article' } })))).rejects.toThrow('Source redirect rejected');
+});
+
+it.each(['*.google', 'blog.google/path', 'blog.google?query=x', 'blog.google#fragment', 'blog.google:443', 'user@blog.google', '127.0.0.1', 'private.local'])('rejects non-exact trusted article host configuration: %s', host => {
+  expect(() => sourceArticleHosts({ ...source, trustedArticleHosts: [host] })).toThrow();
 });

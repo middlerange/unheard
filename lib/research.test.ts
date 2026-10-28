@@ -1343,7 +1343,7 @@ describe("research persistence and team isolation", () => {
         fits: profile.id === 'personal-linkedin', relevance: profile.id === 'personal-linkedin' ? 27 : profile.groupName === 'company' ? 30 : 8,
         reason: profile.id === 'personal-linkedin' ? 'A concrete independent product-builder decision fits this personal profile.' : 'This specific decision does not fit this profile’s captured selection remit.',
       })),
-      qualityComponents: { sourceSupport: 22, usefulDecision: 25, scopeHonesty: 14 },
+      qualityComponents: { sourceSupport: 'supported_bounded_claim', usefulDecision: 'concrete_decision', scopeHonesty: 'accurately_bounded' },
       summary: familyKey, contentAngle: `Inspect ${familyKey} before adopting this workflow.`,
       whyItMatters: 'A separate practical product-team decision.', limitations: 'A practitioner account; no measured uplift.',
     });
@@ -1380,7 +1380,7 @@ describe("research persistence and team isolation", () => {
       const firstId = await researchHash(`${team}:${itemId}`), secondId = await researchHash(`${team}:${itemId}:angle:preview-before-connection`);
       const first = await getRunResearchFindings(team, runIds[0]);
       expect(first.map(finding => finding.id).sort()).toEqual([firstId, secondId].sort());
-      expect(first.map(finding => finding.score)).toEqual([88, 88]);
+      expect(first.map(finding => finding.score)).toEqual([97, 97]);
       expect(first.map(finding => finding.evidence).sort()).toEqual(quotes.slice(0, 2).sort());
       expect((await processResearchJob({ operation: 'rank', runId: runIds[0] }))).toEqual({ sourceIds: [], done: true });
       expect(calls).toBe(1);
@@ -1403,7 +1403,7 @@ describe("research persistence and team isolation", () => {
       const newPrimaryId = await researchHash(`${team}:${itemId}:angle:publication-confirmation`);
       const second = await getRunResearchFindings(team, runIds[1]);
       expect(second.map(finding => finding.id).sort()).toEqual([newPrimaryId, secondId].sort());
-      expect(second.map(finding => finding.score)).toEqual([88, 88]);
+      expect(second.map(finding => finding.score)).toEqual([97, 97]);
       expect(second.find(finding => finding.id === newPrimaryId)).toMatchObject({ status: 'new', idea_id: null, family_key: 'publication-confirmation' });
       expect(second.find(finding => finding.id === secondId)?.created_at).toBe(first.find(finding => finding.id === secondId)?.created_at);
       expect(execute({ queries: [
@@ -1419,7 +1419,7 @@ describe("research persistence and team isolation", () => {
       const normalized = cached.flatMap((row: { value: string }) => researchEvidenceSchema.parse(JSON.parse(row.value)).findings)
         .flatMap((finding: ReturnType<typeof researchEvidenceSchema.parse>['findings'][number]) => [finding, ...(finding.additionalIdeas || [])]);
       expect(normalized).toHaveLength(4);
-      for (const assessment of normalized) expect(assessment).toMatchObject({ chosenProfileId: 'personal-linkedin', score: 88, profileFit: 'A concrete independent product-builder decision fits this personal profile.' });
+      for (const assessment of normalized) expect(assessment).toMatchObject({ chosenProfileId: 'personal-linkedin', score: 97, qualificationRubric: 'source_qualification_v1', profileFit: 'A concrete independent product-builder decision fits this personal profile.' });
       expect(calls).toBe(2);
     } finally {
       fetcher.mockRestore();
@@ -2127,6 +2127,69 @@ describe("research persistence and team isolation", () => {
     return runId;
   }
   const recoveredArticle = "The original practitioner describes a concrete onboarding decision and the implementation tradeoff. ".repeat(20);
+  it.each([
+    { sourceId: "openai-news", resume: false },
+    { sourceId: "google-deepmind-research", resume: true },
+    { sourceId: "ordinary", resume: true },
+  ])("filters only window-source legacy hydration queues using stored publication dates ($sourceId, resume:$resume)", async ({ sourceId, resume }) => {
+    const seed = sourceId === "ordinary"
+      ? RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl && !source.hydratePublishedWindowOnly)!
+      : RESEARCH_SOURCE_SEEDS.find(source => source.id === sourceId)!;
+    const team = `legacy-publication-${sourceId}`, runId = `${team}-run`, now = Date.now();
+    const base = new URL(seed.url).origin;
+    const rows = [
+      { name: "archive", date: now - 180 * 86_400_000 },
+      { name: "current", date: now - 1000 },
+      { name: "unknown", date: null },
+      { name: "future", date: now + 1000 },
+      { name: "backfill", date: null },
+      { name: "watch", date: now - 180 * 86_400_000 },
+    ].map(row => ({ ...row, url: `${base}/${team}-${row.name}` }));
+    const targets = rows.map(row => ({ url: row.url, title: row.name }));
+    const watch: ResearchSourceSeed = { id: `${team}-watch`, name: "Explicit reference", url: rows[5].url,
+      kind: "web", pageMode: "article", category: "research", enabled: true, notes: "Test reference", priority: 1 };
+    const progressId = `collection-progress:${runId}:${seed.id}`;
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)", params: [team, team, team] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp,source_count,source_ids) VALUES(?,?,'collect','collecting',1,?,'Product teams',2,?)", params: [runId, team, now, JSON.stringify([seed.id, watch.id])] },
+      ...rows.map(row => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at) VALUES(?,?,?,?,?,'',?,?)",
+        params: [`${team}-${row.name}`, team, seed.id, row.url, row.name, row.date, now - 500],
+      })),
+      { sql: "INSERT INTO research_cache(id,team_id,value,created_at) VALUES(?,?,?,?)", params: [`collection-backoff:${team}:${seed.id}`, team, JSON.stringify({ retryAtByHost: {}, targets }), now] },
+      ...(resume ? [{ sql: "INSERT INTO research_cache(id,team_id,value,created_at) VALUES(?,?,?,?)", params: [progressId, team, JSON.stringify({
+        urls: [], nextOffset: 0, count: 0, warning: null, articles: targets, articleOffset: 0,
+        deferredArticles: targets.filter(target => /-(archive|unknown|future)$/.test(target.url)).map(target => ({ ...target, retryAt: now - 1, reason: "Legacy deferred page" })),
+      }), now] }] : []),
+    ] });
+    const priorBackfills = seed.backfillUrls, fetched: string[] = [];
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      const url = String(input);
+      if (url === seed.feedUrl) return new Response("<rss><channel></channel></rss>");
+      expect(rows.some(row => row.url === url)).toBe(true);
+      fetched.push(url);
+      return new Response(`<main><h1>Original documented workflow</h1><p>${recoveredArticle}</p></main>`);
+    });
+    try {
+      seed.backfillUrls = [rows[4].url];
+      RESEARCH_SOURCE_SEEDS.push(watch);
+      let result = await processResearchJob({ operation: "collect", runId, sourceId: seed.id });
+      while ("pending" in result && result.pending) result = await processResearchJob({ operation: "collect", runId, sourceId: seed.id });
+      const expected = seed.hydratePublishedWindowOnly ? rows.filter(row => ["current", "backfill", "watch"].includes(row.name)) : rows;
+      expect(fetched.sort()).toEqual(expected.map(row => row.url).sort());
+      const saved = execute({ queries: [{ sql: "SELECT value FROM research_cache WHERE id=?", params: [progressId] }] })[0].results[0];
+      const queue = JSON.parse(saved.value);
+      if (seed.hydratePublishedWindowOnly) {
+        expect(queue.articles.map((target: { url: string }) => target.url).sort()).toEqual(expected.map(row => row.url).sort());
+        expect(queue.deferredArticles || []).toEqual([]);
+      }
+    } finally {
+      seed.backfillUrls = priorBackfills;
+      RESEARCH_SOURCE_SEEDS.splice(RESEARCH_SOURCE_SEEDS.indexOf(watch), 1);
+      fetcher.mockRestore();
+    }
+  }, 30_000);
+
   it("retains a throttled target, stops the host queue, and resumes after its saved cooldown", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
     const now = Date.now();
@@ -2333,6 +2396,64 @@ describe("research persistence and team isolation", () => {
       expect(fetcher).toHaveBeenCalledTimes(calls);
     } finally {
       fetcher.mockRestore();
+    }
+  }, 30_000);
+
+  it("keeps publication-window feeds out of paid ranking for newly collected archives while preserving exact watches", async () => {
+    const team = "publication-window-rank", runId = `${team}-run`, now = Date.now(), start = now - 86_400_000;
+    const guarded = RESEARCH_SOURCE_SEEDS.filter(source => source.hydratePublishedWindowOnly);
+    expect(guarded.map(source => source.id).sort()).toEqual(["google-deepmind-research", "openai-news"]);
+    const ordinary = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && !source.hydratePublishedWindowOnly)!;
+    const watches = RESEARCH_SOURCE_SEEDS.filter(source => source.kind === "web" && source.pageMode === "article").slice(0, 2);
+    expect(watches).toHaveLength(2);
+    const roster = [...guarded, ordinary, ...watches].map(source => source.id);
+    const quote = "The documented workflow preserves original context so a user can inspect the evidence before choosing the next action.";
+    const rows = [
+      { id: "window-openai-fresh", sourceId: "openai-news", url: "https://openai.com/news/fresh-test", date: now - 1000, body: true },
+      { id: "window-deepmind-boundary", sourceId: "google-deepmind-research", url: "https://deepmind.google/blog/boundary-test", date: start, body: true },
+      { id: "window-openai-archive-metadata", sourceId: "openai-news", url: "https://openai.com/news/archive-test", date: start - 1, body: false },
+      { id: "window-deepmind-archive-body", sourceId: "google-deepmind-research", url: "https://deepmind.google/blog/archive-test", date: now - 180 * 86_400_000, body: true },
+      { id: "window-openai-future", sourceId: "openai-news", url: "https://openai.com/news/future-test", date: now + 1, body: true },
+      { id: "window-deepmind-undated", sourceId: "google-deepmind-research", url: "https://deepmind.google/blog/undated-test", date: null, body: false },
+      { id: "window-ordinary-evergreen", sourceId: ordinary.id, url: new URL("ordinary-evergreen", ordinary.url).href, date: now - 180 * 86_400_000, body: true },
+      { id: "window-exact-dated-watch", sourceId: "openai-news", url: canonicalResearchUrl(watches[0].url), date: now - 180 * 86_400_000, body: true },
+      { id: "window-exact-undated-watch", sourceId: "google-deepmind-research", url: canonicalResearchUrl(watches[1].url), date: null, body: true },
+      { id: "window-unconfigured-watch-path", sourceId: "openai-news", url: `${canonicalResearchUrl(watches[0].url)}-other`, date: start - 1, body: false },
+    ];
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)", params: [team, team, team] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp,source_count,source_ids) VALUES(?,?,'scan','collecting',1,?,'Product practitioners',?,?)", params: [runId, team, now, roster.length, JSON.stringify(roster)] },
+      ...roster.map(sourceId => ({ sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: [`${runId}:${sourceId}`, runId, sourceId] })),
+      ...rows.map(row => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        params: [row.id, team, row.sourceId, row.url, row.id, quote, row.date, now - 500, row.body ? quote.repeat(8) : null, row.body ? "article" : "unknown"],
+      })),
+    ] });
+    const priorKey = process.env.ANTHROPIC_API_KEY, assessed: string[] = [];
+    process.env.ANTHROPIC_API_KEY = "test-publication-window-rank";
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      expect(String(url)).toBe("https://api.anthropic.com/v1/messages");
+      const request = JSON.parse(String(init?.body)), input = JSON.parse(request.messages[0].content);
+      expect(fixtureResearchSchema(request).properties.assessments).toBeUndefined();
+      expect(input.items).toHaveLength(1);
+      const item = input.items[0];
+      assessed.push(item.id);
+      return modelResponseFixture({ status: "completed", usage: { input_tokens: 1, output_tokens: 1 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ findings: [{
+        itemId: item.id, summary: "Inspect the source context before choosing a next action.", evidence: quote,
+        contentAngle: "Make original evidence visible beside a recommended priority.", whyItMatters: "A user can check the basis before accepting the suggestion.",
+        limitations: "A described method, not independent outcome proof.", familyKey: item.id, additionalIdeas: [], sectionChecks: [],
+        claimBasis: "described_method", profileChecks: [{ profileId: RESEARCH_AUDIENCE_ONLY_PROFILE_ID, fits: true, relevance: 25, reason: "A concrete product workflow decision." }],
+        qualityComponents: { sourceSupport: 23, usefulDecision: 25, scopeHonesty: 14 },
+      }] }) }] }] });
+    });
+    try {
+      await finishResearchRankJob(runId);
+      expect(assessed.sort()).toEqual(["window-openai-fresh", "window-deepmind-boundary", "window-ordinary-evergreen", "window-exact-dated-watch", "window-exact-undated-watch"].sort());
+      const [run] = execute({ queries: [{ sql: "SELECT diagnostics FROM research_runs WHERE id=?", params: [runId] }] })[0].results;
+      expect(JSON.parse(run.diagnostics)).toMatchObject({ eligibleCount: 5, freshCount: 2, evergreenCount: 2, directEvidenceCount: 5, screenedCount: 0, evidenceCount: 5 });
+    } finally {
+      fetcher.mockRestore();
+      if (priorKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = priorKey;
     }
   }, 30_000);
 
