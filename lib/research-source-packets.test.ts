@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parseResearchAudience } from './research-audience';
 import { researchSelectionAudience, RESEARCH_SELECTION_VIEW_VERSION } from './research-selection-audience';
-import { researchPacketsFromDefinitions, configuredResearchPacketDefinitions, reviewResearchSourcePackets, researchSourcePacketPolicy, researchSourcePacketPolicyContract, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW, RESEARCH_SOURCE_PACKET_V5_REVIEW, RESEARCH_SOURCE_PACKET_V6_REVIEW, ResearchSourcePacketPending, type ResearchPacketAccess } from './research-source-packets';
+import { researchPacketsFromDefinitions, configuredResearchPacketDefinitions, reviewResearchSourcePackets, researchSourcePacketPolicy, researchSourcePacketPolicyContract, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW, RESEARCH_SOURCE_PACKET_V5_REVIEW, RESEARCH_SOURCE_PACKET_V6_REVIEW, RESEARCH_SOURCE_PACKET_V7_REVIEW, ResearchSourcePacketPending, type ResearchPacketAccess } from './research-source-packets';
 import { researchHash } from './research-model';
 import type { ResearchSourcePacket } from './research-source-packet-model';
 import type { ResearchSourceSeed } from './research-types';
@@ -186,6 +186,60 @@ describe('durable source packet inference', () => {
     test.values.set(id, { ...attempt, normalizationOnly: true, reusedFrom: {} });
     await expect(reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, v6)).rejects.toThrow('authentic parent');
     expect(test.generate).toHaveBeenCalledTimes(2);
+  });
+  it('v7 appends one generic decision check to v4 while retaining v5 gates and all previous contracts', async () => {
+    const v4 = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW), v5 = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V5_REVIEW), v7 = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V7_REVIEW);
+    expect(await researchHash(JSON.stringify(researchSourcePacketPolicyContract(RESEARCH_SOURCE_PACKET_V6_REVIEW, 16384)))).toBe('531862e78069ceec9088b8a3db53ed6b61801f5b726f70a9d06194fdb2c7f516');
+    expect(v7.instructions.startsWith(v4.instructions + '\n\n')).toBe(true);
+    const added = v7.instructions.slice(v4.instructions.length + 2);
+    expect(added.split('\n')).toHaveLength(1);
+    expect(added).toContain('both the comparison and the method');
+    expect(added).toContain('all material steps, conditions, attribution and uncertainty');
+    expect(added).toContain('Do not force unrelated comparisons together');
+    expect(added).not.toMatch(/katelyn|authority|buyers|engagement|4p|google|benchmark/i);
+    expect(v7.schema).toBe(v5.schema); expect(v7.metadata).toBe(v5.metadata); expect(v7.normalize).toBe(v5.normalize);
+    expect(v7.reuseCompletedV4).toBeUndefined();
+    expect(researchSourcePacketPolicyContract(RESEARCH_SOURCE_PACKET_V7_REVIEW, 16384)).toEqual({
+      ...researchSourcePacketPolicyContract(RESEARCH_SOURCE_PACKET_V5_REVIEW, 16384), reviewVersion: RESEARCH_SOURCE_PACKET_V7_REVIEW, instructions: v7.instructions,
+    });
+    const raw = response(packet()); raw.findings.workflow.claim.summary = raw.findings.workflow.claim.summary.repeat(100);
+    Object.assign(raw.findings.workflow.claim, { empty_note: '' });
+    const result = await v7.normalize(raw, [packet()], ['personal']);
+    expect(result).toEqual(await v5.normalize(raw, [packet()], ['personal']));
+    expect(result.findings[0].summary).toBe(raw.findings.workflow.claim.summary); expect(result.findings[0].score).toBe(92);
+    for (const changed of [{ sourceSupport: 'unsupported' }, { usefulDecision: 'generic' }, { scopeHonesty: 'material_gap' }]) {
+      const failed = structuredClone(raw); Object.assign(failed.findings.workflow.qualityComponents, changed);
+      expect((await v7.normalize(failed, [packet()], ['personal'])).findings[0].score).toBeLessThan(70);
+    }
+    const wrongProfile = structuredClone(raw); wrongProfile.findings.workflow.profileChecks[0].profileId = 'unknown';
+    expect((await v7.normalize(wrongProfile, [packet()], ['personal'])).findings).toEqual([]);
+    const unknown = structuredClone(raw); Object.assign(unknown.findings.workflow.claim, { note: 'meaningful text' });
+    expect((await v7.normalize(unknown, [packet()], ['personal'])).findings).toEqual([]);
+  });
+  it('v7 requires its own fresh request beside every earlier policy and resumes only its own immutable receipt', async () => {
+    const test = harness(), versions = [undefined, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW, RESEARCH_SOURCE_PACKET_V5_REVIEW, RESEARCH_SOURCE_PACKET_V6_REVIEW];
+    const earlier = [];
+    for (const version of versions) earlier.push(await reviewResearchSourcePackets([packet()], test.access, researchSourcePacketPolicy(version)));
+    expect(test.generate).toHaveBeenCalledTimes(5);
+    const previous = [...test.values].map(([id, value]) => [id, JSON.stringify(value)]), v7 = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V7_REVIEW);
+    await expect(reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, v7)).rejects.toBeInstanceOf(ResearchSourcePacketPending);
+    expect(test.generate).toHaveBeenCalledTimes(5);
+    const next = await reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 1 } }, v7);
+    expect(test.generate).toHaveBeenCalledTimes(6); expect(next.acceptedIdeas).toHaveLength(1);
+    const [oldRequest] = test.generate.mock.calls[3] as unknown as [{ instructions: string; schema: unknown; data: unknown }];
+    const [newRequest] = test.generate.mock.calls[5] as unknown as [typeof oldRequest];
+    expect(newRequest.instructions).toBe(v7.instructions); expect(newRequest.instructions).not.toBe(oldRequest.instructions);
+    expect(newRequest.schema).toEqual(oldRequest.schema); expect(newRequest.data).toEqual(oldRequest.data);
+    expect(await reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, v7)).toEqual(next);
+    for (const [index, version] of versions.entries()) expect(await reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, researchSourcePacketPolicy(version))).toEqual(earlier[index]);
+    for (const [id, bytes] of previous) expect(JSON.stringify(test.values.get(id))).toBe(bytes);
+    const plan = [...test.values.values()].find((value: any) => value.request?.instructions === v7.instructions) as any;
+    const id = 'research-source-packet-attempt:v1:' + await researchHash(JSON.stringify(plan)), attempt = test.values.get(id) as any;
+    expect(attempt).not.toHaveProperty('normalizationOnly'); expect(attempt).not.toHaveProperty('reusedFrom');
+    expect([...test.values.keys()].filter(id => id.startsWith('research-source-packet-normalization:'))).toHaveLength(1);
+    test.values.set(id, { ...attempt, normalizationOnly: true, reusedFrom: {} });
+    await expect(reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, v7)).rejects.toThrow('authentic parent');
+    expect(test.generate).toHaveBeenCalledTimes(6);
   });
   it('expires an in-flight claim without repeating inference and keeps its terminal state against a late response', async () => {
     let resolve!: (value: unknown) => void, entered!: () => void;

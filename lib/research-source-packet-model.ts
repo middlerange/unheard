@@ -90,6 +90,10 @@ export const RESEARCH_SOURCE_PACKET_V6_INSTRUCTIONS = `${RESEARCH_SOURCE_PACKET_
 
 Before finishing, distinguish a capability's documented operating mechanism from setup, eligibility, rollout and control changes. Check whether selected frames omit a separately supported user-facing mechanism that matters to the configured reader job. If the captured sources document an independently useful input → selection or action → output or delivery chain, state the complete attributed mechanism in its own coherent selected frame with necessary product or mode conditions, own-source citations, and material uncertainty or inference limits; do not leave a necessary link only in evidence. Do not infer an undocumented link or outcome, invent causality, change profile remits or upgrade qualification categories. This check does not require a generic definition or an acceptance quota.`;
 
+export const RESEARCH_SOURCE_PACKET_V7_INSTRUCTIONS = `${RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS}
+
+Before finishing, inspect documented contrasts between different objectives, signals or approaches alongside any related concrete method. When both the comparison and the method are necessary for one useful decision for the configured reader, preserve them together in one coherent selected frame, including all material steps, conditions, attribution and uncertainty. Do not split necessary parts across separate frames or leave them only in citations. Do not force unrelated comparisons together, invent a connection or outcome, change profile remits or upgrade qualification categories. This check does not require an acceptance quota.`;
+
 export type ResearchSourcePacketSource = {
   id: string; url: string; publishedAt: number | null; firstSeen: number | null; content: string;
   passages?: ResearchSourceReviewPassage[];

@@ -10,7 +10,7 @@ import { canonicalResearchUrl } from './research-collectors';
 import {
   RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
   researchSourcePacketMetadata, researchSourcePacketSchema, normalizeResearchSourcePacket,
-  RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V6_INSTRUCTIONS,
+  RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V6_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V7_INSTRUCTIONS,
   researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2, normalizeResearchSourcePacketV4, normalizeResearchSourcePacketV5, canonicalizeResearchSourcePacketV5,
   type ResearchSourcePacket,
 } from './research-source-packet-model';
@@ -67,6 +67,7 @@ export const RESEARCH_SOURCE_PACKET_V3_REVIEW = 'reader-decision-synthesis-v3';
 export const RESEARCH_SOURCE_PACKET_V4_REVIEW = 'whole-reader-story-v4';
 export const RESEARCH_SOURCE_PACKET_V5_REVIEW = 'empty-claim-placeholders-v5';
 export const RESEARCH_SOURCE_PACKET_V6_REVIEW = 'mechanism-completeness-v6';
+export const RESEARCH_SOURCE_PACKET_V7_REVIEW = 'decision-completeness-v7';
 export const RESEARCH_SOURCE_PACKET_V5_NORMALIZER = 'structured-inference-v2+empty-unknown-frame-claim-fields-v1+complete-claim-text-v1';
 export const RESEARCH_SOURCE_PACKET_V4_NORMALIZER = 'structured-inference-v2+empty-content-angle-note-v1';
 export const RESEARCH_SOURCE_PACKET_V2_NORMALIZER = 'structured-inference-v2';
@@ -82,6 +83,8 @@ const defaultPolicy: ResearchSourcePacketPolicy = {
 };
 export function researchSourcePacketPolicy(reviewVersion?: string): ResearchSourcePacketPolicy {
   if (reviewVersion === undefined) return defaultPolicy;
+  if (reviewVersion === RESEARCH_SOURCE_PACKET_V7_REVIEW) return { ...researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW),
+    instructions: RESEARCH_SOURCE_PACKET_V7_INSTRUCTIONS, normalizerVersion: RESEARCH_SOURCE_PACKET_V5_NORMALIZER, normalize: normalizeResearchSourcePacketV5 };
   if (reviewVersion === RESEARCH_SOURCE_PACKET_V6_REVIEW) return { ...researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW),
     instructions: RESEARCH_SOURCE_PACKET_V6_INSTRUCTIONS, normalizerVersion: RESEARCH_SOURCE_PACKET_V5_NORMALIZER, normalize: normalizeResearchSourcePacketV5 };
   if (reviewVersion === RESEARCH_SOURCE_PACKET_V5_REVIEW) return { ...researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW),

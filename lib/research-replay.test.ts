@@ -44,6 +44,7 @@ it('rejects labels, expected outcomes, private URLs and unsupported inventory si
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), sourcePacketReviewVersion: 'coherent-synthesis-v2' }).success).toBe(false);
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), sourcePacketReviewVersion: 'unknown' }).success).toBe(false);
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), sourcePacketReviewVersion: 'mechanism-completeness-v6' }).success).toBe(false);
+  expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), sourcePacketReviewVersion: 'decision-completeness-v7' }).success).toBe(false);
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), sourcePacketReviewVersion: 'reader-decision-synthesis-v3' }).success).toBe(false);
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), artifactSourceIds: ['same', 'same'] }).success).toBe(false);
   expect(researchReplayItemSchema.safeParse({ ...item('x'), impressions: 12000 }).success).toBe(false);
@@ -461,7 +462,7 @@ describe('configured replay persistence and paid cache boundary', () => {
     }finally{vi.stubGlobal('fetch',originalFetch);}
   },60000);
   it('qualifies a packet after all source batches and reuses its exact proof without editorial writes',async()=>{
-    const firstId='a2000000-0000-4000-8000-000000000001',secondId='a2000000-0000-4000-8000-000000000002',v2Id='a2000000-0000-4000-8000-000000000003',v2RepeatId='a2000000-0000-4000-8000-000000000004',v3Id='a2000000-0000-4000-8000-000000000005',v3RepeatId='a2000000-0000-4000-8000-000000000006',v4Id='a2000000-0000-4000-8000-000000000007',v4RepeatId='a2000000-0000-4000-8000-000000000008',v5Id='a2000000-0000-4000-8000-000000000009',v5RepeatId='a2000000-0000-4000-8000-000000000010',v6Id='a2000000-0000-4000-8000-000000000011',v6RepeatId='a2000000-0000-4000-8000-000000000012';
+    const firstId='a2000000-0000-4000-8000-000000000001',secondId='a2000000-0000-4000-8000-000000000002',v2Id='a2000000-0000-4000-8000-000000000003',v2RepeatId='a2000000-0000-4000-8000-000000000004',v3Id='a2000000-0000-4000-8000-000000000005',v3RepeatId='a2000000-0000-4000-8000-000000000006',v4Id='a2000000-0000-4000-8000-000000000007',v4RepeatId='a2000000-0000-4000-8000-000000000008',v5Id='a2000000-0000-4000-8000-000000000009',v5RepeatId='a2000000-0000-4000-8000-000000000010',v6Id='a2000000-0000-4000-8000-000000000011',v6RepeatId='a2000000-0000-4000-8000-000000000012',v7Id='a2000000-0000-4000-8000-000000000013',v7RepeatId='a2000000-0000-4000-8000-000000000014';
     const sources=Array.from({length:7},(_,index)=>item('packet-source-'+index));
     const packet={id:'configured-public-workflow',primarySourceId:sources[0].id,sourceIds:[sources[0].id,sources[6].id],relationship:{type:'same_publisher',reason:'Two original documentation pages for one documented workflow.'}};
     const originalFetch=globalThis.fetch;let packetCalls=0;
@@ -478,9 +479,9 @@ describe('configured replay persistence and paid cache boundary', () => {
       return Response.json({id:'packet-transport',model:request.model,stop_reason:'tool_use',content:[{type:'tool_use',name:'submit_research',input:value}],usage:{input_tokens:10,output_tokens:10}});
     }));
     try{
-      for(const runId of[firstId,secondId,v2Id,v2RepeatId,v3Id,v3RepeatId,v4Id,v4RepeatId,v5Id,v5RepeatId,v6Id,v6RepeatId]){
-        const v6=runId===v6Id||runId===v6RepeatId,v5=runId===v5Id||runId===v5RepeatId,v4=runId===v4Id||runId===v4RepeatId,v3=runId===v3Id||runId===v3RepeatId,upgraded=runId===v2Id||runId===v2RepeatId||v3||v4||v5||v6;
-        const prepared=await researchReplayAction('team',{...prepare(runId,sources.length),sourcePackets:[packet],...(upgraded?{...(v5?{cacheOnly:true}:{}),sourcePacketReviewVersion:v6?'mechanism-completeness-v6':v5?'empty-claim-placeholders-v5':v4?'whole-reader-story-v4':v3?'reader-decision-synthesis-v3':'coherent-synthesis-v2'}:{})});
+      for(const runId of[firstId,secondId,v2Id,v2RepeatId,v3Id,v3RepeatId,v4Id,v4RepeatId,v5Id,v5RepeatId,v6Id,v6RepeatId,v7Id,v7RepeatId]){
+        const v7=runId===v7Id||runId===v7RepeatId,v6=runId===v6Id||runId===v6RepeatId,v5=runId===v5Id||runId===v5RepeatId,v4=runId===v4Id||runId===v4RepeatId,v3=runId===v3Id||runId===v3RepeatId,upgraded=runId===v2Id||runId===v2RepeatId||v3||v4||v5||v6||v7;
+        const prepared=await researchReplayAction('team',{...prepare(runId,sources.length),sourcePackets:[packet],...(upgraded?{...(v5?{cacheOnly:true}:{}),sourcePacketReviewVersion:v7?'decision-completeness-v7':v6?'mechanism-completeness-v6':v5?'empty-claim-placeholders-v5':v4?'whole-reader-story-v4':v3?'reader-decision-synthesis-v3':'coherent-synthesis-v2'}:{})});
         expect(prepared).toMatchObject({sourcePacketVersion:upgraded?'research-source-packet-v2':'research-source-packet-v1'});
         await researchReplayAction('team',{operation:'upload',runId,chunkIndex:0,items:sources});await researchReplayAction('team',{operation:'start',runId});
         let steps=0;while(await rankPending(runId))if(++steps>35)throw Error('Packet replay failed to finish');
@@ -489,7 +490,7 @@ describe('configured replay persistence and paid cache boundary', () => {
         expect(joined.packetProofs[0].sources[1]).toMatchObject({url:sources[6].url,publishedAt:1500,firstSeen:2200});
         if(upgraded)expect(joined.packetProofs[0]).toMatchObject({version:'research-source-packet-v1',qualificationPolicyVersion:'research-source-packet-v2'});
       }
-      expect(packetCalls).toBe(5);expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[secondId])[0].n).toBe(0);
+      expect(packetCalls).toBe(6);expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[secondId])[0].n).toBe(0);
       expect(query('SELECT operation,COUNT(*) n FROM research_usage WHERE run_id=? GROUP BY operation',[v2Id])).toEqual([{operation:'replay_packet_evidence',n:1}]);
       expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[v2RepeatId])[0].n).toBe(0);
       expect(query('SELECT operation,COUNT(*) n FROM research_usage WHERE run_id=? GROUP BY operation',[v3Id])).toEqual([{operation:'replay_packet_evidence',n:1}]);
@@ -499,6 +500,11 @@ describe('configured replay persistence and paid cache boundary', () => {
       for(const id of [v5Id,v5RepeatId])expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[id])[0].n).toBe(0);
       expect(query('SELECT operation,COUNT(*) n FROM research_usage WHERE run_id=? GROUP BY operation',[v6Id])).toEqual([{operation:'replay_packet_evidence',n:1}]);
       expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[v6RepeatId])[0].n).toBe(0);
+      expect(query('SELECT operation,COUNT(*) n FROM research_usage WHERE run_id=? GROUP BY operation',[v7Id])).toEqual([{operation:'replay_packet_evidence',n:1}]);
+      expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[v7RepeatId])[0].n).toBe(0);
+      const v7ConfigId=`research-replay:${v7Id}:config`,savedV7=JSON.parse(query('SELECT value FROM research_cache WHERE id=?',[v7ConfigId])[0].value);
+      query('UPDATE research_cache SET value=? WHERE id=?',[JSON.stringify({...savedV7,sourcePacketReviewVersion:'mechanism-completeness-v6'}),v7ConfigId]);query("UPDATE research_runs SET status='ranking' WHERE id=?",[v7Id]);
+      await expect(rankPending(v7Id)).rejects.toThrow('contract changed');query('UPDATE research_cache SET value=? WHERE id=?',[JSON.stringify(savedV7),v7ConfigId]);query("UPDATE research_runs SET status='completed' WHERE id=?",[v7Id]);
       const v6ConfigId=`research-replay:${v6Id}:config`,savedV6=JSON.parse(query('SELECT value FROM research_cache WHERE id=?',[v6ConfigId])[0].value);
       query('UPDATE research_cache SET value=? WHERE id=?',[JSON.stringify({...savedV6,sourcePacketReviewVersion:'empty-claim-placeholders-v5'}),v6ConfigId]);query("UPDATE research_runs SET status='ranking' WHERE id=?",[v6Id]);
       await expect(rankPending(v6Id)).rejects.toThrow('contract changed');query('UPDATE research_cache SET value=? WHERE id=?',[JSON.stringify(savedV6),v6ConfigId]);query("UPDATE research_runs SET status='completed' WHERE id=?",[v6Id]);
