@@ -8,6 +8,8 @@ import {
   discoverResearchLinks,
   fetchResearchText,
   parseResearchFeed,
+  parsePublicCaptionText,
+  fetchPublicYoutubeTranscript,
   plainResearchText,
   readableResearchText,
   sourceHosts,
@@ -28,13 +30,13 @@ const evidence = "A public research finding about customer adoption and product 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("public research evidence and publication dates", () => {
-  it("collects an entire late timestamp interval over14k without widening ordinary article capture", async () => {
+  it("preserves the full article and an entire late timestamp interval", async () => {
     const range = { start: "0:23:12", end: "0:35:01" };
     const selected = `<p>Guest [0:23:12]: A contrast begins here. ${"The original explanation remains intact. ".repeat(400).trim()}</p><p>Guest [0:34:22]: The later complete mechanism remains in the same public interval.</p>`;
     const html = `<meta property="article:published_time" content="2026-04-07T00:00:00Z"><title>A complete public interview | Publisher</title><main><h1>A complete public interview</h1><p>${"Earlier interview context. ".repeat(1000)}</p>${selected}<p>Host [0:35:01]: The next topic is excluded.</p></main>`;
     const fullSelected = articleResearchTimestampSection(html, range);
-    expect(articleResearchText(html)).toHaveLength(14_000);
-    expect(articleResearchText(html)).not.toContain("A contrast begins here");
+    expect(articleResearchText(html).length).toBeGreaterThan(40_000);
+    expect(articleResearchText(html)).toContain("A contrast begins here");
     expect(fullSelected.content.length).toBeGreaterThan(14_000);
     expect(fullSelected.content).toBe(selected.replace(/<\/p><p>/g, "\n\n").replace(/<\/?p>/g, ""));
     expect(fullSelected.content).toContain("Guest [0:23:12]");
@@ -92,7 +94,7 @@ describe("public research evidence and publication dates", () => {
     // Minimal DOM fixture from the public heading hierarchy, not a downloaded HTML snapshot.
     const observedSentence = "Dynamic prospecting uses Google AI to predict which feed items prospective buyers are looking for.";
     const html = `<title>About audience segments - Google Ads Help</title><main><h1>About audience segments</h1><h2>Different audience segment options</h2><p>${"Earlier audience definitions. ".repeat(1000)}</p><h2>About dynamic prospecting</h2><h3>How it works</h3><p>${observedSentence}</p><h4>Example</h4><p>A publisher example belongs to this section.</p><h2>About Target frequency</h2><p>This is a different mechanism.</p></main>`;
-    expect(articleResearchText(html)).not.toContain(observedSentence);
+    expect(articleResearchText(html)).toContain(observedSentence);
     const selected = articleResearchSection(html, configured.articleSectionHeading!);
     expect(selected.title).toBe("About audience segments — About dynamic prospecting");
     expect(selected.content).toContain(observedSentence);
@@ -104,16 +106,16 @@ describe("public research evidence and publication dates", () => {
     expect(() => articleResearchSection(html.replaceAll("About dynamic prospecting", "Removed public heading"), configured.articleSectionHeading!)).toThrow("not found");
   });
 
-  it("reads a late public chapter before applying the body cap and preserves its source wording", () => {
+  it("preserves a late public chapter and the complete source wording", () => {
     const chapter = '<h4>Evidence &amp; decisions</h4><p>The customer said “not yet”; keep that uncertainty.</p><ul><li>Observe the actual use.</li><li>Retain the contradictory result.</li></ul>';
     const html = `<title>An original interview | Publisher</title><main><h1>An original interview</h1><p>${"Earlier source material. ".repeat(2000)}</p>${chapter}<h4>Another chapter</h4><p>Unrelated later answer.</p></main>`;
-    expect(articleResearchText(html)).not.toContain("The customer said");
+    expect(articleResearchText(html)).toContain("The customer said");
     const result = articleResearchSection(html, "  Evidence   & decisions  ");
     expect(result).toMatchObject({ title: "An original interview — Evidence & decisions", heading: "Evidence & decisions" });
     expect(result.content).toBe(readableResearchText(chapter));
     expect(result.content).not.toContain("Earlier source material");
     expect(result.content).not.toContain("Unrelated later answer");
-    expect(articleResearchSection(`<main><h1>Original interview</h1><h2>Long chapter</h2><p>${"Long source paragraph. ".repeat(2000)}</p></main>`, "Long chapter").content).toHaveLength(14_000);
+    expect(articleResearchSection(`<main><h1>Original interview</h1><h2>Long chapter</h2><p>${"Long source paragraph. ".repeat(2000)}</p></main>`, "Long chapter").content).toBe(`Long chapter\n\n${"Long source paragraph. ".repeat(2000).trim()}`);
   });
 
   it.each([2, 3, 4])("ends a chapter at the next same-or-higher h%s while including its child headings", level => {
@@ -169,7 +171,7 @@ describe("public research evidence and publication dates", () => {
     expect(plainResearchText(body)).not.toContain("\n");
   });
 
-  it("preserves decoded heading, paragraph and list boundaries within the public body limit", () => {
+  it("preserves decoded heading, paragraph and list boundaries throughout the public body", () => {
     const headings = Array.from({ length: 6 }, (_, index) => `<h${index + 1}>Heading ${index + 1}</h${index + 1}>`).join("");
     const html = `${headings}<p>First &amp; accurate paragraph.</p><p>Second<br>line.</p><ol><li>First item.</li><li>Second item.</li></ol>`;
     const escaped = html.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -177,11 +179,42 @@ describe("public research evidence and publication dates", () => {
       "Heading 1", "Heading 2", "Heading 3", "Heading 4", "Heading 5", "Heading 6",
       "First & accurate paragraph.", "Second", "line.", "First item.", "Second item.",
     ]);
-    expect(readableResearchText(`<p>${"Evidence ".repeat(2000)}</p>`)).toHaveLength(14_000);
+    expect(readableResearchText(`<p>${"Evidence ".repeat(2000)}</p>`)).toBe("Evidence ".repeat(2000).trim());
     expect(readableResearchText("&lt;header&gt;&lt;h1&gt;Report heading&lt;/h1&gt;&lt;/header&gt;<p>Original finding.</p>")).toBe("Report heading\n\nOriginal finding.");
     expect(readableResearchText('&lt;script&gt;hidden&lt;/script&gt;<style>hidden</style><nav>hidden</nav><!--<h2>hidden</h2>--><p>Visible evidence.</p>')).toBe("Visible evidence.");
   });
 
+  it("retains late evidence in complete index articles and RSS/Atom bodies while keeping metadata concise", async () => {
+    const prefix = "Earlier source context. ".repeat(1800).trim();
+    const late = "The final section explains the customer signal, the documented decision and the actual handoff.";
+    const body = `<h1>Complete original report</h1><p>${prefix}</p><h2>Later mechanism</h2><p>${late}</p>`;
+    const expected = `Complete original report\n\n${prefix}\n\nLater mechanism\n\n${late}`;
+    const html = `<meta property="article:published_time" content="2026-10-22T10:00:00Z"><main>${body}</main>`;
+    const fetcher = vi.fn(async (input: string | URL) => new Response(String(input) === source.url
+      ? '<main><a href="/reports/complete">Complete original report</a></main>' : html));
+    vi.stubGlobal("fetch", fetcher);
+    const [collected] = await collectResearchSource(source);
+    const rss = `<rss><channel><item><title>Complete original report</title><link>https://example.com/reports/complete</link><pubDate>Thu, 22 Oct 2026 10:00:00 GMT</pubDate><description>Public teaser</description><content:encoded><![CDATA[${body}]]></content:encoded></item></channel></rss>`;
+    const atom = `<feed><entry><title>Complete original report</title><link href="https://example.com/reports/complete"/><published>2026-10-22T10:00:00Z</published><summary>Public teaser</summary><content><![CDATA[${body}]]></content></entry></feed>`;
+    for (const item of [collected, parseResearchFeed(rss, source)[0], parseResearchFeed(atom, source)[0]]) {
+      expect(item.content).toBe(expected); expect(item.content!.indexOf(late)).toBeGreaterThan(24_000);
+      expect(item.publishedAt).toBe(Date.parse("2026-10-22T10:00:00Z"));
+      expect(item.excerpt.length).toBeLessThanOrEqual(1600); expect(item.excerpt).not.toContain(late);
+    }
+    expect(collected.contentProvenance).toBe("article"); expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+  it("retains the final caption segments beyond24k through the public transcript fetch", async () => {
+    const prefix = "Earlier transcript context. ".repeat(1800).trim(), late = "The speaker ends with the full decision and its important limitation.";
+    const captions = JSON.stringify({ events: [{ segs: [{ utf8: prefix }] }, { segs: [{ utf8: late }] }] });
+    const expected = `${prefix} ${late}`;
+    expect(parsePublicCaptionText(captions)).toBe(expected);
+    const fetcher = vi.fn(async (input: string | URL) => new URL(String(input)).pathname === "/watch"
+      ? new Response('{"captionTracks":[{"baseUrl":"https://www.youtube.com/api/timedtext?v=abcdefghijk","languageCode":"en"}]}')
+      : new Response(captions, { headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetcher);
+    expect(await fetchPublicYoutubeTranscript("https://www.youtube.com/watch?v=abcdefghijk")).toBe(expected);
+    expect(expected.indexOf(late)).toBeGreaterThan(24_000); expect(fetcher).toHaveBeenCalledTimes(2);
+  });
   it("preserves HTTP 429 Retry-After without retrying inside the request", async () => {
     const fetcher = vi.fn(async () => new Response("Slow down", { status: 429, headers: { "retry-after": "120" } }));
     const error = await fetchResearchText("https://example.com/research", sourceHosts(source), fetcher).catch(error => error);

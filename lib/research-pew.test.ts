@@ -42,6 +42,16 @@ describe("scoped Pew publisher JSON", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it("retains late narrative and visible table evidence from the complete public JSON body", async () => {
+    const prefix = "Earlier survey context and sampling limitations. ".repeat(1000).trim();
+    const late = "The final comparison distinguishes the observed group from the reference population.";
+    const rendered = `<p>${prefix}</p><p>${late}</p><table><tr><td>Final cohort</td><td>73%</td></tr></table>`;
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json([published({ content: { protected: false, rendered } })])));
+    const result = await fetchPewResearchArticle(source, original, end);
+    expect(result.content).toBe(`${prefix}\n${late}\nFinal cohort 73%`);
+    expect(result.content!.indexOf(late)).toBeGreaterThan(24_000); expect(result.excerpt).toBe(result.content!.slice(0, 1600));
+    expect(result.publishedAt).toBe(Date.parse("2025-07-22T13:54:17Z")); expect(result.contentProvenance).toBe("article");
+  });
   it("uses the advertised posts collection for scoped report paths without expanding discovery", async () => {
     const url = "https://www.pewresearch.org/data-labs/2026/09/30/a-public-report";
     const fetcher = vi.fn(async (input: string | URL) => {

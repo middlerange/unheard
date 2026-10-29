@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { RESEARCH_SOURCE_SEEDS } from './research-sources';
+import { configuredResearchPacketDefinitions } from './research-source-packets';
 
 describe('research source selection', () => {
   it('retains the original registry lineage while keeping competitor and community collection opt-in', () => {
@@ -131,9 +132,27 @@ describe('research source selection', () => {
 it('restricts feed hydration and free fetch to their reviewed publisher and section watches', () => {
   const ids = ['google-deepmind-research', 'openai-news'];
   expect(RESEARCH_SOURCE_SEEDS.filter(source => source.hydratePublishedWindowOnly).map(source => source.id).sort()).toEqual(ids);
-  expect(RESEARCH_SOURCE_SEEDS.filter(source => source.freeArticleFallback).map(source => source.id).sort()).toEqual(['google-ads-audience-signals-reference', 'google-ads-dynamic-prospecting', 'google-deepmind-research', 'google-demand-gen-lookalike-constraint-reference', 'google-demand-gen-lookalike-mode-reference', 'google-demand-gen-original-cases', 'openai-news']);
+  expect(RESEARCH_SOURCE_SEEDS.filter(source => source.freeArticleFallback).map(source => source.id).sort()).toEqual(['google-ads-audience-signals-reference', 'google-ads-dynamic-prospecting', 'google-deepmind-research', 'google-demand-gen-lookalike-constraint-reference', 'google-demand-gen-lookalike-mode-reference', 'google-demand-gen-original-cases', 'growthmemo-personal-ipo-summit-reference', 'openai-news']);
   expect(RESEARCH_SOURCE_SEEDS.find(source => source.id === 'google-ads-dynamic-prospecting')).toMatchObject({
     kind: 'web', pageMode: 'article', articleSectionHeading: 'About dynamic prospecting', freeArticleFallback: true,
   });
   expect(RESEARCH_SOURCE_SEEDS.filter(source => source.trustedArticleHosts?.length).map(source => [source.id, source.trustedArticleHosts])).toEqual([['google-deepmind-research', ['blog.google']]]);
+});
+
+
+it('keeps an enabled public organizer watch separate from its unvalidated practitioner-reference packet', () => {
+  const seed = RESEARCH_SOURCE_SEEDS.find(source => source.id === 'growthmemo-personal-ipo-summit-reference')!;
+  expect(seed).toMatchObject({ enabled: true, kind: 'web', pageMode: 'article', freeArticleFallback: true, freeArticleFallbackOnRedirect: true });
+  expect(seed.url).toBe('https://www.newslettergrowthmemo.com/p/every-speaker-takeaway-personal-ipo-summit');
+  expect(seed.artifactReview).toBeUndefined(); expect(seed.articleSectionHeading).toBeUndefined(); expect(seed.articleTimestampRange).toBeUndefined();
+  expect(seed.referencePacket).toMatchObject({ enabled: false, sourceIds: [seed.id, 'reference-268173540fbd'], relationship: { type: 'configured_reference' } });
+  const member = RESEARCH_SOURCE_SEEDS.find(source => source.id === 'reference-268173540fbd')!;
+  const localSeeds = [seed, member], activeIds = localSeeds.map(source => source.id);
+  const items = localSeeds.map((source, index) => ({ id: 'fixture-' + index, sourceId: source.id, url: source.url,
+    publishedAt: 1000, discoveredAt: 2000, content: 'A synthetic unit-test fixture for public reference availability and source routing. '.repeat(10) }));
+  expect(configuredResearchPacketDefinitions(localSeeds, items, ['fixture-0'], activeIds, 3000).definitions).toEqual([]);
+  const enabledOnlyLocally = [{ ...seed, referencePacket: { ...seed.referencePacket!, enabled: true } }, member];
+  expect(configuredResearchPacketDefinitions(enabledOnlyLocally, items, ['fixture-0'], activeIds, 3000).definitions[0])
+    .toMatchObject({ id: seed.referencePacket!.id, primarySourceId: 'fixture-0', sourceIds: ['fixture-0', 'fixture-1'], relationship: seed.referencePacket!.relationship });
+  expect(seed.referencePacket!.enabled).toBe(false);
 });

@@ -351,7 +351,7 @@ async function generateDraft(
       (item.content_type === "video" && item.transcript_status !== "available")
     )
       throw new ResearchDraftValidationError("Full source evidence is unavailable for this draft");
-    const sourceContent = item.content.slice(0, 14000);
+    const sourceContent = item.content;
     const originals = await getDraftResearchFindings(run.team_id, priorDrafts);
     const originalPriorDrafts = priorDrafts.map(draft => {
       const original = originals.get(`${draft.runId}:${draft.findingId}`);
@@ -370,14 +370,14 @@ async function generateDraft(
       eq(research_items.team_id, run.team_id), inArray(research_items.id, relatedIds),
     )).all() : [];
     const supportingItem = relatedItems.find(candidate => candidate.canonical_url !== finding.url
-      && candidate.content && candidate.content.slice(0, 14000).trim() !== sourceContent.trim()
+      && candidate.content && candidate.content.trim() !== sourceContent.trim()
       && candidate.published_at !== null && candidate.published_at <= run.created_at
       && (candidate.content_type !== "video" || candidate.transcript_status === "available")
-      && matchResearchQuote(candidate.content.slice(0, 14000), bundled!.items.find(member => member.itemId === candidate.id)!.evidence));
+      && matchResearchQuote(candidate.content, bundled!.items.find(member => member.itemId === candidate.id)!.evidence));
     const supportingSources = supportingItem?.content ? [{
       url: supportingItem.canonical_url, title: supportingItem.title,
       publishedAt: new Date(supportingItem.published_at!).toISOString(),
-      content: supportingItem.content.slice(0, 14000), contentProvenance: supportingItem.content_provenance,
+      content: supportingItem.content, contentProvenance: supportingItem.content_provenance,
     }] : [];
     const proposedInput = {
       ...noveltyContext,

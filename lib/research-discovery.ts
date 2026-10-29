@@ -56,7 +56,7 @@ export async function fetchDiscoveredResearchArticle(
     ? html.match(/<article\b[^>]*class=["'][^"']*\bmarkdown-body\b[^"']*["'][^>]*>[\s\S]*?<\/article>/i)?.[0] : undefined;
   const section = source.articleTimestampRange !== undefined ? articleResearchTimestampSection(html, source.articleTimestampRange)
     : source.articleSectionHeading !== undefined ? articleResearchSection(html, source.articleSectionHeading) : null;
-  const content = section?.content ?? (abstractOnly ? researchAbstractText(html) : articleResearchText(repositoryReadme || html)).slice(0, 14_000);
+  const content = section?.content ?? (abstractOnly ? researchAbstractText(html) : articleResearchText(repositoryReadme || html));
   const heading = arxivId
     ? html.match(/<h1\b[^>]*class=["'][^"']*\b(?:title|ltx_title_document)\b[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i)?.[1]
     : articleResearchTitle(repositoryReadme || html);

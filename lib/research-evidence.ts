@@ -24,7 +24,7 @@ export async function hydrateFreshResearchEvidence(
       try {
         const content = articleResearchText(
           await fetchResearchText(item.url, sourceHosts(source)),
-        ).slice(0, 14_000);
+        );
         if (content.length < 500) return;
         item.content = content;
         item.contentProvenance = "article";

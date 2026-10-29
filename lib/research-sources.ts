@@ -1060,7 +1060,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "enabled": true,
     "priority": 1,
     "maxDiscoveryLinks": 12,
-    "notes": "Narrow weekly episode index verified 26 October 2026, traced from successful social clips. Collect public episode text: some pages contain transcripts, others only key takeaways and chapters. Use only the readable portion, not unseen audio or a claimed complete transcript; article collection is bounded to 14000 characters. Prefer first-hand discovery, activation, retention, positioning and AI-product case studies; filter career, event and training promotion. Deduplicate clips and YouTube uploads against the same interview; preserve original episode dates. The broad Mind the Product blog remains opt-in."
+    "notes": "Narrow weekly episode index verified 26 October 2026, traced from successful social clips. Collect public episode text: some pages contain transcripts, others only key takeaways and chapters. Use only the readable portion, not unseen audio or a claimed complete transcript; retain the complete readable text while preserving the distinction between a full transcript and publisher takeaways. Prefer first-hand discovery, activation, retention, positioning and AI-product case studies; filter career, event and training promotion. Deduplicate clips and YouTube uploads against the same interview; preserve original episode dates. The broad Mind the Product blog remains opt-in."
   },
   {
     "id": "parlance-labs-evaluations",
@@ -1702,7 +1702,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "category": "practitioner",
     "enabled": true,
     "priority": 2,
-    "notes": "Collect the complete public transcript interval 0:23:12 to 0:35:01 before applying article-prefix limits. These exact publisher timestamps cover the entertaining-versus-substantive-content discussion and the later repeated authority mechanism; they do not prove client acquisition outcomes. Fail closed if either boundary is absent or ambiguous. Preserve the original episode publication date and actual first observation. This known public section establishes reference coverage, not independent discovery or a complete episode transcript."
+    "notes": "Collect the complete public transcript interval 0:23:12 to 0:35:01 using the publisher timestamp boundaries. These exact publisher timestamps cover the entertaining-versus-substantive-content discussion and the later repeated authority mechanism; they do not prove client acquisition outcomes. Fail closed if either boundary is absent or ambiguous. Preserve the original episode publication date and actual first observation. This known public section establishes reference coverage, not independent discovery or a complete episode transcript."
   },
   {
     "id": "reference-665e44daf7ae",
@@ -2261,5 +2261,27 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "enabled": true,
     "priority": 1,
     "notes": "Publisher Ads and Commerce feed for dated advertising workflows, audience capabilities, measurement and conversion updates. Preserve actual publication dates, attribution and rollout limits; vendor performance claims do not establish independent effectiveness. Native publisher-feed collection and dated entries have been verified; individual article bodies may still be unavailable. Known-feed connection does not establish complete web coverage or historical blind discovery."
+  },
+  {
+    "id": "growthmemo-personal-ipo-summit-reference",
+    "name": "Newsletter Growth Memo — Personal IPO Summit takeaways",
+    "url": "https://www.newslettergrowthmemo.com/p/every-speaker-takeaway-personal-ipo-summit",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "freeArticleFallback": true,
+    "freeArticleFallbackOnRedirect": true,
+    "referencePacket": {
+      "id": "personal-ipo-summit-and-practitioner-interview",
+      "enabled": false,
+      "sourceIds": ["growthmemo-personal-ipo-summit-reference", "reference-268173540fbd"],
+      "relationship": {
+        "type": "configured_reference",
+        "reason": "An original summit-organizer takeaway report names Katelyn Bourgoin among separately attributed speakers; an original Exit Five interview features the same practitioner. Preserve each speaker's attribution, original publication and reported scope. The pairing permits editorial comparison, not a claim of shared outcomes, creator authorship or social-post derivation."
+      }
+    },
+    "notes": "Original event organizer's written takeaways, dated June 4, 2026. Preserve individual speaker attribution: the organizer's summaries are not verified verbatim speaker transcripts. Retain actual publication and first observation, and distinguish practitioner positions from measured outcomes. The ordinary article body limit may exclude later sessions; do not claim a captured prefix is the complete event or article. Related-reference qualification remains disabled pending validation. Known-page backfill is not historical blind discovery."
   }
 ];

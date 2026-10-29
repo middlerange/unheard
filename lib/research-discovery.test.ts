@@ -15,6 +15,18 @@ function article(date?: string) {
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 beforeEach(() => vi.stubEnv("TREG_TOKEN", ""));
 describe("topic-driven public discovery", () => {
+  it.each(["discovered", "direct-watch"])("retains the full late mechanism for a %s article", async mode => {
+    const url = "https://research.example/reports/complete", prefix = "Earlier public report context. ".repeat(1400).trim();
+    const late = "The final section identifies the input, actual selection and delivered output, with its limitation.";
+    const html = `<meta property="article:published_time" content="2026-10-23T10:00:00Z"><main><h1>Complete public report</h1><p>${prefix}</p><h2>Late mechanism</h2><p>${late}</p></main>`;
+    const fetcher = vi.fn(async () => new Response(html)); vi.stubGlobal("fetch", fetcher);
+    const item = mode === "discovered" ? await fetchDiscoveredResearchArticle(source, { url }, end)
+      : (await collectDiscoveredResearchSource({ ...source, kind: "web", url, pageMode: "article" }, start, end, new Set(), { deferArticleFetch: true })).items[0];
+    expect(item.content).toBe(`Complete public report\n\n${prefix}\n\nLate mechanism\n\n${late}`);
+    expect(item.content!.indexOf(late)).toBeGreaterThan(24_000); expect(item.excerpt.length).toBeLessThanOrEqual(1600);
+    expect(item.publishedAt).toBe(Date.parse("2026-10-23T10:00:00Z")); expect(item.contentProvenance).toBe("article");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
   it("checks original publication dates and bodies instead of trusting search recency or snippets", async () => {
     vi.stubEnv("TREG_TOKEN", "test-only-search-token");
     const fetcher = vi.fn(async (input: string | URL, options?: RequestInit) => {

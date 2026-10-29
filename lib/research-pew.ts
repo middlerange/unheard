@@ -85,7 +85,7 @@ export async function fetchPewResearchArticle(
   const title = typeof record.title?.rendered === "string" ? plainResearchText(record.title.rendered).slice(0, 300) : "";
   const publishedAt = publicationDate(record.date_gmt, windowEnd);
   if (!title || publishedAt === null) throw new Error("Pew JSON article lacks its original title or valid publication date");
-  const content = pewResearchBodyText(record.content.rendered, title).slice(0, 14_000);
+  const content = pewResearchBodyText(record.content.rendered, title);
   if (!hasUsablePewResearchBody(content, title)) throw new Error("Pew JSON article has no substantive body beyond publisher metadata");
   return {
     url: originalUrl, title, publishedAt, excerpt: content.slice(0, 1600), content,

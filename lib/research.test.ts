@@ -767,6 +767,37 @@ describe("research persistence and team isolation", () => {
       error: "test finished",
     });
   }, 20_000);
+  it("persists and passes the complete late article evidence through ranking hydration", async () => {
+    const team = "late-hydration", runId = "late-hydration-run", now = Date.now(), publishedAt = now - 1000;
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
+    const url = `${new URL(seed.url).origin}/late-hydration-article`;
+    const prefix = "Earlier public context with source attribution. ".repeat(1000).trim();
+    const late = "The final paragraph documents the customer input, the actual decision and the handoff limitation.";
+    const content = `Late source evidence\n\n${prefix}\n\n${late}`;
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)", params: [team, team, team] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'scan','collecting',7,0,?,'Product practitioners',1,?)", params: [runId, team, now, JSON.stringify([seed.id])] },
+      { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: [`${runId}-step`, runId, seed.id] },
+      { sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content_type,transcript_status) VALUES(?,?,?,?,?,?,?,?,?,?)", params: ['late-hydration-item', team, seed.id, url, 'Late source evidence', 'A concrete product workflow for evidence review.', publishedAt, now, 'article', 'not_applicable'] },
+    ] });
+    const previousKey = process.env.ANTHROPIC_API_KEY; process.env.ANTHROPIC_API_KEY = "test-late-hydration";
+    let inspectedCompleteBody = false;
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (target, init) => {
+      if (String(target) === url) return new Response(`<article><h1>Late source evidence</h1><p>${prefix}</p><p>${late}</p></article>`);
+      expect(String(target)).toBe("https://api.anthropic.com/v1/messages");
+      const request = JSON.parse(String(init?.body)), input = JSON.parse(request.messages[0].content);
+      if (fixtureResearchSchema(request).properties.assessments) return modelResponseFixture({ status: "completed", output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture({ itemIds: ['late-hydration-item'] }, input.items)) }] }] });
+      expect(input.items[0].content).toBe(content); expect(input.items[0].content.indexOf(late)).toBeGreaterThan(24_000);
+      inspectedCompleteBody = true;
+      throw new Error("Stop after complete hydration verification");
+    });
+    try {
+      await expect(finishResearchRankJob(runId)).rejects.toThrow("Stop after complete hydration verification");
+      expect(inspectedCompleteBody).toBe(true);
+      const stored = execute({ queries: [{ sql: "SELECT content,content_hash,content_provenance,published_at,collected_at FROM research_items WHERE id='late-hydration-item'" }] })[0].results[0];
+      expect(stored).toEqual({ content, content_hash: await researchHash(content), content_provenance: 'article', published_at: publishedAt, collected_at: now });
+    } finally { fetcher.mockRestore(); if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = previousKey; }
+  });
   it("routes usable public bodies directly to evidence while screening incomplete sources and retaining negative assessments", async () => {
     const team = "body-routing", runId = "body-routing-run", now = Date.now();
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;

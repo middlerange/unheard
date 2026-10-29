@@ -174,7 +174,7 @@ function fullReadableResearchText(raw: string) {
     .trim();
 }
 export function readableResearchText(raw: string) {
-  return fullReadableResearchText(raw).slice(0, 14_000);
+  return fullReadableResearchText(raw);
 }
 export function parseResearchDate(
   raw: unknown,
@@ -620,7 +620,7 @@ export async function collectResearchSource(
   for (let start = 0; start < links.length; start += 4) {
     results.push(...await Promise.allSettled(links.slice(start, start + 4).map(async (url) => {
       const html = await fetchResearchText(url, sourceArticleHosts(source));
-      const content = articleResearchText(html).slice(0, 14_000);
+      const content = articleResearchText(html);
       return {
         url,
         title: articleResearchTitle(html),
@@ -693,8 +693,7 @@ export function parsePublicCaptionText(json: string) {
     .flatMap((event) => (event.segs || []).map((segment) => segment.utf8 || ""))
     .join(" ")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 24_000);
+    .trim();
 }
 export async function fetchPublicYoutubeTranscript(
   videoUrl: string,

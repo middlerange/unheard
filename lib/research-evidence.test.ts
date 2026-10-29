@@ -31,6 +31,16 @@ describe("fresh evidence before screening", () => {
     expect(original.content).toBeUndefined();
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
+  it("preserves the complete fetched article and its late evidence during feed hydration", async () => {
+    const prefix = "Earlier captured public context. ".repeat(1400).trim();
+    const late = "The final paragraph supplies the specific decision, outcome boundary and uncertainty.";
+    const content = `Original study\n\n${prefix}\n\n${late}`;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`<main><h1>Original study</h1><p>${prefix}</p><p>${late}</p></main>`)));
+    const original = item(), [result] = await hydrateFreshResearchEvidence([original], source, begin, end);
+    expect(result.content).toBe(content); expect(result.content!.indexOf(late)).toBeGreaterThan(24_000);
+    expect(result.excerpt).toBe(content.slice(0, 1600)); expect(result.publishedAt).toBe(original.publishedAt);
+    expect(result.contentProvenance).toBe("article"); expect(original.content).toBeUndefined();
+  });
   it("does not fetch undated, old, future, video or already readable items", async () => {
     const fetcher = vi.fn();
     vi.stubGlobal("fetch", fetcher);

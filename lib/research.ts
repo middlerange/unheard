@@ -1656,7 +1656,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       const html = await fetchResearchText(item.canonical_url, sourceHosts(source.kind === "search"
         ? { ...source, url: item.canonical_url, feedUrl: undefined } : source));
       const content = (item.content_provenance === "abstract"
-        ? researchAbstractText(html) : articleResearchText(html)).slice(0, 14_000);
+        ? researchAbstractText(html) : articleResearchText(html));
       if (content.length < 500) throw new Error("Insufficient article evidence");
       const contentHash = await researchHash(content);
       const contentProvenance = item.content_provenance === "abstract" ? "abstract" : "article";
