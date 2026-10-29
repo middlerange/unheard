@@ -132,10 +132,11 @@ describe('research source selection', () => {
 it('restricts feed hydration and free fetch to their reviewed publisher and section watches', () => {
   const ids = ['google-deepmind-research', 'openai-news'];
   expect(RESEARCH_SOURCE_SEEDS.filter(source => source.hydratePublishedWindowOnly).map(source => source.id).sort()).toEqual(ids);
-  expect(RESEARCH_SOURCE_SEEDS.filter(source => source.freeArticleFallback).map(source => source.id).sort()).toEqual(['creatorscience-katelyn-replay-reference', 'google-ads-audience-signals-reference', 'google-ads-dynamic-prospecting', 'google-deepmind-research', 'google-demand-gen-lookalike-constraint-reference', 'google-demand-gen-lookalike-mode-reference', 'google-demand-gen-original-cases', 'growthmemo-personal-ipo-summit-reference', 'openai-news']);
+  expect(RESEARCH_SOURCE_SEEDS.filter(source => source.freeArticleFallback).map(source => source.id).sort()).toEqual(['creatorscience-katelyn-replay-reference', 'google-ads-audience-signals-reference', 'google-ads-dynamic-prospecting', 'google-deepmind-research', 'google-demand-gen-lookalike-constraint-reference', 'google-demand-gen-lookalike-mode-reference', 'google-demand-gen-original-cases', 'google-display-dynamic-prospecting-setup', 'growthmemo-personal-ipo-summit-reference', 'openai-news']);
   expect(RESEARCH_SOURCE_SEEDS.find(source => source.id === 'google-ads-dynamic-prospecting')).toMatchObject({
-    kind: 'web', pageMode: 'article', articleSectionHeading: 'About dynamic prospecting', freeArticleFallback: true,
+    kind: 'web', pageMode: 'article', freeArticleFallback: true,
   });
+  expect(RESEARCH_SOURCE_SEEDS.find(source => source.id === 'google-ads-dynamic-prospecting')?.articleSectionHeading).toBeUndefined();
   expect(RESEARCH_SOURCE_SEEDS.filter(source => source.trustedArticleHosts?.length).map(source => [source.id, source.trustedArticleHosts])).toEqual([['google-deepmind-research', ['blog.google']]]);
 });
 

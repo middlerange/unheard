@@ -1521,12 +1521,34 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "url": "https://support.google.com/google-ads/answer/2497941?hl=en",
     "kind": "web",
     "pageMode": "article",
-    "articleSectionHeading": "About dynamic prospecting",
     "freeArticleFallback": true,
+    "freeArticleFallbackOnRedirect": true,
     "category": "research",
     "enabled": true,
     "priority": 1,
-    "notes": "Collect the publisher's About dynamic prospecting section before applying the article body limit; the earlier audience definitions can otherwise exclude this later section. This is a Google Ads feed-performance and user-behavior mechanism, not proof of outcomes or a GA4 predictive-audience integration. Preserve any explicit original publication date and actual first observation; otherwise retain an undated reference. A crawl or page update is not a launch."
+    "notes": "Capture the complete publisher article so delivery surfaces, audience-data context and the later dynamic-prospecting method remain together. The earlier section-only workaround omitted material channel and prior-search context. Preserve the distinction between remarketing and prospecting, campaign/feed prerequisites and original dates or unknown publication. This is a vendor-described mechanism, not proof of outcomes, absence of prior searches or a GA4 integration."
+  },
+  {
+    "id": "google-display-dynamic-prospecting-setup",
+    "name": "Google Ads — Display feed and dynamic prospecting setup",
+    "url": "https://support.google.com/google-ads/answer/6287125?hl=en",
+    "kind": "web",
+    "pageMode": "article",
+    "freeArticleFallback": true,
+    "freeArticleFallbackOnRedirect": true,
+    "category": "research",
+    "enabled": true,
+    "priority": 2,
+    "referencePacket": {
+      "id": "google-display-dynamic-prospecting-workflow",
+      "enabled": false,
+      "sourceIds": ["google-display-dynamic-prospecting-setup", "google-ads-dynamic-prospecting"],
+      "relationship": {
+        "type": "same_product",
+        "reason": "Official Google Ads references describe campaign and feed setup, an explicit step adding dynamic prospecting to that campaign, and the audience and feed-selection mechanism. Keep Display, Performance Max and App branches and remarketing versus prospecting distinct. Related documentation does not establish customer execution, effectiveness or interoperability with separate Analytics products."
+      }
+    },
+    "notes": "Public first-party setup guide with separate campaign-type branches and an explicit dynamic-prospecting feed step. Preserve actual feed and campaign prerequisites, publication unknown when absent and first observation. Do not infer that a person never searched previously or assert observed outcomes. Combined-reference routing stays disabled pending actual qualification."
   },
   {
     "id": "google-demand-generation-reference",
