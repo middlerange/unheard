@@ -2134,6 +2134,19 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "reference-2b1bd5928808",
+    "referencePacket": {
+      "id": "fyxer-setup-and-real-work-evaluation",
+      "enabled": false,
+      "sourceIds": [
+        "reference-2b1bd5928808",
+        "reference-5d5e651e782c",
+        "fyxer-real-work-evaluation-reference"
+      ],
+      "relationship": {
+        "type": "same_product",
+        "reason": "The product publisher's dashboard guide, setup checklist and assistant-selection article describe the same product and a general evaluation method. Keep third-party product descriptions separate. Shared authorship does not establish outcomes, interoperability or a publisher-prescribed combined experiment."
+      }
+    },
     "name": "Fyxer — public dashboard tour",
     "url": "https://docs.fyxer.com/get-started/dashboard-tour.md",
     "kind": "web",
@@ -2153,6 +2166,18 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "enabled": true,
     "priority": 2,
     "notes": "Publisher-indexed public original product guide. Current reference with unknown original publication date; record real first observation and actual body changes separately. Attribute described capabilities and workflow; do not infer measured effectiveness. Known-guide coverage is not blind discovery."
+  },
+  {
+    "id": "fyxer-real-work-evaluation-reference",
+    "name": "Fyxer — evaluating assistants on real work",
+    "url": "https://www.fyxer.com/blog/what-is-the-best-ai-assistant",
+    "kind": "web",
+    "pageMode": "article",
+    "freeArticleFallback": true,
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Publisher-owned selection and evaluation guide. Preserve its August 2026 publication date and actual first observation. Attribute product descriptions and trial criteria; do not treat vendor comparisons, promises or a proposed evaluation as measured results. Known-page backfill is not independent historical discovery."
   },
   {
     "id": "saastr-agent-oversight-reference",
