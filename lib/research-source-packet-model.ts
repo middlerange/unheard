@@ -223,6 +223,36 @@ export async function normalizeResearchSourcePacketV4(raw: unknown, packets: Res
   return normalizeResearchSourcePacketV2({ ...raw, findings }, packets, enabledProfileIds);
 }
 
+export function canonicalizeResearchSourcePacketV5(raw: unknown): { value: unknown; removedPaths: string[] } {
+  const removedPaths: string[] = [];
+  const empty = (value: unknown) => value === null || value === ''
+    || Array.isArray(value) && value.length === 0 || object(value) && Object.keys(value).length === 0;
+  const pointer = (key: string) => key.replace(/~/g, '~0').replace(/\//g, '~1');
+  const strip = (value: Record<string, unknown>, allowed: Set<string>, path: string) => Object.fromEntries(Object.entries(value).filter(([key, item]) => {
+    if (allowed.has(key) || !empty(item)) return true;
+    removedPaths.push(`${path}/${pointer(key)}`); return false;
+  }));
+  const frameKeys = new Set(['primarySourceId', 'evidenceCitations', 'relationshipSupport', 'relationshipExplanation', 'claimBasis', 'profileChecks', 'claim', 'familyKey', 'qualityComponents', 'additionalIdeas']);
+  const claimKeys = new Set(['summary', 'contentAngle', 'whyItMatters', 'limitations']);
+  const frame = (value: unknown, path: string): unknown => {
+    if (!object(value)) return value;
+    const next = strip(value, frameKeys, path);
+    if (object(next.claim)) next.claim = strip(next.claim, claimKeys, `${path}/claim`);
+    return next;
+  };
+  if (!object(raw) || !object(raw.findings)) return { value: raw, removedPaths };
+  const findings = Object.fromEntries(Object.entries(raw.findings).map(([id, assessment]) => {
+    const path = `/findings/${pointer(id)}`, primary = frame(assessment, path);
+    if (!object(primary) || !Array.isArray(primary.additionalIdeas)) return [id, primary];
+    return [id, { ...primary, additionalIdeas: primary.additionalIdeas.map((child, index) => frame(child, `${path}/additionalIdeas/${index}`)) }];
+  }));
+  return { value: { ...raw, findings }, removedPaths };
+}
+
+export async function normalizeResearchSourcePacketV5(raw: unknown, packets: ResearchSourcePacket[], enabledProfileIds: string[]): Promise<ResearchSourcePacketResult> {
+  return normalizeResearchSourcePacketV2(canonicalizeResearchSourcePacketV5(raw).value, packets, enabledProfileIds);
+}
+
 async function normalizePacket(raw: unknown, packets: ResearchSourcePacket[], enabledProfileIds: string[], policy: 'verbatim-v1' | 'structured-inference-v2'): Promise<ResearchSourcePacketResult> {
   if (!enabledProfileIds.length || new Set(enabledProfileIds).size !== enabledProfileIds.length || enabledProfileIds.some(id => !id)) throw new Error('Packet review requires the full unique publishing-profile roster');
   if (new Set(packets.map(packet => packet.id)).size !== packets.length) throw new Error('Packet review requires unique packet IDs');

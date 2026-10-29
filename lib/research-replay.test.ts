@@ -454,7 +454,7 @@ describe('configured replay persistence and paid cache boundary', () => {
     }finally{vi.stubGlobal('fetch',originalFetch);}
   },60000);
   it('qualifies a packet after all source batches and reuses its exact proof without editorial writes',async()=>{
-    const firstId='a2000000-0000-4000-8000-000000000001',secondId='a2000000-0000-4000-8000-000000000002',v2Id='a2000000-0000-4000-8000-000000000003',v2RepeatId='a2000000-0000-4000-8000-000000000004',v3Id='a2000000-0000-4000-8000-000000000005',v3RepeatId='a2000000-0000-4000-8000-000000000006',v4Id='a2000000-0000-4000-8000-000000000007',v4RepeatId='a2000000-0000-4000-8000-000000000008';
+    const firstId='a2000000-0000-4000-8000-000000000001',secondId='a2000000-0000-4000-8000-000000000002',v2Id='a2000000-0000-4000-8000-000000000003',v2RepeatId='a2000000-0000-4000-8000-000000000004',v3Id='a2000000-0000-4000-8000-000000000005',v3RepeatId='a2000000-0000-4000-8000-000000000006',v4Id='a2000000-0000-4000-8000-000000000007',v4RepeatId='a2000000-0000-4000-8000-000000000008',v5Id='a2000000-0000-4000-8000-000000000009',v5RepeatId='a2000000-0000-4000-8000-000000000010';
     const sources=Array.from({length:7},(_,index)=>item('packet-source-'+index));
     const packet={id:'configured-public-workflow',primarySourceId:sources[0].id,sourceIds:[sources[0].id,sources[6].id],relationship:{type:'same_publisher',reason:'Two original documentation pages for one documented workflow.'}};
     const originalFetch=globalThis.fetch;let packetCalls=0;
@@ -471,9 +471,9 @@ describe('configured replay persistence and paid cache boundary', () => {
       return Response.json({id:'packet-transport',model:request.model,stop_reason:'tool_use',content:[{type:'tool_use',name:'submit_research',input:value}],usage:{input_tokens:10,output_tokens:10}});
     }));
     try{
-      for(const runId of[firstId,secondId,v2Id,v2RepeatId,v3Id,v3RepeatId,v4Id,v4RepeatId]){
-        const v4=runId===v4Id||runId===v4RepeatId,v3=runId===v3Id||runId===v3RepeatId,upgraded=runId===v2Id||runId===v2RepeatId||v3||v4;
-        const prepared=await researchReplayAction('team',{...prepare(runId,sources.length),sourcePackets:[packet],...(upgraded?{sourcePacketReviewVersion:v4?'whole-reader-story-v4':v3?'reader-decision-synthesis-v3':'coherent-synthesis-v2'}:{})});
+      for(const runId of[firstId,secondId,v2Id,v2RepeatId,v3Id,v3RepeatId,v4Id,v4RepeatId,v5Id,v5RepeatId]){
+        const v5=runId===v5Id||runId===v5RepeatId,v4=runId===v4Id||runId===v4RepeatId,v3=runId===v3Id||runId===v3RepeatId,upgraded=runId===v2Id||runId===v2RepeatId||v3||v4||v5;
+        const prepared=await researchReplayAction('team',{...prepare(runId,sources.length),sourcePackets:[packet],...(upgraded?{...(v5?{cacheOnly:true}:{}),sourcePacketReviewVersion:v5?'empty-claim-placeholders-v5':v4?'whole-reader-story-v4':v3?'reader-decision-synthesis-v3':'coherent-synthesis-v2'}:{})});
         expect(prepared).toMatchObject({sourcePacketVersion:upgraded?'research-source-packet-v2':'research-source-packet-v1'});
         await researchReplayAction('team',{operation:'upload',runId,chunkIndex:0,items:sources});await researchReplayAction('team',{operation:'start',runId});
         let steps=0;while(await rankPending(runId))if(++steps>35)throw Error('Packet replay failed to finish');
@@ -489,6 +489,8 @@ describe('configured replay persistence and paid cache boundary', () => {
       expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[v3RepeatId])[0].n).toBe(0);
       expect(query('SELECT operation,COUNT(*) n FROM research_usage WHERE run_id=? GROUP BY operation',[v4Id])).toEqual([{operation:'replay_packet_evidence',n:1}]);
       expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[v4RepeatId])[0].n).toBe(0);
+      for(const id of [v5Id,v5RepeatId])expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?',[id])[0].n).toBe(0);
+      const derived=query("SELECT value FROM research_cache WHERE id LIKE 'research-source-packet-attempt:%'").map((row:any)=>JSON.parse(row.value)).filter((value:any)=>value.normalizationOnly);expect(derived).toHaveLength(1);expect(derived[0].reusedFrom.normalizerVersion).toBe('structured-inference-v2+empty-content-angle-note-v1');
       const v4ConfigId=`research-replay:${v4Id}:config`,savedV4=JSON.parse(query('SELECT value FROM research_cache WHERE id=?',[v4ConfigId])[0].value);
       query('UPDATE research_cache SET value=? WHERE id=?',[JSON.stringify({...savedV4,sourcePacketReviewVersion:'reader-decision-synthesis-v3'}),v4ConfigId]);query("UPDATE research_runs SET status='ranking' WHERE id=?",[v4Id]);
       await expect(rankPending(v4Id)).rejects.toThrow('contract changed');query('UPDATE research_cache SET value=? WHERE id=?',[JSON.stringify(savedV4),v4ConfigId]);query("UPDATE research_runs SET status='completed' WHERE id=?",[v4Id]);
@@ -561,6 +563,12 @@ describe('configured replay persistence and paid cache boundary', () => {
       const frozenV4=JSON.parse(query("SELECT value FROM research_cache WHERE id='research-packet-policy:normal-packet-v4-run'")[0].value);expect(frozenV4.reviewVersion).toBe('whole-reader-story-v4');expect(frozenV4.contractHash).not.toBe(frozenV3.contractHash);
       delete process.env.RESEARCH_PACKET_POLICY;
       expect((await cachedResearchSourcePackets(v4Run,packets,{remaining:0})).qualificationPolicyVersion).toBe('research-source-packet-v2');expect(packetCalls).toBe(4);
+      query("UPDATE research_runs SET status='completed' WHERE id='normal-packet-v4-run'");
+      process.env.RESEARCH_PACKET_POLICY='empty-claim-placeholders-v5';
+      query("INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp) VALUES('normal-packet-v5-run','normal-packet','scan','ranking',7,?,?)",[now,icp]);
+      const v5Run=query("SELECT * FROM research_runs WHERE id='normal-packet-v5-run'")[0];
+      expect((await cachedResearchSourcePackets(v5Run,packets,{remaining:0})).qualificationPolicyVersion).toBe('research-source-packet-v2');expect(packetCalls).toBe(4);
+      expect(JSON.parse(query("SELECT value FROM research_cache WHERE id='research-packet-policy:normal-packet-v5-run'")[0].value).reviewVersion).toBe('empty-claim-placeholders-v5');
       delete process.env.RESEARCH_PACKET_POLICY;
       expect((await cachedResearchSourcePackets(v3Run,packets,{remaining:0})).qualificationPolicyVersion).toBe('research-source-packet-v2');expect(packetCalls).toBe(4);
     }finally{
@@ -650,6 +658,40 @@ describe('configured replay persistence and paid cache boundary', () => {
     expect(outcomes.flatMap(r=>r.value.unavailableIds)).toHaveLength(10);
     expect(outcomes.flatMap(r=>r.value.input).every((r:any)=>r.content.length>=500)).toBe(true);
   },60000);
+  it.each(['screen', 'base'] as const)('terminates a cached-only %s miss without provider usage or paid attempt claims', async stage => {
+    const runId = stage === 'screen' ? 'd5000000-0000-4000-8000-000000000001' : 'd5000000-0000-4000-8000-000000000002';
+    const source = { ...item('cache-only-cold-' + stage), ...(stage === 'screen' ? { content: null } : {}) };
+    const beforeCalls = paidCalls + reviewCalls, beforeAttempts = query("SELECT COUNT(*) n FROM research_cache WHERE id LIKE 'research-%-attempt:%'")[0].n;
+    expect(await researchReplayAction('team', { ...prepare(runId), cacheOnly: true })).toMatchObject({ cacheOnly: true });
+    await researchReplayAction('team', { operation: 'upload', runId, chunkIndex: 0, items: [source] });
+    await researchReplayAction('team', { operation: 'start', runId });
+    expect(await rankPending(runId)).toBe(true); expect(await rankPending(runId)).toBe(false);
+    const status = await researchReplayStatus('team', runId);
+    expect(status.run).toMatchObject({ status: 'failed', input_tokens: 0, output_tokens: 0 });
+    expect(status.run.error).toContain('cached-only-miss'); expect(status.records.some(row => row.id.endsWith(':cached-only-miss'))).toBe(true);
+    expect(paidCalls + reviewCalls).toBe(beforeCalls); expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?', [runId])[0].n).toBe(0);
+    expect(query("SELECT COUNT(*) n FROM research_cache WHERE id LIKE 'research-%-attempt:%'")[0].n).toBe(beforeAttempts);
+    expect(await rankPending(runId)).toBe(false);
+    const configId = `research-replay:${runId}:config`, frozen = JSON.parse(query('SELECT value FROM research_cache WHERE id=?', [configId])[0].value);
+    query('UPDATE research_cache SET value=? WHERE id=?', [JSON.stringify({ ...frozen, cacheOnly: undefined }), configId]);
+    await expect(researchReplayAction('team', { operation: 'upload', runId, chunkIndex: 0, items: [source] })).rejects.toThrow('contract changed');
+    query('UPDATE research_cache SET value=? WHERE id=?', [JSON.stringify(frozen), configId]);
+  });
+  it('sets shared review budgets to zero before a cached-only current-depth miss can claim inference', async () => {
+    const firstId = 'd5000000-0000-4000-8000-000000000003', zeroId = 'd5000000-0000-4000-8000-000000000004', source = item('cache-only-warm-parents');
+    for (const [runId, pin] of [[firstId, {}], [zeroId, { cacheOnly: true, depthModel: 'claude-sonnet-5-5' }]] as const) {
+      await researchReplayAction('team', { ...prepare(runId), ...pin });
+      await researchReplayAction('team', { operation: 'upload', runId, chunkIndex: 0, items: [source] }); await researchReplayAction('team', { operation: 'start', runId });
+      const beforeCalls = paidCalls + reviewCalls, beforeAttempts = query("SELECT COUNT(*) n FROM research_cache WHERE id LIKE 'research-source-review-attempt:%'")[0].n;
+      let steps = 0; while (await rankPending(runId)) if (++steps > 12) throw Error('Cached-only replay failed to terminate');
+      if (runId === zeroId) {
+        expect((await researchReplayStatus('team', runId)).run.error).toContain('cached-only-miss');
+        expect(paidCalls + reviewCalls).toBe(beforeCalls);
+        expect(query("SELECT COUNT(*) n FROM research_cache WHERE id LIKE 'research-source-review-attempt:%'")[0].n).toBe(beforeAttempts);
+        expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?', [runId])[0].n).toBe(0);
+      }
+    }
+  });
   it('routes every item beyond300 over durable batches with no total quota and records absent bodies explicitly',async()=>{
     const id=runIds[2],items=Array.from({length:305},(_,n)=>item('many-'+n));await researchReplayAction('team',prepare(id,items.length));
     for(let n=0;n<items.length;n+=20)await researchReplayAction('team',{operation:'upload',runId:id,chunkIndex:n/20,items:items.slice(n,n+20)});

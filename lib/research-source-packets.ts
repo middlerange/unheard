@@ -11,7 +11,7 @@ import {
   RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
   researchSourcePacketMetadata, researchSourcePacketSchema, normalizeResearchSourcePacket,
   RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS,
-  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2, normalizeResearchSourcePacketV4,
+  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2, normalizeResearchSourcePacketV4, normalizeResearchSourcePacketV5, canonicalizeResearchSourcePacketV5,
   type ResearchSourcePacket,
 } from './research-source-packet-model';
 
@@ -65,6 +65,8 @@ type PacketResult = Awaited<ReturnType<typeof normalizeResearchSourcePacket>>;
 export const RESEARCH_SOURCE_PACKET_V2_REVIEW = 'coherent-synthesis-v2';
 export const RESEARCH_SOURCE_PACKET_V3_REVIEW = 'reader-decision-synthesis-v3';
 export const RESEARCH_SOURCE_PACKET_V4_REVIEW = 'whole-reader-story-v4';
+export const RESEARCH_SOURCE_PACKET_V5_REVIEW = 'empty-claim-placeholders-v5';
+export const RESEARCH_SOURCE_PACKET_V5_NORMALIZER = 'structured-inference-v2+empty-unknown-frame-claim-fields-v1';
 export const RESEARCH_SOURCE_PACKET_V4_NORMALIZER = 'structured-inference-v2+empty-content-angle-note-v1';
 export const RESEARCH_SOURCE_PACKET_V2_NORMALIZER = 'structured-inference-v2';
 export type ResearchSourcePacketPolicy = {
@@ -79,6 +81,8 @@ const defaultPolicy: ResearchSourcePacketPolicy = {
 };
 export function researchSourcePacketPolicy(reviewVersion?: string): ResearchSourcePacketPolicy {
   if (reviewVersion === undefined) return defaultPolicy;
+  if (reviewVersion === RESEARCH_SOURCE_PACKET_V5_REVIEW) return { ...researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW),
+    normalizerVersion: RESEARCH_SOURCE_PACKET_V5_NORMALIZER, normalize: normalizeResearchSourcePacketV5 };
   if (reviewVersion !== RESEARCH_SOURCE_PACKET_V2_REVIEW && reviewVersion !== RESEARCH_SOURCE_PACKET_V3_REVIEW && reviewVersion !== RESEARCH_SOURCE_PACKET_V4_REVIEW) throw new Error('Unknown source packet review policy');
   return { version: RESEARCH_SOURCE_PACKET_V2_VERSION, instructions: reviewVersion === RESEARCH_SOURCE_PACKET_V4_REVIEW ? RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS : reviewVersion === RESEARCH_SOURCE_PACKET_V3_REVIEW ? RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS : RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS,
     normalizerVersion: reviewVersion === RESEARCH_SOURCE_PACKET_V4_REVIEW ? RESEARCH_SOURCE_PACKET_V4_NORMALIZER : RESEARCH_SOURCE_PACKET_V2_NORMALIZER, qualificationPolicyVersion: RESEARCH_SOURCE_PACKET_V2_VERSION,
@@ -94,7 +98,8 @@ export function researchSourcePacketPolicyContract(reviewVersion: string, output
     sourceBindingVersion: RESEARCH_SOURCE_PACKET_VERSION, instructions: policy.instructions, schema,
     model: 'claude-sonnet-5-5', outputTokens, scoreThreshold: RESEARCH_POST_MIN_SCORE, rubric: 'source_qualification_v1' };
 }
-type Receipt = { version: string; planId: string; planHash: string; packetId: string; packetHash: string; nonce: string; startedAt: number } & (
+type NormalizationOrigin = { planId: string; planHash: string; attemptId: string; attemptHash: string; manifestId: string; rawHash: string; resultHash: string; normalizerVersion: string };
+type Receipt = { normalizationOnly?: true; reusedFrom?: NormalizationOrigin; removedPaths?: string[]; version: string; planId: string; planHash: string; packetId: string; packetHash: string; nonce: string; startedAt: number } & (
   { state: 'started' } | { state: 'completed'; completedAt: number; raw: unknown; rawHash: string; resultHash: string }
   | { state: 'failed' | 'indeterminate'; completedAt: number; reason: string }
 );
@@ -126,6 +131,37 @@ export async function reviewResearchSourcePackets(packets: ResearchSourcePacket[
     return { packet, metadata, request, plan, planHash, planId, attemptId };
   }));
   type Work = (typeof work)[number];
+  async function normalizationParent(job: Work) {
+    if (policy.normalizerVersion !== RESEARCH_SOURCE_PACKET_V5_NORMALIZER) return null;
+    const previousPolicy = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW);
+    const metadata = await previousPolicy.metadata(job.packet);
+    const request = { model: access.model, instructions: previousPolicy.instructions,
+      schema: previousPolicy.schema(job.packet, profileIds), data: { ...view, items: [{ ...metadata, reviewTransport: 'anthropic-tool-v1' }] } };
+    if (json(request) !== json(job.request)) throw Error('Packet normalization parent wire request changed');
+    const plan = { ...job.plan, request, normalizerVersion: previousPolicy.normalizerVersion };
+    const planHash = await researchHash(json(plan)), planId = `research-source-packet-plan:v1:${planHash}`;
+    const stored = await access.read(planId);
+    if (stored === null) return null;
+    if (json(stored) !== json(plan)) throw Error('Packet normalization parent plan changed');
+    const attemptId = `research-source-packet-attempt:v1:${planHash}`, previous = await access.read(attemptId) as Receipt | null;
+    if (!previous || previous.state !== 'completed') return null;
+    if (previous.normalizationOnly || previous.reusedFrom || previous.removedPaths
+      || previous.version !== previousPolicy.version || previous.planId !== planId || previous.planHash !== planHash
+      || previous.packetId !== job.packet.id || previous.packetHash !== job.metadata.packetHash || !previous.nonce
+      || !Number.isFinite(previous.startedAt) || previous.startedAt < 0 || previous.startedAt > now()
+      || !Number.isFinite(previous.completedAt) || previous.completedAt < previous.startedAt
+      || !Object.hasOwn(previous, 'raw') || previous.rawHash !== await researchHash(json(previous.raw))) throw Error('Packet normalization parent attempt changed');
+    const result = await previousPolicy.normalize(previous.raw, [job.packet], profileIds);
+    if (previous.resultHash !== await researchHash(stable(result))) throw Error('Packet normalization parent result changed');
+    const attemptHash = await researchHash(json(previous));
+    const manifest = { version: previousPolicy.version, teamId: access.context.teamId, packetId: job.packet.id,
+      packetHash: job.metadata.packetHash, planId, planHash, attemptId, attemptHash, terminalState: previous.state, result };
+    const manifestId = `research-source-packet-manifest:v1:${await researchHash(json(manifest))}`;
+    if (json(await access.read(manifestId)) !== json(manifest)) throw Error('Packet normalization parent manifest is missing or changed');
+    const reusedFrom: NormalizationOrigin = { planId, planHash, attemptId, attemptHash, manifestId,
+      rawHash: previous.rawHash, resultHash: previous.resultHash, normalizerVersion: RESEARCH_SOURCE_PACKET_V4_NORMALIZER };
+    return { previous, reusedFrom, removedPaths: canonicalizeResearchSourcePacketV5(previous.raw).removedPaths };
+  }
   async function receipt(job: Work) {
     const value = await access.read(job.attemptId) as Receipt | null;
     if (!value) return null;
@@ -137,12 +173,39 @@ export async function reviewResearchSourcePackets(packets: ResearchSourcePacket[
     if (value.state === 'completed' && (!Object.hasOwn(value, 'raw') || !value.rawHash || !value.resultHash)) throw Error('Packet attempt lacks response bindings');
     if ((value.state === 'failed' || value.state === 'indeterminate') && !value.reason) throw Error('Packet failure has no reason');
     if (value.state === 'indeterminate' && value.completedAt - value.startedAt < 120_000) throw Error('Packet indeterminate claim has not expired');
+    const normalizationId = `research-source-packet-normalization:v1:${job.planHash}`;
+    const marker = policy.normalizerVersion === RESEARCH_SOURCE_PACKET_V5_NORMALIZER ? await access.read(normalizationId) : null;
+    if (marker && !value.normalizationOnly) throw Error('Packet normalization receipt lost its origin');
+    if (value.normalizationOnly || value.reusedFrom || value.removedPaths) {
+      if (value.normalizationOnly !== true || value.state !== 'completed') throw Error('Packet normalization receipt has invalid origin');
+      const parent = await normalizationParent(job);
+      if (!parent || json(value.reusedFrom) !== json(parent.reusedFrom) || json(value.removedPaths) !== json(parent.removedPaths)
+        || value.rawHash !== parent.previous.rawHash || json(value.raw) !== json(parent.previous.raw)) throw Error('Packet normalization receipt differs from its authentic parent');
+      const normalization = { version: 'research-source-packet-normalization-v1', planId: job.planId, attemptId: job.attemptId,
+        normalizerVersion: RESEARCH_SOURCE_PACKET_V5_NORMALIZER, receiptHash: await researchHash(json(value)),
+        reusedFrom: value.reusedFrom, removedPaths: value.removedPaths, rawHash: value.rawHash, resultHash: value.resultHash };
+      if (marker && json(marker) !== json(normalization)) throw Error('Packet normalization receipt hash changed');
+      await immutable(normalizationId, normalization);
+    }
     return value;
   }
   async function finish(job: Work, expected: Receipt, terminal: Receipt) {
     await retryResearchStorage(() => access.save(job.attemptId, expected, terminal));
     const saved = await receipt(job);
     if (!saved || saved.state === 'started') throw Error('Packet terminal attempt was not saved');
+  }
+  if (policy.normalizerVersion === RESEARCH_SOURCE_PACKET_V5_NORMALIZER) for (const job of work) {
+    if (await receipt(job)) continue;
+    const parent = await normalizationParent(job);
+    if (!parent) continue;
+    const result = await policy.normalize(parent.previous.raw, [job.packet], profileIds);
+    const derived: Receipt = { version: policy.version, planId: job.planId, planHash: job.planHash,
+      packetId: job.packet.id, packetHash: job.metadata.packetHash, nonce: crypto.randomUUID(), startedAt: now(),
+      state: 'completed', completedAt: now(), raw: parent.previous.raw, rawHash: parent.previous.rawHash,
+      resultHash: await researchHash(stable(result)), normalizationOnly: true,
+      reusedFrom: parent.reusedFrom, removedPaths: parent.removedPaths };
+    await retryResearchStorage(() => access.claim(job.attemptId, derived));
+    if (!await receipt(job)) throw Error('Packet normalization receipt was not saved');
   }
   for (const job of work) {
     const previous = await receipt(job);

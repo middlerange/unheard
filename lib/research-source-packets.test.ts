@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parseResearchAudience } from './research-audience';
 import { researchSelectionAudience, RESEARCH_SELECTION_VIEW_VERSION } from './research-selection-audience';
-import { researchPacketsFromDefinitions, configuredResearchPacketDefinitions, reviewResearchSourcePackets, researchSourcePacketPolicy, researchSourcePacketPolicyContract, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW, ResearchSourcePacketPending, type ResearchPacketAccess } from './research-source-packets';
+import { researchPacketsFromDefinitions, configuredResearchPacketDefinitions, reviewResearchSourcePackets, researchSourcePacketPolicy, researchSourcePacketPolicyContract, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW, RESEARCH_SOURCE_PACKET_V5_REVIEW, ResearchSourcePacketPending, type ResearchPacketAccess } from './research-source-packets';
 import { researchHash } from './research-model';
 import type { ResearchSourcePacket } from './research-source-packet-model';
 import type { ResearchSourceSeed } from './research-types';
@@ -146,4 +146,55 @@ describe('durable source packet inference', () => {
     expect(expired.acceptedIdeas).toEqual([]); expect(expired.diagnostics[0].reason).toContain('indeterminate');
     resolve(response(packet())); expect((await first).acceptedIdeas).toEqual([]); expect(generate).toHaveBeenCalledTimes(1);
   });
+  it('v5 reuses an authenticated completed v4 raw receipt at zero budget and preserves all old bytes', async () => {
+    const raw = response(packet()); Object.assign(raw.findings.workflow.claim, { summary_note: '' });
+    Object.assign(raw.findings.workflow, { claim_note: null });
+    const test = harness(vi.fn(async () => raw)), v4 = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW);
+    const old = await reviewResearchSourcePackets([packet()], test.access, v4); expect(old.acceptedIdeas).toEqual([]);
+    const before = [...test.values].map(([id, value]) => [id, JSON.stringify(value)]), v5 = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V5_REVIEW);
+    expect(v5.instructions).toBe(v4.instructions); expect(v5.schema).toBe(v4.schema); expect(v5.metadata).toBe(v4.metadata);
+    const next = await reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, v5);
+    expect(next.acceptedIdeas).toHaveLength(1); expect(test.generate).toHaveBeenCalledTimes(1);
+    const attempt = [...test.values.values()].find((v: any) => v.normalizationOnly) as any;
+    expect(attempt).toMatchObject({ normalizationOnly: true, state: 'completed', raw });
+    expect(attempt.reusedFrom).toMatchObject({ rawHash: attempt.rawHash, normalizerVersion: v4.normalizerVersion });
+    expect(attempt.removedPaths).toEqual(['/findings/workflow/claim_note', '/findings/workflow/claim/summary_note']);
+    const parent = test.values.get(attempt.reusedFrom.attemptId) as any;
+    expect(attempt.reusedFrom.attemptHash).toBe(await researchHash(JSON.stringify(parent)));
+    expect(attempt.reusedFrom.resultHash).toBe(parent.resultHash);
+    for (const [id, value] of before) expect(JSON.stringify(test.values.get(id))).toBe(value);
+    expect(await reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, v5)).toEqual(next);
+    expect(await reviewResearchSourcePackets([packet()], test.access, v4)).toEqual(old); expect(test.generate).toHaveBeenCalledTimes(1);
+    const id = [...test.values].find(([, value]: any) => value.normalizationOnly)![0];
+    test.values.set(id, { ...attempt, removedPaths: [] });
+    await expect(reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, v5)).rejects.toThrow('authentic parent');
+  });
+  it.each(['plan', 'raw', 'result', 'manifest', 'source'])('v5 rejects changed authentic parent %s without a provider call', async mutation => {
+    const test = harness(), v4 = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW);
+    await reviewResearchSourcePackets([packet()], test.access, v4);
+    const [id, original] = [...test.values].find(([id]) => id.startsWith(mutation === 'plan' || mutation === 'source' ? 'research-source-packet-plan:' : mutation === 'manifest' ? 'research-source-packet-manifest:' : 'research-source-packet-attempt:'))!;
+    const changed = structuredClone(original) as any;
+    if (mutation === 'plan') changed.request.instructions += ' changed';
+    if (mutation === 'source') changed.packet.sources[0].content += ' changed';
+    if (mutation === 'raw') changed.raw.findings.workflow.claim.summary += ' changed';
+    if (mutation === 'result') changed.resultHash = 'changed';
+    if (mutation === 'manifest') changed.result.findings = [];
+    test.values.set(id, changed);
+    await expect(reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V5_REVIEW))).rejects.toThrow('normalization parent');
+    expect(test.generate).toHaveBeenCalledTimes(1);
+  });
+  it('v5 stays cold for a different body/audience/output budget and only makes a fresh call when budget permits', async () => {
+    const test = harness(); await reviewResearchSourcePackets([packet()], test.access, researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW));
+    const v5 = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V5_REVIEW);
+    const changedBody = packet(); changedBody.sources[0].content += ' A new documented observation.';
+    for (const [input, access] of [[changedBody, test.access], [packet(), { ...test.access, outputTokens: 17000 }],
+      [packet(), { ...test.access, context: { ...test.access.context, audience: { ...audience, icp: 'A different frozen audience.' } } }]] as const) {
+      await expect(reviewResearchSourcePackets([input], { ...access, budget: { remaining: 0 } }, v5)).rejects.toBeInstanceOf(ResearchSourcePacketPending);
+    }
+    expect(test.generate).toHaveBeenCalledTimes(1);
+    const cold = harness(), result = await reviewResearchSourcePackets([packet()], { ...cold.access, budget: { remaining: 1 } }, v5);
+    expect(result.acceptedIdeas).toHaveLength(1); expect(cold.generate).toHaveBeenCalledTimes(1);
+    expect([...cold.values.values()].some((v: any) => v.normalizationOnly)).toBe(false);
+  });
+
 });

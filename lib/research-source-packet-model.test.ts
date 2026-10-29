@@ -5,7 +5,7 @@ import {
   RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
   researchSourcePacketMetadata, researchSourcePacketSchema, normalizeResearchSourcePacket,
   RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS,
-  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2, normalizeResearchSourcePacketV4,
+  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2, normalizeResearchSourcePacketV4, normalizeResearchSourcePacketV5, canonicalizeResearchSourcePacketV5,
   type ResearchSourcePacket,
 } from './research-source-packet-model';
 
@@ -323,4 +323,30 @@ describe('opt-in structured packet qualification v2', () => {
     const rejected = await normalizeResearchSourcePacketV2(response(frame(), [nested, unknown, malformed]), [packet()], profiles);
     expect(rejected.findings).toHaveLength(1); expect(rejected.diagnostics).toHaveLength(3);
   });
+  it('v5 removes only unknown empty frame/claim placeholders without mutating raw claims or grades', async () => {
+    const raw = response({ ...frame(), claim_note: null, extra: [], claim: { ...frame().claim, summary_note: '', metadata_note: {} } },
+      [{ ...frame('child'), note: {}, claim: { ...frame().claim, limitations_note_placeholder: null } }]);
+    const before = JSON.stringify(raw), canonical = canonicalizeResearchSourcePacketV5(raw);
+    expect(canonical.removedPaths).toEqual(['/findings/configured-packet/claim_note', '/findings/configured-packet/extra',
+      '/findings/configured-packet/claim/summary_note', '/findings/configured-packet/claim/metadata_note',
+      '/findings/configured-packet/additionalIdeas/0/note', '/findings/configured-packet/additionalIdeas/0/claim/limitations_note_placeholder']);
+    expect((await normalizeResearchSourcePacketV4(raw, [packet()], profiles)).findings).toHaveLength(0);
+    const next = await normalizeResearchSourcePacketV5(raw, [packet()], profiles);
+    expect(next).toEqual(await normalizeResearchSourcePacketV2(response(frame(), [frame('child')]), [packet()], profiles));
+    expect(JSON.stringify(raw)).toBe(before);
+  });
+  it.each([0, false, ' ', 'nonempty', [null], { note: null }])('v5 retains unknown nonempty or meaningful value %j for strict rejection', async value => {
+    for (const raw of [response({ ...frame(), unknown: value }), response({ ...frame(), claim: { ...frame().claim, unknown: value } })]) {
+      expect(canonicalizeResearchSourcePacketV5(raw).removedPaths).toEqual([]);
+      const result = await normalizeResearchSourcePacketV5(raw, [packet()], profiles);
+      expect(result.findings).toEqual([]); expect(result.diagnostics[0].reason).toContain('unknown fields');
+    }
+  });
+  it('v5 never drops known empty claim/frame fields or changes nested evidence and categories', async () => {
+    const raw = response({ ...frame(), primarySourceId: '', claim: { ...frame().claim, summary: null },
+      qualityComponents: { ...frame().qualityComponents, extra: null } });
+    expect(canonicalizeResearchSourcePacketV5(raw)).toEqual({ value: raw, removedPaths: [] });
+    expect((await normalizeResearchSourcePacketV5(raw, [packet()], profiles)).findings).toEqual([]);
+  });
+
 });

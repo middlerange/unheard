@@ -1,3 +1,4 @@
+import { ResearchCacheOnlyMiss } from "./research-cache-only";
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "./db/client";
@@ -930,6 +931,13 @@ async function collectForRun(
     .where(eq(research_runs.id, run.id));
   return { collected: count, error };
 }
+async function researchReplayCacheOnly(run: typeof research_runs.$inferSelect) {
+  if (run.mode !== "replay") return false;
+  const db = await getDb();
+  const row = await db.select({ value: research_cache.value }).from(research_cache)
+    .where(and(eq(research_cache.id, `research-replay:${run.id}:config`), eq(research_cache.team_id, run.team_id))).get();
+  return row ? (JSON.parse(row.value) as { cacheOnly?: boolean }).cacheOnly === true : false;
+}
 async function baseCachedModel(
   run: typeof research_runs.$inferSelect,
   stage: string,
@@ -938,6 +946,7 @@ async function baseCachedModel(
   schema: Record<string, unknown>,
   outputTokens: number,
 ) {
+  const cacheOnly = await researchReplayCacheOnly(run);
   if (stage === "evidence") {
     input = (input as EvidenceCacheInput[]).map(item => researchSourceSections({ ...item, content: typeof item.content === "string" ? item.content : null }));
     system = `${system}\n\n${RESEARCH_SECTION_COVERAGE_INSTRUCTIONS}`;
@@ -1027,7 +1036,9 @@ async function baseCachedModel(
       .orderBy(desc(research_cache.created_at)).all();
     return sameContextQuoteFailure(await invalidQuoteRecords, id, item, enabledProfileIds);
   };
-  const repairQuote = async (raw: unknown, item: EvidenceCacheInput) => repairResearchCitation(
+  const repairQuote = async (raw: unknown, item: EvidenceCacheInput) => {
+    if (cacheOnly) throw new ResearchCacheOnlyMiss("quote_repair");
+    return repairResearchCitation(
     raw, item, enabledProfileIds, await researchEvidenceItemCacheId(evidenceAccess.context, item), {
       read: async receiptId => {
         const row = await db.select().from(research_cache)
@@ -1042,14 +1053,19 @@ async function baseCachedModel(
       },
       save: async (receiptId, receipt) => retryResearchStorage(async () => db.update(research_cache)
         .set({ value: JSON.stringify(receipt) }).where(and(eq(research_cache.id, receiptId), eq(research_cache.team_id, run.team_id)))),
-      select: async (data, repairSchema, tokens) => (await callResearchModel(
-        RESEARCH_QUOTE_REPAIR_INSTRUCTIONS, data, repairSchema, tokens,
-        { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? "replay_quote_repair" : "quote_repair" },
-      )).value,
+      select: async (data, repairSchema, tokens) => {
+        if (cacheOnly) throw new ResearchCacheOnlyMiss("quote_repair");
+        return (await callResearchModel(
+          RESEARCH_QUOTE_REPAIR_INSTRUCTIONS, data, repairSchema, tokens,
+          { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? "replay_quote_repair" : "quote_repair" },
+        )).value;
+      },
       validate: async value => await validateReusable(value, [item]) as EvidenceCacheValue,
     },
   );
+  };
   const generate = async (items: unknown) => {
+    if (cacheOnly) throw new ResearchCacheOnlyMiss(stage);
     const focused = stage === "evidence" && Array.isArray(items) && items.length === 1 && Boolean(items[0]?.windowFocus);
     const operation = focused ? "window_evidence" : stage;
     const usage = { teamId: run.team_id, runId: run.id, stage: "research" as const, operation: run.mode === "replay" ? `replay_${operation}` : operation };
@@ -1121,6 +1137,8 @@ async function cachedModel(
   outputTokens: number,
   budget = { remaining: 2 },
 ) {
+  const cacheOnly = await researchReplayCacheOnly(run);
+  if (cacheOnly) budget = { remaining: 0 };
   const base = await baseCachedModel(run, stage, input, system, schema, outputTokens);
   if (stage !== "evidence") return base;
   const sources = (input as EvidenceCacheInput[]).map(item => {
@@ -1167,10 +1185,13 @@ async function cachedModel(
     await recordPhase("coverage", RESEARCH_COVERAGE_VERSION, [], covered.manifestIds, false);
     const reviewAccess = {
       ...storage,
-      generate: async (request: ResearchSourceReviewRequest) => (await callResearchModel(request.instructions, request.data, request.schema,
-        typeof request.data.items[0]?.reviewOutputTokens === "number" ? request.data.items[0].reviewOutputTokens : outputTokens,
-        { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? "replay_review_evidence" : "review_evidence" }, request.model,
-        request.data.items[0]?.reviewTimeoutMs === 240_000 ? { timeoutMs: 240_000 } : undefined)).value,
+      generate: async (request: ResearchSourceReviewRequest) => {
+        if (cacheOnly) throw new ResearchCacheOnlyMiss("source_review");
+        return (await callResearchModel(request.instructions, request.data, request.schema,
+          typeof request.data.items[0]?.reviewOutputTokens === "number" ? request.data.items[0].reviewOutputTokens : outputTokens,
+          { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? "replay_review_evidence" : "review_evidence" }, request.model,
+          request.data.items[0]?.reviewTimeoutMs === 240_000 ? { timeoutMs: 240_000 } : undefined)).value;
+      },
     };
     const reviewed = await reviewResearchSources(sources, { ...covered.value, coverageManifestIds: covered.manifestIds }, reviewAccess);
     await recordPhase("source-review", RESEARCH_SOURCE_REVIEW_VERSION, [], reviewed.manifestIds, false);
@@ -1283,10 +1304,12 @@ export { cachedModel as cachedResearchModel, baseCachedModel as cachedResearchBa
 export async function cachedResearchSourcePackets(run: typeof research_runs.$inferSelect, packets: ResearchSourcePacket[], budget = { remaining: 2 }) {
   const db = await getDb(), audience = await getFrozenResearchAudience(run);
   const read = async (id: string) => { const row = await db.select().from(research_cache).where(and(eq(research_cache.id, id), eq(research_cache.team_id, run.team_id))).get(); return row ? JSON.parse(row.value) : null; };
-  let reviewVersion: string | undefined;
+  let reviewVersion: string | undefined, cacheOnly = false;
   if (run.mode === "replay") {
-    const config = await read(`research-replay:${run.id}:config`) as { sourcePacketReviewVersion?: string } | null;
+    const config = await read(`research-replay:${run.id}:config`) as { sourcePacketReviewVersion?: string; cacheOnly?: true } | null;
     reviewVersion = config?.sourcePacketReviewVersion;
+    cacheOnly = config?.cacheOnly === true;
+    if (cacheOnly) budget = { remaining: 0 };
   } else {
     const id = `research-packet-policy:${run.id}`;
     let saved = await read(id) as { reviewVersion?: string; contractHash?: string } | null;
@@ -1313,8 +1336,11 @@ export async function cachedResearchSourcePackets(run: typeof research_runs.$inf
     claim: async (id, value) => (await db.insert(research_cache).values({ id, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now() }).onConflictDoNothing().returning({ id: research_cache.id })).length === 1,
     save: async (id, expected, value) => (await db.update(research_cache).set({ value: JSON.stringify(value) }).where(and(eq(research_cache.id, id), eq(research_cache.team_id, run.team_id), eq(research_cache.value, JSON.stringify(expected)))).returning({ id: research_cache.id })).length === 1,
     writeImmutable: async (id, value) => { await db.insert(research_cache).values({ id, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now() }).onConflictDoNothing(); },
-    generate: async (request, outputTokens) => (await callResearchModel(request.instructions, request.data, request.schema, outputTokens,
-      { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? "replay_packet_evidence" : "packet_evidence" }, request.model)).value,
+    generate: async (request, outputTokens) => {
+      if (cacheOnly) throw new ResearchCacheOnlyMiss("source_packet");
+      return (await callResearchModel(request.instructions, request.data, request.schema, outputTokens,
+        { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? "replay_packet_evidence" : "packet_evidence" }, request.model)).value;
+    },
   }, packetPolicy);
 }
 type ResearchRankDiagnostics = ResearchRunDiagnostics & Required<Pick<ResearchRunDiagnostics, "evidenceCount" | "rejectedStories" | "screenedCount">>;

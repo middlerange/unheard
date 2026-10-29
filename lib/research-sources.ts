@@ -2165,5 +2165,36 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "priority": 2,
     "artifactReview": { "enabled": false, "format": "inspectable_public_artifact" },
     "notes": "Public first-party tool guide describing the daily product selection, country/niche/price/creative inspection flow and deeper research access boundary. Attribute the documented limit and capabilities; a winning-product label and public advertising activity do not establish sales, margin or conversion. Preserve unknown publication date and actual first observation. This known-page reference is current backfill, not blind historical discovery."
+  },
+  {
+    "id": "google-ads-audience-signals-reference",
+    "name": "Google Ads — audience signal inputs and setup",
+    "url": "https://support.google.com/google-ads/answer/14753570?hl=en",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "research",
+    "enabled": true,
+    "priority": 2,
+    "referencePacket": {
+      "id": "google-demand-gen-audience-signals",
+      "enabled": false,
+      "sourceIds": ["google-ads-audience-signals-reference", "reference-47f8905a46b4"],
+      "relationship": {
+        "type": "same_product",
+        "reason": "Original Google Ads references describe audience signal inputs and Demand Gen campaign capabilities. Preserve each campaign's setup, eligibility, availability and scope; related documentation is not proof of an unreported integration, measured effectiveness or customer deployment."
+      }
+    },
+    "notes": "Public first-party guide to audience signals, campaign-specific input types and Lookalike references. Keep Performance Max asset-group steps distinct from Demand Gen behavior, and preserve the scope of list eligibility, refresh and population timing. Unknown publication stays unknown; record actual first observation and body changes separately. Current documentation backfill is not blind historical discovery."
+  },
+  {
+    "id": "google-ads-commerce-news",
+    "name": "Google — Ads and Commerce announcements",
+    "url": "https://blog.google/products/ads-commerce/",
+    "feedUrl": "https://blog.google/products/ads-commerce/rss/",
+    "kind": "rss",
+    "category": "industry",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Publisher Ads and Commerce feed for dated advertising workflows, audience capabilities, measurement and conversion updates. Preserve actual publication dates, attribution and rollout limits; vendor performance claims do not establish independent effectiveness. Registered for collect-only validation; connection remains unverified until the native feed collector succeeds."
   }
 ];
