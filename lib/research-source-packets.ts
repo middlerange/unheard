@@ -10,8 +10,8 @@ import { canonicalResearchUrl } from './research-collectors';
 import {
   RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
   researchSourcePacketMetadata, researchSourcePacketSchema, normalizeResearchSourcePacket,
-  RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V6_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V7_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V8_INSTRUCTIONS,
-  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2, normalizeResearchSourcePacketV4, normalizeResearchSourcePacketV5, canonicalizeResearchSourcePacketV5,
+  RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V6_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V7_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V8_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V9_INSTRUCTIONS,
+  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, researchSourcePacketSchemaV9, normalizeResearchSourcePacketV2, normalizeResearchSourcePacketV4, normalizeResearchSourcePacketV5, normalizeResearchSourcePacketV9, canonicalizeResearchSourcePacketV5,
   type ResearchSourcePacket,
 } from './research-source-packet-model';
 
@@ -69,13 +69,15 @@ export const RESEARCH_SOURCE_PACKET_V5_REVIEW = 'empty-claim-placeholders-v5';
 export const RESEARCH_SOURCE_PACKET_V6_REVIEW = 'mechanism-completeness-v6';
 export const RESEARCH_SOURCE_PACKET_V7_REVIEW = 'decision-completeness-v7';
 export const RESEARCH_SOURCE_PACKET_V8_REVIEW = 'decision-coverage-v8';
+export const RESEARCH_SOURCE_PACKET_V9_REVIEW = 'reader-decision-v9';
+export const RESEARCH_SOURCE_PACKET_V9_NORMALIZER = 'structured-inference-v2+reader-decision-v9+verbatim-render-v1+complete-claim-text-v1';
 export const RESEARCH_SOURCE_PACKET_V5_NORMALIZER = 'structured-inference-v2+empty-unknown-frame-claim-fields-v1+complete-claim-text-v1';
 export const RESEARCH_SOURCE_PACKET_V4_NORMALIZER = 'structured-inference-v2+empty-content-angle-note-v1';
 export const RESEARCH_SOURCE_PACKET_V2_NORMALIZER = 'structured-inference-v2';
 export type ResearchSourcePacketPolicy = {
   version: string; instructions: string; normalizerVersion?: string; reuseCompletedV4?: true;
   qualificationPolicyVersion?: typeof RESEARCH_SOURCE_PACKET_V2_VERSION;
-  metadata: typeof researchSourcePacketMetadata; schema: typeof researchSourcePacketSchema;
+  metadata: typeof researchSourcePacketMetadata; schema: (packet: ResearchSourcePacket, enabledProfileIds: string[]) => Record<string, unknown>;
   normalize: typeof normalizeResearchSourcePacket;
 };
 const defaultPolicy: ResearchSourcePacketPolicy = {
@@ -84,6 +86,9 @@ const defaultPolicy: ResearchSourcePacketPolicy = {
 };
 export function researchSourcePacketPolicy(reviewVersion?: string): ResearchSourcePacketPolicy {
   if (reviewVersion === undefined) return defaultPolicy;
+  if (reviewVersion === RESEARCH_SOURCE_PACKET_V9_REVIEW) return { ...researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW),
+    instructions: RESEARCH_SOURCE_PACKET_V9_INSTRUCTIONS, schema: researchSourcePacketSchemaV9,
+    normalizerVersion: RESEARCH_SOURCE_PACKET_V9_NORMALIZER, normalize: normalizeResearchSourcePacketV9 };
   if (reviewVersion === RESEARCH_SOURCE_PACKET_V8_REVIEW) return { ...researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW),
     instructions: RESEARCH_SOURCE_PACKET_V8_INSTRUCTIONS, normalizerVersion: RESEARCH_SOURCE_PACKET_V5_NORMALIZER, normalize: normalizeResearchSourcePacketV5 };
   if (reviewVersion === RESEARCH_SOURCE_PACKET_V7_REVIEW) return { ...researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW),

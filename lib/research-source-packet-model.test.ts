@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { researchEvidenceSchema, researchHash } from './research-model';
 import { researchSourceReviewPassages } from './research-source-review-model';
 import {
   RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
   researchSourcePacketMetadata, researchSourcePacketSchema, normalizeResearchSourcePacket,
   RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS,
-  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2, normalizeResearchSourcePacketV4, normalizeResearchSourcePacketV5, canonicalizeResearchSourcePacketV5,
+  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2, normalizeResearchSourcePacketV4, normalizeResearchSourcePacketV5, normalizeResearchSourcePacketV9, researchSourcePacketSchemaV9, canonicalizeResearchSourcePacketV5,
   type ResearchSourcePacket,
 } from './research-source-packet-model';
 
@@ -370,4 +371,130 @@ describe('opt-in structured packet qualification v2', () => {
     expect((await normalizeResearchSourcePacketV5(raw, [packet()], profiles)).findings).toEqual([]);
   });
 
+});
+
+describe('structured reader decision packet contract', () => {
+  function structuredFrame(familyKey = 'inspect-draft') {
+    return { ...frame(familyKey), relationshipSupport: 'bounded_inference',
+      relationshipExplanation: 'The documented draft and approval steps support our proposed inspection, not an observed outcome.',
+      claim: { readerDecision: { mode: 'proposed_evaluation', question: 'Can this draft support an approved handoff?',
+        answer: 'Inspect the generated draft before deciding whether to approve it.',
+        inspection: { output: 'The generated draft.', action: 'Compare its contents with the supplied material.',
+          decisionCriterion: 'Whether the draft preserves the material needed for this handoff.', basis: 'analyst_proposed' } },
+        factualCore: { kind: 'mechanism', input: 'Supplied brand material.', action: 'Create a draft for human review.',
+          output: 'A draft to inspect before publishing.', conditions: 'User approval is required for live changes.' },
+        whyItMatters: 'The reader can inspect the handoff without assuming it worked.',
+        limitations: 'The proposed inspection is our inference, not a publisher-endorsed protocol or an observed outcome.' } };
+  }
+  it('uses a strict question-first claim schema without duplicate legacy prose fields', () => {
+    const schema = researchSourcePacketSchemaV9(packet(), profiles), claim = schema.$defs.claim;
+    expect(Object.keys(claim.properties!)).toEqual(['readerDecision', 'factualCore', 'whyItMatters', 'limitations']);
+    expect(claim.required).toEqual(['readerDecision', 'factualCore', 'whyItMatters', 'limitations']);
+    expect(claim.additionalProperties).toBe(false);
+    expect(claim.properties).not.toHaveProperty('summary'); expect(claim.properties).not.toHaveProperty('contentAngle');
+    const old = researchSourcePacketSchemaV2(packet(), profiles);
+    expect({ ...schema.$defs, claim: old.$defs.claim }).toEqual(old.$defs);
+    expect(schema.properties).toEqual(old.properties);
+  });
+  it('renders every evaluation and mechanism component verbatim in the same selected frame', async () => {
+    const primary = structuredFrame(), child = structuredFrame('second-question');
+    child.claim.readerDecision.question = '  A separate question?\n'; child.claim.factualCore.conditions = '  A separate condition. ';
+    child.claim.readerDecision.inspection.basis = 'documented';
+    const raw = response(primary, [child]), before = JSON.stringify(raw);
+    expect(z.fromJSONSchema(JSON.parse(JSON.stringify(researchSourcePacketSchemaV9(packet(), profiles)))).safeParse(raw).success).toBe(true);
+    const result = await normalizeResearchSourcePacketV9(raw, [packet()], profiles);
+    expect(JSON.stringify(raw)).toBe(before); expect(result.diagnostics).toEqual([]); expect(result.findings).toHaveLength(2);
+    expect(result.findings[0]).toMatchObject({ score: 92,
+      summary: 'Input: Supplied brand material.\nAction: Create a draft for human review.\nOutput: A draft to inspect before publishing.\nConditions: User approval is required for live changes.',
+      contentAngle: 'Reader question: Can this draft support an approved handoff?\nAnswer (proposed_evaluation): Inspect the generated draft before deciding whether to approve it.\nInspect output: The generated draft.\nInspection action: Compare its contents with the supplied material.\nDecision criterion: Whether the draft preserves the material needed for this handoff.\nCriterion basis: analyst_proposed',
+      whyItMatters: primary.claim.whyItMatters, limitations: primary.claim.limitations });
+    expect(result.findings[1].contentAngle).toContain('Reader question:   A separate question?\n\nAnswer');
+    expect(result.findings[1].contentAngle).toContain('Criterion basis: documented');
+    expect(result.findings[1].summary).toContain('Conditions:   A separate condition. ');
+    expect(result.findings[0].contentAngle).not.toContain('A separate question');
+    expect(result.packetProofs.map(proof => proof.ideaIndex)).toEqual([0, 1]);
+  });
+  it.each(['informative', 'application'])('renders %s decisions without requiring a test and omits null conditions', async mode => {
+    const primary: any = structuredFrame();
+    primary.claim.readerDecision = { mode, question: 'What does the publisher describe?', answer: 'A draft-creation capability with approval.' };
+    primary.claim.factualCore.conditions = null;
+    const result = await normalizeResearchSourcePacketV9(response(primary), [packet()], profiles);
+    expect(result.diagnostics).toEqual([]); expect(result.findings[0].contentAngle).toBe(`Reader question: What does the publisher describe?\nAnswer (${mode}): A draft-creation capability with approval.`);
+    expect(result.findings[0].summary).not.toContain('Conditions:'); expect(result.findings[0].contentAngle).not.toContain('Inspection');
+  });
+  it.each(['measured_observation', 'reasoned_position'])('preserves %s signals with an observation and no invented method or experiment', async claimBasis => {
+    const primary: any = structuredFrame(); primary.claimBasis = claimBasis;
+    primary.claim.readerDecision = { mode: 'informative', question: 'What is the attributed finding?', answer: 'The publisher describes an approval boundary.' };
+    primary.claim.factualCore = { kind: 'observation', observation: '  The publisher describes an approval boundary.\n' };
+    primary.qualityComponents.usefulDecision = 'useful_distinction_or_signal';
+    const result = await normalizeResearchSourcePacketV9(response(primary), [packet()], profiles);
+    expect(result.diagnostics).toEqual([]); expect(result.findings[0]).toMatchObject({ claimBasis, score: 86, summary: 'Observation:   The publisher describes an approval boundary.\n' });
+    expect(result.findings[0].contentAngle).not.toMatch(/Inspect output|Decision criterion/);
+  });
+  it('preserves complete long structured strings without truncation', async () => {
+    const primary = structuredFrame(), long = 'A documented component remains intact. '.repeat(100);
+    primary.claim.factualCore.input = long; primary.claim.readerDecision.inspection.decisionCriterion = long;
+    const result = await normalizeResearchSourcePacketV9(response(primary), [packet()], profiles);
+    expect(result.diagnostics).toEqual([]); expect(result.findings[0].summary).toContain(`Input: ${long}\nAction:`);
+    expect(result.findings[0].contentAngle).toContain(`Decision criterion: ${long}\nCriterion basis:`);
+  });
+  it('rejects missing evaluation parts, wrong branches/types and unknown fields without coercion', async () => {
+    const wire = z.fromJSONSchema(JSON.parse(JSON.stringify(researchSourcePacketSchemaV9(packet(), profiles))));
+    expect(wire.safeParse(response(structuredFrame(), [structuredFrame('valid-child')])).success).toBe(true);
+    const changes: Array<(value: any) => void> = [
+      ...['output', 'action', 'decisionCriterion', 'basis'].map(key => (value: any) => { delete value.claim.readerDecision.inspection[key]; }),
+      value => { delete value.claim.readerDecision.inspection; }, value => { delete value.claim.factualCore.conditions; },
+      value => { value.claim.readerDecision.inspection.basis = 'our_guess'; }, value => { value.claim.readerDecision.inspection.action = '   '; },
+      value => { value.claim.limitations = ['No coercion']; }, value => { value.claim.whyItMatters = []; },
+      value => { value.claim.factualCore.output = 42; }, value => { value.claim.factualCore.conditions = ''; },
+      value => { value.claim.readerDecision.question = ''; }, value => { value.claim.note = ''; },
+      value => { value.claim.summary = 'Duplicate prose'; }, value => { value.claim.contentAngle = 'Duplicate prose'; },
+      value => { value.claim.readerDecision.note = null; }, value => { value.claim.readerDecision.inspection.extra = ''; },
+      value => { value.claim.factualCore.extra = []; }, value => { value.note = ''; },
+      value => { value.claim.readerDecision.mode = 'informative'; },
+      value => { value.claim.factualCore.kind = 'observation'; },
+      value => { value.claim = frame().claim; },
+    ];
+    for (const change of changes) {
+      const primary: any = structuredFrame(); change(primary);
+      const result = await normalizeResearchSourcePacketV9(response(primary), [packet()], profiles);
+      expect(wire.safeParse(response(primary)).success).toBe(false);
+      expect(wire.safeParse(response(structuredFrame(), [primary])).success).toBe(false);
+      expect(result.findings).toEqual([]); expect(result.diagnostics).toHaveLength(1);
+      expect(result.diagnostics[0].rawIdea).toEqual(primary);
+    }
+  });
+  it('fails malformed assessment containers closed without accepting an otherwise valid primary', async () => {
+    const wire = z.fromJSONSchema(JSON.parse(JSON.stringify(researchSourcePacketSchemaV9(packet(), profiles))));
+    for (const additionalIdeas of [undefined, null, {}, '']) {
+      const raw: any = response(structuredFrame()); raw.findings['configured-packet'].additionalIdeas = additionalIdeas;
+      expect(wire.safeParse(raw).success).toBe(false);
+      const result = await normalizeResearchSourcePacketV9(raw, [packet()], profiles);
+      expect(result.findings).toEqual([]); expect(result.diagnostics[0].rawIdea).toEqual(raw.findings['configured-packet']);
+    }
+    const unknown: any = response(structuredFrame()); unknown.findings.unconfigured = structuredFrame();
+    expect(wire.safeParse(unknown).success).toBe(false);
+    expect((await normalizeResearchSourcePacketV9(unknown, [packet()], profiles)).findings).toEqual([]);
+  });
+  it('cannot fill an incomplete child from its parent or accept nested child frames', async () => {
+    const child: any = structuredFrame('incomplete'); delete child.claim.readerDecision.inspection.decisionCriterion;
+    let result = await normalizeResearchSourcePacketV9(response(structuredFrame(), [child]), [packet()], profiles);
+    expect(result.findings).toHaveLength(1); expect(result.diagnostics[0]).toMatchObject({ ideaIndex: 1, rawIdea: child });
+    child.claim.readerDecision.inspection.decisionCriterion = 'A criterion.'; child.additionalIdeas = [];
+    result = await normalizeResearchSourcePacketV9(response(structuredFrame(), [child]), [packet()], profiles);
+    expect(result.findings).toHaveLength(1); expect(result.diagnostics[0].reason).toContain('Packet idea');
+  });
+  it('retains literal quotation, relationship, full profile and categorical qualification checks', async () => {
+    const changes: Array<(value: any) => void> = [value => { value.relationshipSupport = 'unsupported_bridge'; },
+      value => { value.evidenceCitations[1].passageIds = [999]; }, value => { value.profileChecks.pop(); },
+      value => { value.claim.limitations = 'No disclosure of the proposed connection.'; }];
+    for (const change of changes) {
+      const primary = structuredFrame(); change(primary);
+      expect((await normalizeResearchSourcePacketV9(response(primary), [packet()], profiles)).findings).toEqual([]);
+    }
+    for (const changed of [{ sourceSupport: 'unsupported' }, { usefulDecision: 'generic' }, { scopeHonesty: 'material_gap' }]) {
+      const primary = structuredFrame(); Object.assign(primary.qualityComponents, changed);
+      expect((await normalizeResearchSourcePacketV9(response(primary), [packet()], profiles)).findings[0].score).toBeLessThan(70);
+    }
+  });
 });

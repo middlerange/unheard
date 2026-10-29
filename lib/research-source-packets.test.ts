@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parseResearchAudience } from './research-audience';
 import { researchSelectionAudience, RESEARCH_SELECTION_VIEW_VERSION } from './research-selection-audience';
-import { researchPacketsFromDefinitions, configuredResearchPacketDefinitions, reviewResearchSourcePackets, researchSourcePacketPolicy, researchSourcePacketPolicyContract, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW, RESEARCH_SOURCE_PACKET_V5_REVIEW, RESEARCH_SOURCE_PACKET_V6_REVIEW, RESEARCH_SOURCE_PACKET_V7_REVIEW, RESEARCH_SOURCE_PACKET_V8_REVIEW, ResearchSourcePacketPending, type ResearchPacketAccess } from './research-source-packets';
+import { researchPacketsFromDefinitions, configuredResearchPacketDefinitions, reviewResearchSourcePackets, researchSourcePacketPolicy, researchSourcePacketPolicyContract, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW, RESEARCH_SOURCE_PACKET_V5_REVIEW, RESEARCH_SOURCE_PACKET_V6_REVIEW, RESEARCH_SOURCE_PACKET_V7_REVIEW, RESEARCH_SOURCE_PACKET_V8_REVIEW, RESEARCH_SOURCE_PACKET_V9_REVIEW, ResearchSourcePacketPending, type ResearchPacketAccess } from './research-source-packets';
 import { researchHash } from './research-model';
 import type { ResearchSourcePacket } from './research-source-packet-model';
 import type { ResearchSourceSeed } from './research-types';
@@ -383,4 +383,67 @@ describe('durable source packet inference', () => {
     expect([...cold.values.values()].some((v: any) => v.normalizationOnly)).toBe(false);
   });
 
+});
+
+describe('opt-in structured reader decision packet receipts', () => {
+  it('pins every old contract and leaves the default unchanged', async () => {
+    const hashes = [
+      [RESEARCH_SOURCE_PACKET_V2_REVIEW, 'b2b30673aa56d9e473871e0cf10b8f423c7c9abd6c1e29d8e6b744231e5d537e'],
+      [RESEARCH_SOURCE_PACKET_V3_REVIEW, '6225b4dbd7e08cc780e2bf62af3e68164185e8fba8938e208f4f5df044746eca'],
+      [RESEARCH_SOURCE_PACKET_V4_REVIEW, '694ffac902650028b6a12b062d9b34ade2adb9114933c37d1809d4d2d0c124a6'],
+      [RESEARCH_SOURCE_PACKET_V5_REVIEW, 'ae705c5063e8bf8731866fcab4f4376317100e956b7ebed6f8533a778bffafc3'],
+      [RESEARCH_SOURCE_PACKET_V6_REVIEW, '531862e78069ceec9088b8a3db53ed6b61801f5b726f70a9d06194fdb2c7f516'],
+      [RESEARCH_SOURCE_PACKET_V7_REVIEW, 'e2e0686e26b3ae40b83a001341ce7a082261e411070dd11ce3c08a1627615264'],
+      [RESEARCH_SOURCE_PACKET_V8_REVIEW, 'ae6144e7c5a5e18abe142b06b9031f71736263cd36ae63a2fb87c1184ffb9351'],
+    ];
+    for (const [version, expected] of hashes) expect(await researchHash(JSON.stringify(researchSourcePacketPolicyContract(version, 16384)))).toBe(expected);
+    expect(await researchHash(researchSourcePacketPolicy().instructions)).toBe('55bdc84f8af507dcf87d34b57c859b465e0e25503ad10740c18d9bb33fc7c172');
+    const v9 = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V9_REVIEW), old = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V5_REVIEW);
+    expect(v9.metadata).toBe(old.metadata); expect(v9.reuseCompletedV4).toBeUndefined(); expect(v9.normalizerVersion).not.toBe(old.normalizerVersion);
+    expect(v9.instructions).toContain('When the answer proposes evaluating a benefit');
+    expect(v9.instructions).toContain('Informative findings and applications do not require an invented experiment');
+    expect(v9.instructions).not.toMatch(/fyxer|katelyn|google|engagement|buyer|benchmark|4p/i);
+    expect(researchSourcePacketPolicyContract(RESEARCH_SOURCE_PACKET_V9_REVIEW, 16384)).toMatchObject({ model: 'claude-sonnet-5-5', outputTokens: 16384, scoreThreshold: 70, rubric: 'source_qualification_v1' });
+  });
+  it('requires fresh structured raw, binds rendered result hashes, and resumes without changing older caches', async () => {
+    const v9 = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V9_REVIEW);
+    const generate = vi.fn(async (request: { instructions: string }) => {
+      const raw: any = response(packet());
+      if (request.instructions === v9.instructions) raw.findings.workflow.claim = {
+        readerDecision: { mode: 'application', question: 'Where is approval required?', answer: 'Inspect the documented approval handoff.' },
+        factualCore: { kind: 'mechanism', input: 'Account context.', action: 'Create a draft.', output: 'Draft for review.', conditions: 'Human approval.' },
+        whyItMatters: 'The permission boundary is explicit.', limitations: 'A documented capability, not a measured outcome.',
+      };
+      return raw;
+    });
+    const test = harness(generate as never), versions = [undefined, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW, RESEARCH_SOURCE_PACKET_V5_REVIEW, RESEARCH_SOURCE_PACKET_V6_REVIEW, RESEARCH_SOURCE_PACKET_V7_REVIEW, RESEARCH_SOURCE_PACKET_V8_REVIEW];
+    const earlier = [];
+    for (const version of versions) earlier.push(await reviewResearchSourcePackets([packet()], test.access, researchSourcePacketPolicy(version)));
+    expect(generate).toHaveBeenCalledTimes(7);
+    const previous = [...test.values].map(([id, value]) => [id, JSON.stringify(value)]);
+    await expect(reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, v9)).rejects.toBeInstanceOf(ResearchSourcePacketPending);
+    expect(generate).toHaveBeenCalledTimes(7);
+    const result = await reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 1 } }, v9);
+    expect(result.acceptedIdeas).toHaveLength(1); expect(generate).toHaveBeenCalledTimes(8);
+    expect(result.acceptedIdeas[0].contentAngle).toBe('Reader question: Where is approval required?\nAnswer (application): Inspect the documented approval handoff.');
+    const plan = [...test.values.values()].find((value: any) => value.request?.instructions === v9.instructions) as any;
+    const oldPlan = [...test.values.values()].find((value: any) => value.request?.instructions === researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V8_REVIEW).instructions) as any;
+    expect(plan.packet).toEqual(oldPlan.packet); expect(plan.audience).toEqual(oldPlan.audience); expect(plan.request.data).toEqual(oldPlan.request.data); expect(plan.request.schema).not.toEqual(oldPlan.request.schema);
+    const id = 'research-source-packet-attempt:v1:' + await researchHash(JSON.stringify(plan)), attempt = test.values.get(id) as any;
+    const stable = (value: unknown) => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
+    expect(attempt.rawHash).toBe(await researchHash(JSON.stringify(attempt.raw)));
+    expect(attempt.resultHash).toBe(await researchHash(stable(await v9.normalize(attempt.raw, [packet()], ['personal']))));
+    expect(attempt.raw.findings.workflow.claim).not.toHaveProperty('summary'); expect(attempt.raw.findings.workflow.claim).not.toHaveProperty('contentAngle');
+    expect(attempt).not.toHaveProperty('normalizationOnly'); expect(attempt).not.toHaveProperty('reusedFrom');
+    expect(await reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, v9)).toEqual(result);
+    for (const [index, version] of versions.entries()) expect(await reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, researchSourcePacketPolicy(version))).toEqual(earlier[index]);
+    for (const [key, bytes] of previous) expect(JSON.stringify(test.values.get(key))).toBe(bytes);
+    test.values.set(id, { ...attempt, raw: { findings: {} } });
+    await expect(reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, v9)).rejects.toThrow('raw response changed');
+    test.values.set(id, { ...attempt, resultHash: 'tampered' });
+    await expect(reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, v9)).rejects.toThrow('normalized response changed');
+    test.values.set(id, { ...attempt, normalizationOnly: true, reusedFrom: {} });
+    await expect(reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, v9)).rejects.toThrow('authentic parent');
+    expect(generate).toHaveBeenCalledTimes(8);
+  });
 });
