@@ -1401,7 +1401,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "wynter-ai-positioning-reference",
-    "artifactReview": { "enabled": false, "format": "inspectable_public_artifact" },
+    "artifactReview": { "enabled": true, "format": "inspectable_public_artifact" },
     "name": "Wynter — public AI positioning workshop outline",
     "url": "https://wynter.com/ai-positioning-workshop",
     "kind": "web",
@@ -1426,7 +1426,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "id": "product-manager-toolkit-reference",
     "referencePacket": {
       "id": "product-toolkit-public-skill-documents",
-      "enabled": false,
+      "enabled": true,
       "sourceIds": [
         "product-manager-toolkit-reference",
         "reference-06eb34f276f2",
@@ -1506,7 +1506,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "id": "google-ads-dynamic-prospecting",
     "referencePacket": {
       "id": "google-advertising-prediction-references",
-      "enabled": false,
+      "enabled": true,
       "sourceIds": [
         "google-ads-dynamic-prospecting",
         "google-analytics-predictive-audiences",
@@ -1636,7 +1636,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "reference-0d592efb9d95",
-    "artifactReview": { "enabled": false, "format": "research_intake_form" },
+    "artifactReview": { "enabled": true, "format": "research_intake_form" },
     "name": "Reference — dWL6Xd",
     "url": "https://tally.so/r/dWL6Xd",
     "kind": "web",
@@ -1650,7 +1650,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "id": "reference-1a8f9fbb2860",
     "referencePacket": {
       "id": "pricing-research-and-model-options",
-      "enabled": false,
+      "enabled": true,
       "sourceIds": [
         "reference-1a8f9fbb2860",
         "reference-6233b26ae14d"
@@ -1684,7 +1684,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "id": "reference-268173540fbd",
     "referencePacket": {
       "id": "ownable-authority-public-references",
-      "enabled": false,
+      "enabled": true,
       "sourceIds": [
         "reference-268173540fbd",
         "ownable-idea-reference"
@@ -1708,7 +1708,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "id": "reference-665e44daf7ae",
     "referencePacket": {
       "id": "ryze-connector-and-action-documentation",
-      "enabled": false,
+      "enabled": true,
       "sourceIds": [
         "reference-665e44daf7ae",
         "ryze-public-marketing-permissions",
@@ -1765,7 +1765,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "reference-2843b8f34586",
-    "artifactReview": { "enabled": false, "format": "inspectable_public_artifact" },
+    "artifactReview": { "enabled": true, "format": "inspectable_public_artifact" },
     "name": "Reference — pricing",
     "url": "https://www.trendtrack.io/pricing",
     "kind": "web",
@@ -2032,7 +2032,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "id": "reference-2ac1625f4e6f",
     "referencePacket": {
       "id": "product-operating-loop-and-prioritization",
-      "enabled": false,
+      "enabled": true,
       "sourceIds": [
         "reference-2ac1625f4e6f",
         "reference-40780c0da1a3"
@@ -2145,6 +2145,18 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "trendtrack-free-competitor-ads-reference",
+    "referencePacket": {
+      "id": "trendtrack-product-reference-comparison",
+      "enabled": true,
+      "sourceIds": [
+        "trendtrack-free-competitor-ads-reference",
+        "reference-2843b8f34586"
+      ],
+      "relationship": {
+        "type": "same_product",
+        "reason": "Two original product-publisher pages describe a tool and the same product’s subscription options. Preserve each source’s documented behavior, availability, usage limits and attribution. Related branding does not establish outcomes, adoption, compatibility or user conversion."
+      }
+    },
     "name": "TrendTrack — free competitor ads finder",
     "url": "https://www.trendtrack.io/tools/competitor-ads-finder",
     "kind": "web",
@@ -2152,7 +2164,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "category": "practitioner",
     "enabled": true,
     "priority": 2,
-    "artifactReview": { "enabled": false, "format": "inspectable_public_artifact" },
+    "artifactReview": { "enabled": true, "format": "inspectable_public_artifact" },
     "notes": "Public first-party tool guide describing observable domain-entry, active-creative, format and longevity views and the wider intelligence access boundary. Attribute capabilities to the publisher; active ads and longevity do not prove spend, profitability or effectiveness. Preserve unknown publication date and actual first observation. This known-page reference is current backfill, not blind historical discovery."
   },
   {
@@ -2210,7 +2222,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
         "reason": "Official Demand Gen references describe campaign delivery and two explicitly different Lookalike modes. Preserve default suggestion-mode rollout, opt-out constraints and each mode's seed requirements; related documentation does not establish customer results or observed effectiveness."
       }
     },
-    "notes": "Public first-party Demand Gen mechanism and rollout reference. Seed lists and reach settings become signals rather than strict similarity constraints in suggestion mode; the former 100-user minimum is removed there. Keep opted-out targeting-constraint behavior separate. Attribute performance promises, preserve unknown publication and actual first observation, and do not treat this current reference backfill as independent historical discovery."
+    "notes": "Public first-party Demand Gen mechanism and rollout reference. Seed lists and reach settings become signals rather than strict similarity constraints in suggestion mode; the former 100-user minimum is removed there. Keep opted-out targeting-constraint behavior separate. Attribute performance promises, preserve unknown publication and actual first observation, and do not treat this current reference backfill as independent historical discovery. Artifact and combined-reference routing are pending validation; capture remains enabled."
   },
   {
     "id": "google-demand-gen-lookalike-constraint-reference",
@@ -2223,7 +2235,8 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "category": "research",
     "enabled": true,
     "priority": 2,
-    "notes": "Public first-party guide for Demand Gen ad groups opted out of Lookalike suggestion mode. Preserve the scope of seed behavior, similarity thresholds, minimum size and refresh requirements; do not transfer these constraints to the new default suggestion mode. Retain unknown publication and actual first observation. Current reference backfill is not blind historical discovery."
+    "artifactReview": { "enabled": false, "format": "inspectable_public_artifact" },
+    "notes": "Public first-party guide for Demand Gen ad groups opted out of Lookalike suggestion mode. Preserve the scope of seed behavior, similarity thresholds, minimum size and refresh requirements; do not transfer these constraints to the new default suggestion mode. Retain unknown publication and actual first observation. Current reference backfill is not blind historical discovery. Artifact routing is pending validation; capture remains enabled."
   },
   {
     "id": "google-ads-commerce-news",
@@ -2234,6 +2247,6 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "category": "industry",
     "enabled": true,
     "priority": 1,
-    "notes": "Publisher Ads and Commerce feed for dated advertising workflows, audience capabilities, measurement and conversion updates. Preserve actual publication dates, attribution and rollout limits; vendor performance claims do not establish independent effectiveness. Registered for collect-only validation; connection remains unverified until the native feed collector succeeds."
+    "notes": "Publisher Ads and Commerce feed for dated advertising workflows, audience capabilities, measurement and conversion updates. Preserve actual publication dates, attribution and rollout limits; vendor performance claims do not establish independent effectiveness. Native publisher-feed collection and dated entries have been verified; individual article bodies may still be unavailable. Known-feed connection does not establish complete web coverage or historical blind discovery."
   }
 ];

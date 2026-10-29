@@ -10,7 +10,7 @@ import { canonicalResearchUrl } from './research-collectors';
 import {
   RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
   researchSourcePacketMetadata, researchSourcePacketSchema, normalizeResearchSourcePacket,
-  RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS,
+  RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V6_INSTRUCTIONS,
   researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2, normalizeResearchSourcePacketV4, normalizeResearchSourcePacketV5, canonicalizeResearchSourcePacketV5,
   type ResearchSourcePacket,
 } from './research-source-packet-model';
@@ -66,11 +66,12 @@ export const RESEARCH_SOURCE_PACKET_V2_REVIEW = 'coherent-synthesis-v2';
 export const RESEARCH_SOURCE_PACKET_V3_REVIEW = 'reader-decision-synthesis-v3';
 export const RESEARCH_SOURCE_PACKET_V4_REVIEW = 'whole-reader-story-v4';
 export const RESEARCH_SOURCE_PACKET_V5_REVIEW = 'empty-claim-placeholders-v5';
+export const RESEARCH_SOURCE_PACKET_V6_REVIEW = 'mechanism-completeness-v6';
 export const RESEARCH_SOURCE_PACKET_V5_NORMALIZER = 'structured-inference-v2+empty-unknown-frame-claim-fields-v1+complete-claim-text-v1';
 export const RESEARCH_SOURCE_PACKET_V4_NORMALIZER = 'structured-inference-v2+empty-content-angle-note-v1';
 export const RESEARCH_SOURCE_PACKET_V2_NORMALIZER = 'structured-inference-v2';
 export type ResearchSourcePacketPolicy = {
-  version: string; instructions: string; normalizerVersion?: string;
+  version: string; instructions: string; normalizerVersion?: string; reuseCompletedV4?: true;
   qualificationPolicyVersion?: typeof RESEARCH_SOURCE_PACKET_V2_VERSION;
   metadata: typeof researchSourcePacketMetadata; schema: typeof researchSourcePacketSchema;
   normalize: typeof normalizeResearchSourcePacket;
@@ -81,8 +82,10 @@ const defaultPolicy: ResearchSourcePacketPolicy = {
 };
 export function researchSourcePacketPolicy(reviewVersion?: string): ResearchSourcePacketPolicy {
   if (reviewVersion === undefined) return defaultPolicy;
+  if (reviewVersion === RESEARCH_SOURCE_PACKET_V6_REVIEW) return { ...researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW),
+    instructions: RESEARCH_SOURCE_PACKET_V6_INSTRUCTIONS, normalizerVersion: RESEARCH_SOURCE_PACKET_V5_NORMALIZER, normalize: normalizeResearchSourcePacketV5 };
   if (reviewVersion === RESEARCH_SOURCE_PACKET_V5_REVIEW) return { ...researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW),
-    normalizerVersion: RESEARCH_SOURCE_PACKET_V5_NORMALIZER, normalize: normalizeResearchSourcePacketV5 };
+    normalizerVersion: RESEARCH_SOURCE_PACKET_V5_NORMALIZER, normalize: normalizeResearchSourcePacketV5, reuseCompletedV4: true };
   if (reviewVersion !== RESEARCH_SOURCE_PACKET_V2_REVIEW && reviewVersion !== RESEARCH_SOURCE_PACKET_V3_REVIEW && reviewVersion !== RESEARCH_SOURCE_PACKET_V4_REVIEW) throw new Error('Unknown source packet review policy');
   return { version: RESEARCH_SOURCE_PACKET_V2_VERSION, instructions: reviewVersion === RESEARCH_SOURCE_PACKET_V4_REVIEW ? RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS : reviewVersion === RESEARCH_SOURCE_PACKET_V3_REVIEW ? RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS : RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS,
     normalizerVersion: reviewVersion === RESEARCH_SOURCE_PACKET_V4_REVIEW ? RESEARCH_SOURCE_PACKET_V4_NORMALIZER : RESEARCH_SOURCE_PACKET_V2_NORMALIZER, qualificationPolicyVersion: RESEARCH_SOURCE_PACKET_V2_VERSION,
@@ -132,7 +135,7 @@ export async function reviewResearchSourcePackets(packets: ResearchSourcePacket[
   }));
   type Work = (typeof work)[number];
   async function normalizationParent(job: Work) {
-    if (policy.normalizerVersion !== RESEARCH_SOURCE_PACKET_V5_NORMALIZER) return null;
+    if (!policy.reuseCompletedV4) return null;
     const previousPolicy = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW);
     const metadata = await previousPolicy.metadata(job.packet);
     const request = { model: access.model, instructions: previousPolicy.instructions,
@@ -174,7 +177,7 @@ export async function reviewResearchSourcePackets(packets: ResearchSourcePacket[
     if ((value.state === 'failed' || value.state === 'indeterminate') && !value.reason) throw Error('Packet failure has no reason');
     if (value.state === 'indeterminate' && value.completedAt - value.startedAt < 120_000) throw Error('Packet indeterminate claim has not expired');
     const normalizationId = `research-source-packet-normalization:v1:${job.planHash}`;
-    const marker = policy.normalizerVersion === RESEARCH_SOURCE_PACKET_V5_NORMALIZER ? await access.read(normalizationId) : null;
+    const marker = policy.reuseCompletedV4 ? await access.read(normalizationId) : null;
     if (marker && !value.normalizationOnly) throw Error('Packet normalization receipt lost its origin');
     if (value.normalizationOnly || value.reusedFrom || value.removedPaths) {
       if (value.normalizationOnly !== true || value.state !== 'completed') throw Error('Packet normalization receipt has invalid origin');
@@ -194,7 +197,7 @@ export async function reviewResearchSourcePackets(packets: ResearchSourcePacket[
     const saved = await receipt(job);
     if (!saved || saved.state === 'started') throw Error('Packet terminal attempt was not saved');
   }
-  if (policy.normalizerVersion === RESEARCH_SOURCE_PACKET_V5_NORMALIZER) for (const job of work) {
+  if (policy.reuseCompletedV4) for (const job of work) {
     if (await receipt(job)) continue;
     const parent = await normalizationParent(job);
     if (!parent) continue;

@@ -5,8 +5,13 @@ compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 preview_urls = true
 
+[vars]
+RESEARCH_DEPTH_MODEL = "claude-sonnet-5-5"
+RESEARCH_DEPTH_GROUPING_VERSION = "attributed-quotes-and-questions-v2"
+RESEARCH_PACKET_POLICY = "empty-claim-placeholders-v5"
+
 [build]
-command = "npm run build"
+command = "bun run build"
 
 [assets]
 directory = "./dist/client"
