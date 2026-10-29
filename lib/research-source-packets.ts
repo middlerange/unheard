@@ -7,6 +7,7 @@ import type { ResearchAudience } from './research-audience';
 import type { ResearchSourceReviewAccess, ResearchSourceReviewRequest } from './research-source-review';
 import type { ResearchSourceSeed } from './research-types';
 import { canonicalResearchUrl } from './research-collectors';
+import { anthropicStrictResearchSchema, ANTHROPIC_STRICT_SCHEMA_VERSION } from './research-anthropic';
 import {
   RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
   researchSourcePacketMetadata, researchSourcePacketSchema, normalizeResearchSourcePacket,
@@ -70,12 +71,14 @@ export const RESEARCH_SOURCE_PACKET_V6_REVIEW = 'mechanism-completeness-v6';
 export const RESEARCH_SOURCE_PACKET_V7_REVIEW = 'decision-completeness-v7';
 export const RESEARCH_SOURCE_PACKET_V8_REVIEW = 'decision-coverage-v8';
 export const RESEARCH_SOURCE_PACKET_V9_REVIEW = 'reader-decision-v9';
+export const RESEARCH_SOURCE_PACKET_V9_STRICT_REVIEW = 'reader-decision-v9-strict-tool-v1';
 export const RESEARCH_SOURCE_PACKET_V9_NORMALIZER = 'structured-inference-v2+reader-decision-v9+verbatim-render-v1+complete-claim-text-v1';
 export const RESEARCH_SOURCE_PACKET_V5_NORMALIZER = 'structured-inference-v2+empty-unknown-frame-claim-fields-v1+complete-claim-text-v1';
 export const RESEARCH_SOURCE_PACKET_V4_NORMALIZER = 'structured-inference-v2+empty-content-angle-note-v1';
 export const RESEARCH_SOURCE_PACKET_V2_NORMALIZER = 'structured-inference-v2';
 export type ResearchSourcePacketPolicy = {
   version: string; instructions: string; normalizerVersion?: string; reuseCompletedV4?: true;
+  reviewTransport?: 'anthropic-strict-tool-v1'; schemaCompilerVersion?: typeof ANTHROPIC_STRICT_SCHEMA_VERSION;
   qualificationPolicyVersion?: typeof RESEARCH_SOURCE_PACKET_V2_VERSION;
   metadata: typeof researchSourcePacketMetadata; schema: (packet: ResearchSourcePacket, enabledProfileIds: string[]) => Record<string, unknown>;
   normalize: typeof normalizeResearchSourcePacket;
@@ -86,6 +89,9 @@ const defaultPolicy: ResearchSourcePacketPolicy = {
 };
 export function researchSourcePacketPolicy(reviewVersion?: string): ResearchSourcePacketPolicy {
   if (reviewVersion === undefined) return defaultPolicy;
+  if (reviewVersion === RESEARCH_SOURCE_PACKET_V9_STRICT_REVIEW) return { ...researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V9_REVIEW),
+    reviewTransport: 'anthropic-strict-tool-v1', schemaCompilerVersion: ANTHROPIC_STRICT_SCHEMA_VERSION,
+    schema: (packet, profileIds) => anthropicStrictResearchSchema(researchSourcePacketSchemaV9(packet, profileIds)) };
   if (reviewVersion === RESEARCH_SOURCE_PACKET_V9_REVIEW) return { ...researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW),
     instructions: RESEARCH_SOURCE_PACKET_V9_INSTRUCTIONS, schema: researchSourcePacketSchemaV9,
     normalizerVersion: RESEARCH_SOURCE_PACKET_V9_NORMALIZER, normalize: normalizeResearchSourcePacketV9 };
@@ -109,6 +115,7 @@ export function researchSourcePacketPolicyContract(reviewVersion: string, output
     sources: ['primary', 'reference'].map(id => ({ id, url: `https://publisher.example/${id}`, publishedAt: null, firstSeen: null, content: 'A public documentation reference describes a bounded workflow.' })),
   }, ['profile']);
   return { reviewVersion, policyVersion: policy.version, normalizerVersion: policy.normalizerVersion,
+    ...(policy.reviewTransport ? { reviewTransport: policy.reviewTransport, schemaCompilerVersion: policy.schemaCompilerVersion } : {}),
     sourceBindingVersion: RESEARCH_SOURCE_PACKET_VERSION, instructions: policy.instructions, schema,
     model: 'claude-sonnet-5-5', outputTokens, scoreThreshold: RESEARCH_POST_MIN_SCORE, rubric: 'source_qualification_v1' };
 }
@@ -136,9 +143,10 @@ export async function reviewResearchSourcePackets(packets: ResearchSourcePacket[
   const work = await Promise.all(packets.map(async packet => {
     const metadata = await policy.metadata(packet);
     const request: ResearchSourceReviewRequest = { model: access.model, instructions: policy.instructions,
-      schema: policy.schema(packet, profileIds), data: { ...view, items: [{ ...metadata, reviewTransport: 'anthropic-tool-v1' }] } };
+      schema: policy.schema(packet, profileIds), data: { ...view, items: [{ ...metadata, reviewTransport: policy.reviewTransport ?? 'anthropic-tool-v1' }] } };
     const plan = { version: policy.version, teamId: access.context.teamId, packet,
       packetHash: metadata.packetHash, audience, request, outputTokens: access.outputTokens,
+      ...(policy.schemaCompilerVersion ? { schemaCompilerVersion: policy.schemaCompilerVersion } : {}),
       ...(policy.normalizerVersion ? { normalizerVersion: policy.normalizerVersion } : {}) };
     const planHash = await researchHash(json(plan)), planId = `research-source-packet-plan:v1:${planHash}`, attemptId = `research-source-packet-attempt:v1:${planHash}`;
     await immutable(planId, plan);

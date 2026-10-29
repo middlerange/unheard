@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ANTHROPIC_RESEARCH_TOOL_NAME, anthropicResearchOutput, anthropicResearchRequest, anthropicResearchSchema } from './research-anthropic';
+import { z } from 'zod';
+import { researchSourcePacketSchemaV9 } from './research-source-packet-model';
+import { ANTHROPIC_RESEARCH_TOOL_NAME, anthropicResearchOutput, anthropicResearchRequest, anthropicResearchSchema, anthropicStrictResearchSchema } from './research-anthropic';
 import { callResearchModel, RESEARCH_MODEL, evidenceJsonSchema, evidenceJsonSchemaForItems, ResearchModelRateLimitError } from './research-model';
 import { beginResearchUsage, finishResearchUsage } from './research-usage';
 
@@ -216,5 +218,86 @@ describe('Claude research transport', () => {
     const schema = { type: 'object', properties: { maxItems: { type: 'array', minItems: 3, items: { type: 'string', minLength: 20, enum: ['minimum', 'maxItems'] } } } };
     expect(anthropicResearchSchema(schema)).toEqual({ type: 'object', properties: { maxItems: { type: 'array', description: 'minItems: 3', items: { type: 'string', description: 'minLength: 20', enum: ['minimum', 'maxItems'] } } } });
     expect(anthropicResearchRequest(RESEARCH_MODEL, 'system', {}, {}, 100).max_tokens).toBe(100);
+  });
+});
+
+describe('separately pinned strict research tool transport', () => {
+  const packet = { id: 'packet', primarySourceId: 'primary', relationship: { type: 'same_product' as const,
+    reason: 'Three related public descriptions of the same product.', sourceIds: ['primary', 'reference', 'third'] },
+    sources: ['primary', 'reference', 'third'].map(id => ({ id, url: 'https://publisher.example/' + id, publishedAt: null, firstSeen: 1000, content: 'A documented draft can be inspected before approval.' })) };
+  const profiles = ['personal', 'company', 'third-profile', 'fourth-profile'];
+  function value(mode: string, kind: string) {
+    const frame = { primarySourceId: 'primary', evidenceCitations: [{ sourceId: 'primary', passageIds: [0] }, { sourceId: 'reference', passageIds: [0] }],
+      relationshipSupport: 'bounded_inference', relationshipExplanation: 'A documented draft supports our proposed inspection, not an outcome.', claimBasis: 'described_method',
+      profileChecks: profiles.map(profileId => ({ profileId, fits: true, relevance: 22, reason: 'An inspectable decision.' })), familyKey: 'inspect-draft',
+      qualityComponents: { sourceSupport: 'supported_bounded_claim', usefulDecision: 'concrete_decision', scopeHonesty: 'accurately_bounded' },
+      claim: { readerDecision: { mode, question: 'What should be inspected?', answer: 'Inspect the documented artifact.', ...(mode === 'proposed_evaluation' ? { inspection: {
+        output: 'The draft.', action: 'Read it against supplied material.', decisionCriterion: 'Whether it preserves the required material.', basis: 'analyst_proposed' } } : {}) },
+        factualCore: kind === 'mechanism' ? { kind, input: 'Supplied material.', action: 'Create a draft.', output: 'A draft.', conditions: null } : { kind, observation: 'The publisher describes a reviewable draft.' },
+        whyItMatters: 'An explicit boundary.', limitations: 'The proposed inspection is our inference, not an observed result.' } };
+    return { findings: { packet: { ...frame, additionalIdeas: [{ ...frame, familyKey: 'child-inspection' }] } } };
+  }
+  it('safely lowers actual three-document/four-profile V9 unions while preserving structural branches and references', () => {
+    const original = researchSourcePacketSchemaV9(packet, profiles), before = JSON.stringify(original), lowered = anthropicStrictResearchSchema(original);
+    expect(JSON.stringify(original)).toBe(before); expect(anthropicStrictResearchSchema(lowered)).toEqual(lowered);
+    expect(JSON.stringify(lowered)).not.toContain('"oneOf":');
+    expect(lowered).toMatchObject({ type: 'object', additionalProperties: false, required: ['findings'] });
+    const originalParser = z.fromJSONSchema(JSON.parse(before)), providerParser = z.fromJSONSchema(JSON.parse(JSON.stringify(lowered)));
+    for (const mode of ['informative', 'application', 'proposed_evaluation']) for (const kind of ['observation', 'mechanism']) {
+      const raw = value(mode, kind);
+      expect(originalParser.safeParse(raw).success).toBe(true); expect(providerParser.safeParse(raw).success).toBe(true);
+      delete (raw.findings.packet.additionalIdeas[0].claim.readerDecision as { question?: string }).question;
+      expect(originalParser.safeParse(raw).success).toBe(false); expect(providerParser.safeParse(raw).success).toBe(false);
+    }
+    for (const findings of ['{"packet":{}}', '{"packet":{}}}', [], null]) {
+      expect(originalParser.safeParse({ findings }).success).toBe(false); expect(providerParser.safeParse({ findings }).success).toBe(false);
+    }
+    const outOfRange = value('informative', 'observation'); outOfRange.findings.packet.profileChecks[0].relevance = 99;
+    expect(originalParser.safeParse(outOfRange).success).toBe(false);
+    expect(providerParser.safeParse(outOfRange).success).toBe(true);
+    expect(JSON.stringify(lowered)).toContain('maximum: 30');
+  });
+  it('rejects overlapping or untagged oneOf, unsupported keywords, unresolved/external/recursive refs and open objects', () => {
+    const schemas = [
+      { oneOf: [{ type: 'string' }, { type: 'string' }] },
+      { oneOf: ['a', 'b'].map(() => ({ type: 'object', properties: { mode: { const: 'same' } }, required: ['mode'], additionalProperties: false })) },
+      { type: 'string', pattern: '(?=hidden)' }, { type: 'string', not: { const: 'hidden' } },
+      { $ref: 'https://publisher.example/schema' }, { $ref: '#/$defs/missing' },
+      { $defs: { cycle: { $ref: '#/$defs/cycle' } }, $ref: '#/$defs/cycle' },
+      { type: 'object', properties: {}, required: [], additionalProperties: true },
+      { allOf: [{ $ref: '#/$defs/item' }], $defs: { item: { type: 'string' } } },
+    ];
+    for (const schema of schemas) expect(() => anthropicStrictResearchSchema(schema)).toThrow();
+  });
+  it('enforces provider complexity limits on expanded reference usage', () => {
+    const repeated = (count: number, definition: object) => ({ type: 'object', properties: Object.fromEntries(Array.from({ length: count }, (_, i) => ['field' + i, { $ref: '#/$defs/repeated' }])),
+      required: Array.from({ length: count }, (_, i) => 'field' + i), additionalProperties: false, $defs: { repeated: definition } });
+    const union = { anyOf: [{ type: 'string' }, { type: 'null' }] };
+    expect(() => anthropicStrictResearchSchema(repeated(16, union))).not.toThrow();
+    expect(() => anthropicStrictResearchSchema(repeated(17, union))).toThrow('complexity');
+    const optional = { type: 'object', properties: { optional: { type: 'string' } }, required: [], additionalProperties: false };
+    expect(() => anthropicStrictResearchSchema(repeated(24, optional))).not.toThrow();
+    expect(() => anthropicStrictResearchSchema(repeated(25, optional))).toThrow('complexity');
+  });
+  it('sets strict only on the opt-in tool, preserves Sonnet thinking/choice and sends the already frozen lowered schema', () => {
+    const schema = anthropicStrictResearchSchema(researchSourcePacketSchemaV9(packet, profiles));
+    const request = anthropicResearchRequest('claude-sonnet-5-5', 'same instructions', { items: [] }, schema, 16384, 'strict-tool');
+    expect(request).toMatchObject({ model: 'claude-sonnet-5-5', max_tokens: 16384, thinking: { type: 'between_tools' }, tool_choice: { type: 'auto', disable_parallel_tool_use: true } });
+    if (!('tools' in request)) throw Error('Strict tool request missing tools');
+    expect(request.tools[0]).toMatchObject({ name: 'submit_research', strict: true, input_schema: schema }); expect(request).not.toHaveProperty('output_config');
+    const old = anthropicResearchRequest('claude-sonnet-5-5', 'same instructions', {}, schema, 16384, 'tool');
+    if (!('tools' in old)) throw Error('Legacy tool request missing tools');
+    expect(old.tools[0]).not.toHaveProperty('strict'); expect(old.tools[0].input_schema).toBe(schema);
+  });
+  it('routes only the explicit strict marker to strict-tool and never decodes nested findings strings', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test');
+    const raw = { findings: '{"packet":{}}}' }, fetcher = mockMessage({ model: 'claude-sonnet-5-5', stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'submit_research', input: raw }] });
+    const schema = anthropicStrictResearchSchema(researchSourcePacketSchemaV9(packet, profiles));
+    const result = await callResearchModel('frozen instructions', { items: [{ id: 'packet', reviewTransport: 'anthropic-strict-tool-v1' }] }, schema, 16384, { ...context, operation: 'replay_packet_evidence' }, 'claude-sonnet-5-5');
+    expect(result.value).toEqual(raw); expect(typeof result.value.findings).toBe('string');
+    const wire = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
+    expect(wire.tools[0]).toMatchObject({ strict: true, input_schema: schema }); expect(wire).not.toHaveProperty('output_config');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(anthropicResearchOutput({ stop_reason: 'max_tokens', content: [{ type: 'tool_use', name: 'submit_research', input: raw }] }, 'strict-tool', 'claude-sonnet-5-5')).toBe('');
   });
 });

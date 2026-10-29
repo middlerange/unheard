@@ -359,7 +359,9 @@ export async function callResearchModel(
   const singleSource = data && typeof data === "object" && "items" in data && Array.isArray(data.items) && data.items.length === 1;
   const explicitToolTransport = anthropic && data && typeof data === "object" && "items" in data && Array.isArray(data.items)
     && data.items[0] && typeof data.items[0] === "object" && data.items[0].reviewTransport === "anthropic-tool-v1";
-  const anthropicMode = explicitToolTransport || evidenceOperation && !singleSource ? "tool" : "schema";
+  const strictToolTransport = anthropic && data && typeof data === "object" && "items" in data && Array.isArray(data.items)
+    && data.items[0] && typeof data.items[0] === "object" && data.items[0].reviewTransport === "anthropic-strict-tool-v1";
+  const anthropicMode = strictToolTransport ? "strict-tool" : explicitToolTransport || evidenceOperation && !singleSource ? "tool" : "schema";
   const secret = anthropic ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
   const key = process.env[secret];
   if (!key) throw new Error(`Set ${secret} in Cloudflare secrets to run research`);
@@ -408,7 +410,7 @@ export async function callResearchModel(
     if (anthropic) {
       const result = await response.json() as AnthropicResearchResponse;
       const output = anthropicResearchOutput(result, anthropicMode, model);
-      const completed = result.stop_reason === "end_turn" || anthropicMode === "tool" && result.stop_reason === "tool_use" && Boolean(output);
+      const completed = result.stop_reason === "end_turn" || anthropicMode !== "schema" && result.stop_reason === "tool_use" && Boolean(output);
       await finishResearchUsage(usageId, usageContext, {
         model: result.model || model, tier: result.usage?.service_tier || "standard",
         responseId: result.id, status: completed ? "completed" : result.stop_reason || "unknown", usage: result.usage,

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parseResearchAudience } from './research-audience';
 import { researchSelectionAudience, RESEARCH_SELECTION_VIEW_VERSION } from './research-selection-audience';
-import { researchPacketsFromDefinitions, configuredResearchPacketDefinitions, reviewResearchSourcePackets, researchSourcePacketPolicy, researchSourcePacketPolicyContract, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW, RESEARCH_SOURCE_PACKET_V5_REVIEW, RESEARCH_SOURCE_PACKET_V6_REVIEW, RESEARCH_SOURCE_PACKET_V7_REVIEW, RESEARCH_SOURCE_PACKET_V8_REVIEW, RESEARCH_SOURCE_PACKET_V9_REVIEW, ResearchSourcePacketPending, type ResearchPacketAccess } from './research-source-packets';
+import { researchPacketsFromDefinitions, configuredResearchPacketDefinitions, reviewResearchSourcePackets, researchSourcePacketPolicy, researchSourcePacketPolicyContract, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW, RESEARCH_SOURCE_PACKET_V5_REVIEW, RESEARCH_SOURCE_PACKET_V6_REVIEW, RESEARCH_SOURCE_PACKET_V7_REVIEW, RESEARCH_SOURCE_PACKET_V8_REVIEW, RESEARCH_SOURCE_PACKET_V9_REVIEW, RESEARCH_SOURCE_PACKET_V9_STRICT_REVIEW, ResearchSourcePacketPending, type ResearchPacketAccess } from './research-source-packets';
 import { researchHash } from './research-model';
 import type { ResearchSourcePacket } from './research-source-packet-model';
 import type { ResearchSourceSeed } from './research-types';
@@ -445,5 +445,49 @@ describe('opt-in structured reader decision packet receipts', () => {
     test.values.set(id, { ...attempt, normalizationOnly: true, reusedFrom: {} });
     await expect(reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, v9)).rejects.toThrow('authentic parent');
     expect(generate).toHaveBeenCalledTimes(8);
+  });
+});
+
+describe('V9 strict tool variant', () => {
+  it('retains the used V9 contract and normalizer while explicitly pinning strict transport and compiler', async () => {
+    const old = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V9_REVIEW), strict = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V9_STRICT_REVIEW);
+    expect(await researchHash(JSON.stringify(researchSourcePacketPolicyContract(RESEARCH_SOURCE_PACKET_V9_REVIEW, 16384)))).toBe('cab5015d5ada5ad6a3524e4e43ba1ae263f7ce56d5ab7c6f7f0d97e857956d4e');
+    expect(strict.instructions).toBe(old.instructions); expect(strict.normalize).toBe(old.normalize); expect(strict.metadata).toBe(old.metadata); expect(strict.normalizerVersion).toBe(old.normalizerVersion);
+    expect(old.reviewTransport).toBeUndefined(); expect(old.schemaCompilerVersion).toBeUndefined(); expect(strict.reuseCompletedV4).toBeUndefined();
+    expect(researchSourcePacketPolicyContract(RESEARCH_SOURCE_PACKET_V9_STRICT_REVIEW, 16384)).toMatchObject({ reviewTransport: 'anthropic-strict-tool-v1', schemaCompilerVersion: 'anthropic-strict-tool-schema-v1', scoreThreshold: 70, rubric: 'source_qualification_v1' });
+    const malformed = { findings: JSON.stringify(response(packet()).findings) };
+    expect((await strict.normalize(malformed, [packet()], ['personal'])).findings).toEqual([]);
+  });
+  it('owns a fresh receipt, retains old raw, pins compiler identity in the plan and authenticates only its own zero-call resume', async () => {
+    const raw: any = response(packet()); raw.findings.workflow.claim = {
+      readerDecision: { mode: 'informative', question: 'What approval boundary is documented?', answer: 'Human approval precedes changes.' },
+      factualCore: { kind: 'observation', observation: 'The publisher describes a human approval boundary.' },
+      whyItMatters: 'A bounded permission decision.', limitations: 'A documented capability, not measured effectiveness.',
+    };
+    const test = harness(vi.fn(async () => structuredClone(raw))), old = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V9_REVIEW), strict = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V9_STRICT_REVIEW);
+    const original = await reviewResearchSourcePackets([packet()], test.access, old), oldBytes = [...test.values].map(([id, value]) => [id, JSON.stringify(value)]);
+    await expect(reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, strict)).rejects.toBeInstanceOf(ResearchSourcePacketPending);
+    expect(test.generate).toHaveBeenCalledTimes(1);
+    const result = await reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 1 } }, strict);
+    expect(result.acceptedIdeas).toEqual(original.acceptedIdeas); expect(result.manifestIds).not.toEqual(original.manifestIds); expect(test.generate).toHaveBeenCalledTimes(2);
+    const plan = [...test.values.values()].find((value: any) => value.schemaCompilerVersion) as any;
+    expect(plan.schemaCompilerVersion).toBe('anthropic-strict-tool-schema-v1'); expect(plan.request.data.items[0].reviewTransport).toBe('anthropic-strict-tool-v1');
+    expect(JSON.stringify(plan.request.schema)).not.toContain('"oneOf":');
+    const id = 'research-source-packet-attempt:v1:' + await researchHash(JSON.stringify(plan)), attempt = test.values.get(id) as any;
+    expect(attempt.raw).toEqual(raw); expect(attempt.rawHash).toBe(await researchHash(JSON.stringify(raw))); expect(attempt).not.toHaveProperty('normalizationOnly');
+    expect(await reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, strict)).toEqual(result);
+    expect(await reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, old)).toEqual(original);
+    for (const [key, bytes] of oldBytes) expect(JSON.stringify(test.values.get(key))).toBe(bytes);
+    const differentCompiler = { ...strict, schemaCompilerVersion: 'future-compiler' } as unknown as typeof strict;
+    await expect(reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, differentCompiler)).rejects.toBeInstanceOf(ResearchSourcePacketPending);
+    expect(test.generate).toHaveBeenCalledTimes(2);
+    const outOfRange = structuredClone(raw); outOfRange.findings.workflow.profileChecks[0].relevance = 99;
+    expect((await strict.normalize(outOfRange, [packet()], ['personal'])).findings).toEqual([]);
+    const badQuote = structuredClone(raw); badQuote.findings.workflow.evidenceCitations[0].passageIds = [-1];
+    expect((await strict.normalize(badQuote, [packet()], ['personal'])).findings).toEqual([]);
+    for (const changed of [{ sourceSupport: 'unsupported' }, { usefulDecision: 'generic' }, { scopeHonesty: 'material_gap' }]) {
+      const failed = structuredClone(raw); Object.assign(failed.findings.workflow.qualityComponents, changed);
+      expect((await strict.normalize(failed, [packet()], ['personal'])).findings[0].score).toBeLessThan(70);
+    }
   });
 });
