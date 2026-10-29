@@ -2190,6 +2190,42 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "notes": "Public first-party guide to audience signals, campaign-specific input types and Lookalike references. Keep Performance Max asset-group steps distinct from Demand Gen behavior, and preserve the scope of list eligibility, refresh and population timing. Unknown publication stays unknown; record actual first observation and body changes separately. Current documentation backfill is not blind historical discovery."
   },
   {
+    "id": "google-demand-gen-lookalike-mode-reference",
+    "freeArticleFallback": true,
+    "freeArticleFallbackOnRedirect": true,
+    "name": "Google Ads — Demand Gen Lookalike suggestion mode",
+    "url": "https://support.google.com/google-ads/answer/13541369?hl=en",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "research",
+    "enabled": true,
+    "priority": 2,
+    "artifactReview": { "enabled": false, "format": "inspectable_public_artifact" },
+    "referencePacket": {
+      "id": "google-demand-gen-lookalike-mechanism",
+      "enabled": false,
+      "sourceIds": ["google-demand-gen-lookalike-mode-reference", "google-demand-gen-lookalike-constraint-reference", "reference-47f8905a46b4"],
+      "relationship": {
+        "type": "same_product",
+        "reason": "Official Demand Gen references describe campaign delivery and two explicitly different Lookalike modes. Preserve default suggestion-mode rollout, opt-out constraints and each mode's seed requirements; related documentation does not establish customer results or observed effectiveness."
+      }
+    },
+    "notes": "Public first-party Demand Gen mechanism and rollout reference. Seed lists and reach settings become signals rather than strict similarity constraints in suggestion mode; the former 100-user minimum is removed there. Keep opted-out targeting-constraint behavior separate. Attribute performance promises, preserve unknown publication and actual first observation, and do not treat this current reference backfill as independent historical discovery."
+  },
+  {
+    "id": "google-demand-gen-lookalike-constraint-reference",
+    "freeArticleFallback": true,
+    "freeArticleFallbackOnRedirect": true,
+    "name": "Google Ads — Demand Gen Lookalike targeting constraint",
+    "url": "https://support.google.com/google-ads/answer/16902001?hl=en",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "research",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Public first-party guide for Demand Gen ad groups opted out of Lookalike suggestion mode. Preserve the scope of seed behavior, similarity thresholds, minimum size and refresh requirements; do not transfer these constraints to the new default suggestion mode. Retain unknown publication and actual first observation. Current reference backfill is not blind historical discovery."
+  },
+  {
     "id": "google-ads-commerce-news",
     "name": "Google — Ads and Commerce announcements",
     "url": "https://blog.google/products/ads-commerce/",
