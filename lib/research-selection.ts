@@ -16,6 +16,25 @@ const idFor = (runId: string) => `research-selection:${runId}`;
 const normal = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
 const safe = (s: string) => s.replace(/[\r\n]+/g, " ").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
+// Keep distinct proposals selectable, while placing all angles from the same
+// public source together. Stable tie breaks preserve predictable numbering.
+export function groupResearchCandidates<T extends { id: string; url: string; score: number; content_angle: string }>(findings: T[]): T[][] {
+  const groups = new Map<string, T[]>();
+  const seen = new Set<string>();
+  for (const finding of [...findings].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))) {
+    const key = `${finding.url.trim()}\n${normal(finding.content_angle)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const source = finding.url.trim();
+    const group = groups.get(source) || [];
+    group.push(finding);
+    groups.set(source, group);
+  }
+  const ordered = [...groups.values()];
+  for (const group of ordered) group.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+  return ordered.sort((a, b) => b[0].score - a[0].score || a[0].url.localeCompare(b[0].url) || a[0].id.localeCompare(b[0].id));
+}
+
 // A snapshot is frozen before the network call. A lost Slack response is never
 // automatically retried, because it could otherwise send a duplicate message.
 export async function sendResearchSelection(teamId: string, runId: string) {
@@ -31,22 +50,25 @@ export async function sendResearchSelection(teamId: string, runId: string) {
   const integration = await getSlackIntegration(teamId);
   if (!integration?.enabled || !integration.channel_id) throw new Error("Slack approval channel is not enabled");
   const sourceIds = new Set(JSON.parse(run.source_ids) as string[]);
-  const seen = new Set<string>();
-  const candidates = (await getRunResearchFindings(teamId, runId)).filter(f => {
+  const groups = groupResearchCandidates((await getRunResearchFindings(teamId, runId)).filter(f => {
     if (!sourceIds.has(f.source_id) || f.score < RESEARCH_POST_MIN_SCORE || f.status === "dismissed" ||
       (researchFindingDates(f).publishedAt !== null && f.published_at > run.created_at)) return false;
-    const key = `${normal(f.url)}\n${normal(f.content_angle)}`;
-    if (seen.has(key)) return false;
-    seen.add(key); return true;
-  });
+    return true;
+  }));
+  const candidates = groups.flat();
   if (!candidates.length) return { count: 0, sent: false };
   for (const candidate of candidates) await saveResearchFindingSnapshot(candidate);
-  const header = `*Research candidates (${candidates.length})*\nReply in this thread with the numbers to write, for example: 1, 3, 7, or the exact title of one candidate. No writing starts until you select.\n\n`;
+  const header = `*Research candidates (${candidates.length} angles from ${groups.length} sources)*\nSources are grouped by their highest-scoring angle; scores do not predict performance. Reply with numbers to write, for example: 1, 3, 7, or the exact title of one candidate. No writing starts until you select.\n\n`;
   const excerpt = (value: string, limit: number) => value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
-  const render = (titleLimit: number, angleLimit: number) => header + candidates.map((f, i) => {
-    const title = safe(excerpt(f.title, titleLimit)), url = /^https?:\/\/[^\s<>|]+$/i.test(f.url) ? f.url : "";
-    return `${i + 1}. ${url ? `<${url}|${title}>` : title} — ${safe(excerpt(f.content_angle, angleLimit))}`;
-  }).join("\n");
+  const render = (titleLimit: number, angleLimit: number) => {
+    let index = 0;
+    return header + groups.map(group => {
+      const first = group[0], title = safe(excerpt(first.title, titleLimit));
+      const url = /^https?:\/\/[^\s<>|]+$/i.test(first.url) ? first.url : "";
+      const heading = `*${url ? `<${url}|${title}>` : title}*`;
+      return [heading, ...group.map(f => `${++index}. ${safe(excerpt(f.content_angle, angleLimit))} (score ${f.score})`)].join("\n");
+    }).join("\n\n");
+  };
   let titleLimit = Infinity;
   let message = render(titleLimit, Infinity);
   if (message.length > 39000) { titleLimit = 180; message = render(titleLimit, 160); }

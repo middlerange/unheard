@@ -1007,6 +1007,17 @@ describe("safe live Slack review tests", () => {
 });
 
 describe("Research candidate selection", () => {
+  it("groups angles by source, ranks groups by best score, and keeps distinct decisions", async () => {
+    const { groupResearchCandidates } = await import("./research-selection");
+    const rows = [
+      { id: "a1", url: "https://example.com/a", score: 80, content_angle: "Choose a subscription migration" },
+      { id: "b1", url: "https://example.com/b", score: 85, content_angle: "Measure trial activation" },
+      { id: "a2", url: "https://example.com/a", score: 95, content_angle: "Compare AI packaging" },
+      { id: "a3", url: "https://example.com/a", score: 70, content_angle: "  COMPARE AI PACKAGING  " },
+    ];
+    expect(groupResearchCandidates(rows).map(group => group.map(row => row.id))).toEqual([["a2", "a1"], ["b1"]]);
+    expect(groupResearchCandidates([...rows].reverse()).map(group => group.map(row => row.id))).toEqual([["a2", "a1"], ["b1"]]);
+  });
   it("never silently truncates or repeats an uncertain Slack delivery", async () => {
     const { sendResearchSelection } = await import("./research-selection");
     run("INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp,source_ids)VALUES('selection-oversize','a','scan','completed',1,100,'Product leaders','[\"source\"]'),('selection-uncertain','a','scan','completed',1,100,'Product leaders','[\"source\"]')");
@@ -1032,8 +1043,9 @@ describe("Research candidate selection", () => {
     expect(await sendResearchSelection("a", "selection-run")).toEqual({ count: 2, sent: true });
     expect(fetcher).toHaveBeenCalledTimes(1);
     const packet = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
-    expect(packet.text).toContain("1. <https://example.com/article|Article> — First angle");
-    expect(packet.text).toContain("2. <https://example.com/article|Article> — Second angle");
+    expect(packet.text).toContain("*<https://example.com/article|Article>*");
+    expect(packet.text).toContain("1. First angle (score 90)");
+    expect(packet.text).toContain("2. Second angle (score 90)");
     expect(await sendResearchSelection("a", "selection-run")).toEqual({ count: 2, sent: true });
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(parseSelectionNumbers("1, 2 1", 2)).toEqual([1, 2]);
