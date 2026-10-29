@@ -2141,5 +2141,29 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "enabled": true,
     "priority": 2,
     "notes": "Public first-party operating account. Preserve the original January 2026 publication date and actual first observation. Attribute staffing, productivity and pipeline claims to SaaStr; they are not independently measured outcomes. Monitor the documented oversight, training and rollout constraints. This known-page reference backfill does not prove independent discovery during a later social-post window."
+  },
+  {
+    "id": "trendtrack-free-competitor-ads-reference",
+    "name": "TrendTrack — free competitor ads finder",
+    "url": "https://www.trendtrack.io/tools/competitor-ads-finder",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "artifactReview": { "enabled": false, "format": "inspectable_public_artifact" },
+    "notes": "Public first-party tool guide describing observable domain-entry, active-creative, format and longevity views and the wider intelligence access boundary. Attribute capabilities to the publisher; active ads and longevity do not prove spend, profitability or effectiveness. Preserve unknown publication date and actual first observation. This known-page reference is current backfill, not blind historical discovery."
+  },
+  {
+    "id": "trendtrack-free-product-finder-reference",
+    "name": "TrendTrack — free winning product finder",
+    "url": "https://www.trendtrack.io/tools/winning-product-finder",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "artifactReview": { "enabled": false, "format": "inspectable_public_artifact" },
+    "notes": "Public first-party tool guide describing the daily product selection, country/niche/price/creative inspection flow and deeper research access boundary. Attribute the documented limit and capabilities; a winning-product label and public advertising activity do not establish sales, margin or conversion. Preserve unknown publication date and actual first observation. This known-page reference is current backfill, not blind historical discovery."
   }
 ];
