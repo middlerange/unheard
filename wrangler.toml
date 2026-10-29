@@ -6,6 +6,7 @@ workers_dev = true
 preview_urls = true
 
 [limits]
+cpu_ms = 300_000
 subrequests = 50_000
 
 [vars]
