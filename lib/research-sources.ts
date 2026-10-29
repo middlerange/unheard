@@ -2239,6 +2239,19 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "notes": "Public first-party guide for Demand Gen ad groups opted out of Lookalike suggestion mode. Preserve the scope of seed behavior, similarity thresholds, minimum size and refresh requirements; do not transfer these constraints to the new default suggestion mode. Retain unknown publication and actual first observation. Current reference backfill is not blind historical discovery. Artifact routing is pending validation; capture remains enabled."
   },
   {
+    "id": "google-demand-gen-original-cases",
+    "freeArticleFallback": true,
+    "freeArticleFallbackOnRedirect": true,
+    "name": "Think with Google — proactive demand creation cases",
+    "url": "https://business.google.com/aunz/think/search-and-video/demand-generation-performance-marketing-drive-consumer-intent/",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Original Google editorial case narrative. Preserve the May 2026 publication separately from later modification and actual first observation. Attribute predictive-signal, audience, retargeting and performance statements to Google and the named brands. Keep each case's audience, channel, baseline and method limits; it does not establish independent causal effectiveness, universal acquisition results or a B2B SaaS deployment. Current reference recovery does not prove historical blind discovery."
+  },
+  {
     "id": "google-ads-commerce-news",
     "name": "Google — Ads and Commerce announcements",
     "url": "https://blog.google/products/ads-commerce/",
