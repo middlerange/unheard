@@ -855,6 +855,72 @@ describe("research persistence and team isolation", () => {
       expect(fetcher).toHaveBeenCalledTimes(calls);
     } finally { fetcher.mockRestore(); if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = previousKey; }
   }, 30_000);
+  it("runs a six-hour publication-only scan without drafting or reusing a different active window", async () => {
+    const team = "six-hour-window", now = Date.now();
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.feedUrl && source.kind === "rss")!;
+    const otherSeed = RESEARCH_SOURCE_SEEDS.find(source => source.id !== seed.id && source.enabled)!;
+    execute({ queries: [{ sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,?,?)", params: [team, team, team, now, now] }] });
+    await initializeResearch(team);
+    execute({ queries: [
+      { sql: "UPDATE research_sources SET enabled=0 WHERE team_id=?", params: [team] },
+      { sql: "UPDATE research_sources SET enabled=1 WHERE team_id=? AND seed_id=?", params: [team, seed.id] },
+      { sql: "UPDATE research_settings SET auto_drafts=1 WHERE team_id=?", params: [team] },
+    ] });
+    const priorWorkflow = globalThis.__contentHubResearchWorkflow__, priorKey = process.env.ANTHROPIC_API_KEY;
+    globalThis.__contentHubResearchWorkflow__ = { create: vi.fn(async () => ({})) };
+    process.env.ANTHROPIC_API_KEY = "six-hour-test-key";
+    let fetcher: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      const { run } = await createResearchRun(team, { days: 0.25, mode: "scan" }, true);
+      expect(run).toMatchObject({ days: 0.25, editorial: false });
+      const [stored] = execute({ queries: [{ sql: "SELECT days, typeof(days) AS storage_type FROM research_runs WHERE id=?", params: [run.id] }] }).map((r: { results: any[] }) => r.results[0]);
+      expect(stored).toEqual({ days: 0.25, storage_type: "real" });
+      await expect(createResearchRun(team, { days: 1, mode: "scan" })).rejects.toThrow("different time window or mode");
+      execute({ queries: [{ sql: "UPDATE research_sources SET enabled=1 WHERE team_id=? AND seed_id=?", params: [team, otherSeed.id] }] });
+      await expect(createResearchRun(team, { days: 0.25, mode: "scan" })).rejects.toThrow("different sources");
+      execute({ queries: [{ sql: "UPDATE research_sources SET enabled=0 WHERE team_id=? AND seed_id=?", params: [team, otherSeed.id] }] });
+      execute({ queries: [{ sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: ["six-hour-step", run.id, seed.id] }] });
+      const quote = "The team separated optional consent from account creation across every authentication path.";
+      const items = [
+        { id: "six-inside", date: run.createdAt - 1 },
+        { id: "six-start", date: run.createdAt - 6 * 3_600_000 },
+        { id: "six-end", date: run.createdAt },
+        { id: "six-older", date: run.createdAt - 6 * 3_600_000 - 1 },
+        { id: "newly-discovered-old", date: run.createdAt - 2 * 86_400_000 },
+        { id: "six-future", date: run.createdAt + 1 },
+        { id: "six-undated", date: null },
+      ];
+      execute({ queries: items.map(item => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,'article')",
+        params: [item.id, team, seed.id, new URL(item.id, seed.url).href, item.id, quote, item.date, run.createdAt, quote],
+      })) });
+      let expected = ["six-inside", "six-start", "six-end"];
+      fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+        expect(String(url)).toBe("https://api.anthropic.com/v1/messages");
+        const request = JSON.parse(String(init?.body)), input = JSON.parse(request.input ?? request.messages[0].content);
+        if (input.proposed) return editorialReviewFixture();
+        expect(input.items.map((item: { id: string }) => item.id).sort()).toEqual([...expected].sort());
+        const value = { itemIds: [] };
+        return modelResponseFixture({ status: "completed", usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: "output_text", text: JSON.stringify(screeningFixture(value, input.items)) }] }] });
+      });
+      await processResearchJob({ operation: "rank", runId: run.id });
+      await processResearchJob({ operation: "drafts", runId: run.id });
+      const snapshot = await getResearchSnapshot(team);
+      expect(snapshot.runs.find(row => row.id === run.id)).toMatchObject({ status: "completed", days: 0.25, editorial: false, diagnostics: { eligibleCount: 3, freshCount: 3, evergreenCount: 0 } });
+      expect(snapshot.findings).toEqual([]);
+      expect(snapshot.drafts).toEqual([]);
+      const daily = await createResearchRun(team, { days: 1, mode: "scan" });
+      execute({ queries: [{ sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: ["daily-step", daily.run.id, seed.id] }] });
+      expected = ["six-inside", "six-start", "six-end", "six-older", "six-future", "newly-discovered-old"];
+      await finishResearchRankJob(daily.run.id);
+      const dailySnapshot = await getResearchSnapshot(team);
+      expect(dailySnapshot.runs.find(row => row.id === daily.run.id)).toMatchObject({ status: "completed", days: 1, diagnostics: { eligibleCount: 6, evergreenCount: 1 } });
+    } finally {
+      fetcher?.mockRestore(); globalThis.__contentHubResearchWorkflow__ = priorWorkflow;
+      if (priorKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = priorKey;
+    }
+  }, 30_000);
+
   it("accepts a seven-day discovery run, respects publication and discovery windows, and never drafts", async () => {
     const now = Date.now();
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.feedUrl && source.kind === "rss")!;

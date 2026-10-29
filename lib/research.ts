@@ -392,7 +392,7 @@ export async function createResearchRun(
 ) {
   const data = z
     .object({
-      days: z.union([z.literal(1), z.literal(7), z.literal(30)]).default(30),
+      days: z.union([z.literal(0.25), z.literal(1), z.literal(7), z.literal(30)]).default(30),
       mode: z.enum(["scan", "collect"]).default("scan"),
       sourceIds: z.array(z.string().min(1)).min(1)
         .refine(ids => new Set(ids).size === ids.length, "Source IDs must be unique")
@@ -421,6 +421,24 @@ export async function createResearchRun(
     const enabledIds = new Set(enabled.map(source => source.seedId));
     z.array(z.string()).refine(ids => ids.every(id => enabledIds.has(id)), "Requested sources must be enabled for this team").parse(data.sourceIds);
   }
+  async function checkActiveRun(active: typeof research_runs.$inferSelect) {
+    if ((data.days === 0.25 || active.days === 0.25) && (active.days !== data.days || active.mode !== data.mode))
+      throw new Error("A research run with a different time window or mode is active. Wait for it to finish before starting the six-hour scan.");
+    if (data.days === 0.25 && !data.sourceIds) {
+      const enabled = await db.select({ seedId: research_sources.seed_id }).from(research_sources).where(and(
+        eq(research_sources.team_id, teamId), eq(research_sources.enabled, true),
+      )).all();
+      const requested = enabled.map(source => source.seedId).filter(id => RESEARCH_SOURCE_SEEDS.some(seed => seed.id === id));
+      const activeIds = new Set(JSON.parse(active.source_ids) as string[]);
+      if (activeIds.size !== requested.length || requested.some(id => !activeIds.has(id)))
+        throw new Error("A research run with different sources is active. Wait for it to finish before starting the six-hour scan.");
+    }
+    if (data.sourceIds) {
+      const activeIds = new Set(JSON.parse(active.source_ids) as string[]);
+      if (activeIds.size !== data.sourceIds.length || data.sourceIds.some(id => !activeIds.has(id)))
+        throw new Error("A research run with different sources is active. Wait for it to finish before starting this source subset.");
+    }
+  }
   const active = await db
     .select()
     .from(research_runs)
@@ -438,11 +456,7 @@ export async function createResearchRun(
     )
     .get();
   if (active) {
-    if (data.sourceIds) {
-      const activeIds = new Set(JSON.parse(active.source_ids) as string[]);
-      if (activeIds.size !== data.sourceIds.length || data.sourceIds.some(id => !activeIds.has(id)))
-        throw new Error("A research run with different sources is active. Wait for it to finish before starting this source subset.");
-    }
+    await checkActiveRun(active);
     if (!scheduledRunId || active.id === scheduledRunId) {
       await getFrozenResearchAudience(active);
       await dispatchResearchRun(active.id);
@@ -516,6 +530,7 @@ export async function createResearchRun(
       )
       .get();
     if (!other) throw new Error("Run could not be created");
+    await checkActiveRun(other);
     if (!scheduledRunId || other.id === scheduledRunId) {
       await getFrozenResearchAudience(other);
       await dispatchResearchRun(other.id);
@@ -1562,7 +1577,9 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       ),
     ) : sql`0`;
     const eligibleSignal = and(
-      or(datedSignal, undatedWatchSignal),
+      run.days === 0.25
+        ? and(gte(research_items.published_at, windowStart), lte(research_items.published_at, run.created_at))
+        : or(datedSignal, undatedWatchSignal),
       or(eq(research_items.content_type, "article"), eq(research_items.transcript_status, "available")),
     );
     const candidates = await db
