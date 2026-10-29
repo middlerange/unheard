@@ -149,6 +149,13 @@ function renderPacketV9Claim(raw: unknown) {
   return { summary, contentAngle, whyItMatters: claim.whyItMatters, limitations: claim.limitations };
 }
 
+function renderPacketV9RelationshipClaim(raw: unknown, frame: Record<string, unknown>) {
+  const claim = renderPacketV9Claim(raw);
+  if (['claimBasis', 'relationshipSupport', 'relationshipExplanation'].some(key => typeof frame[key] !== 'string'))
+    throw Error('Packet relationship metadata must use strings');
+  return { ...claim, limitations: `Claim basis: ${frame.claimBasis}\nRelationship support: ${frame.relationshipSupport}\nRelationship: ${frame.relationshipExplanation}\nLimitations: ${claim.limitations}` };
+}
+
 export type ResearchSourcePacketSource = {
   id: string; url: string; publishedAt: number | null; firstSeen: number | null; content: string;
   passages?: ResearchSourceReviewPassage[];
@@ -326,7 +333,11 @@ export async function normalizeResearchSourcePacketV9(raw: unknown, packets: Res
   return normalizePacket(raw, packets, enabledProfileIds, 'structured-inference-v2', completePacketClaimResearchEvidenceSchema, renderPacketV9Claim);
 }
 
-async function normalizePacket(raw: unknown, packets: ResearchSourcePacket[], enabledProfileIds: string[], policy: 'verbatim-v1' | 'structured-inference-v2', evidenceSchema = researchEvidenceSchema, renderClaim?: typeof renderPacketV9Claim): Promise<ResearchSourcePacketResult> {
+export async function normalizeResearchSourcePacketV9Relationship(raw: unknown, packets: ResearchSourcePacket[], enabledProfileIds: string[]): Promise<ResearchSourcePacketResult> {
+  return normalizePacket(raw, packets, enabledProfileIds, 'structured-inference-v2', completePacketClaimResearchEvidenceSchema, renderPacketV9RelationshipClaim);
+}
+
+async function normalizePacket(raw: unknown, packets: ResearchSourcePacket[], enabledProfileIds: string[], policy: 'verbatim-v1' | 'structured-inference-v2', evidenceSchema = researchEvidenceSchema, renderClaim?: (raw: unknown, frame: Record<string, unknown>) => ReturnType<typeof renderPacketV9Claim>): Promise<ResearchSourcePacketResult> {
   if (!enabledProfileIds.length || new Set(enabledProfileIds).size !== enabledProfileIds.length || enabledProfileIds.some(id => !id)) throw new Error('Packet review requires the full unique publishing-profile roster');
   if (new Set(packets.map(packet => packet.id)).size !== packets.length) throw new Error('Packet review requires unique packet IDs');
   const result: ResearchSourcePacketResult = { findings: [], packetProofs: [], diagnostics: [], bindings: [] };
@@ -355,7 +366,7 @@ async function normalizePacket(raw: unknown, packets: ResearchSourcePacket[], en
         }
         exactKeys(frame, ['primarySourceId', 'evidenceCitations', 'relationshipSupport', 'relationshipExplanation', 'claimBasis', 'profileChecks', 'claim', 'familyKey', 'qualityComponents'], 'Packet idea');
         if (frame.primarySourceId !== packet.primarySourceId) throw new Error('Packet idea must anchor to its configured real primary source');
-        if (renderClaim) frame = { ...frame, claim: renderClaim(frame.claim) };
+        if (renderClaim) frame = { ...frame, claim: renderClaim(frame.claim, frame) };
         if (!object(frame.claim)) throw new Error('Packet claim must be an object');
         exactKeys(frame.claim, ['summary', 'contentAngle', 'whyItMatters', 'limitations'], 'Packet claim');
         if (!Array.isArray(frame.profileChecks)) throw new Error('Packet profile checks must use the full enabled-profile array contract');

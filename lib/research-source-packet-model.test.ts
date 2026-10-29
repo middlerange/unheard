@@ -6,7 +6,7 @@ import {
   RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
   researchSourcePacketMetadata, researchSourcePacketSchema, normalizeResearchSourcePacket,
   RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS,
-  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2, normalizeResearchSourcePacketV4, normalizeResearchSourcePacketV5, normalizeResearchSourcePacketV9, researchSourcePacketSchemaV9, canonicalizeResearchSourcePacketV5,
+  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2, normalizeResearchSourcePacketV4, normalizeResearchSourcePacketV5, normalizeResearchSourcePacketV9, normalizeResearchSourcePacketV9Relationship, researchSourcePacketSchemaV9, canonicalizeResearchSourcePacketV5,
   type ResearchSourcePacket,
 } from './research-source-packet-model';
 
@@ -483,6 +483,69 @@ describe('structured reader decision packet contract', () => {
     child.claim.readerDecision.inspection.decisionCriterion = 'A criterion.'; child.additionalIdeas = [];
     result = await normalizeResearchSourcePacketV9(response(structuredFrame(), [child]), [packet()], profiles);
     expect(result.findings).toHaveLength(1); expect(result.diagnostics[0].reason).toContain('Packet idea');
+  });
+  it('renders actual relationship values and both disclosure texts verbatim without changing evidence or grade', async () => {
+    const primary = structuredFrame(); primary.claim.limitations = '  Vendor documentation; no observed outcome.\n';
+    primary.relationshipExplanation = 'Our editorial inference connects the documented draft with a proposed inspection, not an observed outcome.';
+    const raw = response(primary), before = JSON.stringify(raw);
+    const old = await normalizeResearchSourcePacketV9(raw, [packet()], profiles);
+    expect(old.findings).toEqual([]);
+    expect(old.diagnostics[0].reason).toContain('Bounded packet inference');
+    const result = await normalizeResearchSourcePacketV9Relationship(raw, [packet()], profiles);
+    expect(JSON.stringify(raw)).toBe(before); expect(result.diagnostics).toEqual([]);
+    expect(result.findings[0]).toMatchObject({ score: 92, claimBasis: primary.claimBasis,
+      limitations: `Claim basis: ${primary.claimBasis}\nRelationship support: ${primary.relationshipSupport}\nRelationship: ${primary.relationshipExplanation}\nLimitations: ${primary.claim.limitations}` });
+    const baselineFrame = structuredFrame(); baselineFrame.relationshipExplanation = primary.relationshipExplanation;
+    const baseline = await normalizeResearchSourcePacketV9(response(baselineFrame), [packet()], profiles);
+    expect(result.findings[0].summary).toBe(baseline.findings[0].summary);
+    expect(result.findings[0].contentAngle).toBe(baseline.findings[0].contentAngle);
+    expect(result.findings[0].qualityComponents).toEqual(baseline.findings[0].qualityComponents);
+    expect(result.packetProofs).toEqual(baseline.packetProofs);
+    primary.relationshipExplanation = 'Our editorial inference: '.repeat(100);
+    primary.claim.limitations = 'Complete source limitation. '.repeat(100);
+    const long = await normalizeResearchSourcePacketV9Relationship(response(primary), [packet()], profiles);
+    expect(long.findings[0].limitations).toContain(primary.relationshipExplanation);
+    expect(long.findings[0].limitations).toContain(primary.claim.limitations);
+  });
+  it('does not manufacture inference disclosure from enum values or neutral labels', async () => {
+    const primary = structuredFrame();
+    primary.relationshipExplanation = 'These separately documented premises are combined as our editorial proposal, with no observed outcomes.';
+    primary.claim.limitations = 'Publisher descriptions with no observed outcomes.';
+    const result = await normalizeResearchSourcePacketV9Relationship(response(primary), [packet()], profiles);
+    expect(result.findings).toEqual([]); expect(result.diagnostics[0].reason).toContain('Bounded packet inference');
+    expect(result.diagnostics[0].rawIdea).toEqual(primary);
+    primary.claim.limitations = 'This connection is our inference, not a documented combined workflow.';
+    expect((await normalizeResearchSourcePacketV9Relationship(response(primary), [packet()], profiles)).findings).toHaveLength(1);
+  });
+  it('retains rejection of unsupported or blank relationships and malformed limitations', async () => {
+    for (const explanation of ['', ' '.repeat(40), null, []]) {
+      const primary: any = structuredFrame(); primary.relationshipExplanation = explanation;
+      expect((await normalizeResearchSourcePacketV9Relationship(response(primary), [packet()], profiles)).findings).toEqual([]);
+    }
+    const bridge = structuredFrame(); bridge.relationshipSupport = 'unsupported_bridge';
+    expect((await normalizeResearchSourcePacketV9Relationship(response(bridge), [packet()], profiles)).diagnostics[0].reason).toContain('unsupported necessary relationship bridge');
+    const array: any = structuredFrame(); array.claim.limitations = ['Our inference'];
+    expect((await normalizeResearchSourcePacketV9Relationship(response(array), [packet()], profiles)).findings).toEqual([]);
+    const quote = structuredFrame(); quote.evidenceCitations[0].passageIds = [-1];
+    expect((await normalizeResearchSourcePacketV9Relationship(response(quote), [packet()], profiles)).findings).toEqual([]);
+    for (const changed of [{ sourceSupport: 'unsupported' }, { usefulDecision: 'generic' }, { scopeHonesty: 'material_gap' }]) {
+      const primary = structuredFrame(); Object.assign(primary.qualityComponents, changed);
+      expect((await normalizeResearchSourcePacketV9Relationship(response(primary), [packet()], profiles)).findings[0].score).toBeLessThan(70);
+    }
+  });
+  it('never borrows another frame’s relationship disclosure', async () => {
+    const parent = structuredFrame(), child = structuredFrame('another-reader');
+    child.relationshipExplanation = 'The separate documents are connected by our editorial proposal, without a measured result.';
+    child.claim.limitations = 'Publisher accounts, not independently observed results.';
+    const result = await normalizeResearchSourcePacketV9Relationship(response(parent, [child]), [packet()], profiles);
+    expect(result.findings).toHaveLength(1); expect(result.findings[0].limitations).toContain(parent.relationshipExplanation);
+    expect(result.findings[0].limitations).not.toContain(child.relationshipExplanation);
+    expect(result.diagnostics[0]).toMatchObject({ ideaIndex: 1, rawIdea: child });
+    child.relationshipSupport = 'documented_relationship';
+    const documented = await normalizeResearchSourcePacketV9Relationship(response(parent, [child]), [packet()], profiles);
+    expect(documented.findings).toHaveLength(2);
+    expect(documented.findings[1].limitations).toContain('Relationship support: documented_relationship');
+    expect(documented.findings[1].limitations).not.toMatch(/\binferen(?:ce|ces|tial|red)\b/i);
   });
   it('retains literal quotation, relationship, full profile and categorical qualification checks', async () => {
     const changes: Array<(value: any) => void> = [value => { value.relationshipSupport = 'unsupported_bridge'; },

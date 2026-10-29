@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parseResearchAudience } from './research-audience';
 import { researchSelectionAudience, RESEARCH_SELECTION_VIEW_VERSION } from './research-selection-audience';
-import { researchPacketsFromDefinitions, configuredResearchPacketDefinitions, reviewResearchSourcePackets, researchSourcePacketPolicy, researchSourcePacketPolicyContract, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW, RESEARCH_SOURCE_PACKET_V5_REVIEW, RESEARCH_SOURCE_PACKET_V6_REVIEW, RESEARCH_SOURCE_PACKET_V7_REVIEW, RESEARCH_SOURCE_PACKET_V8_REVIEW, RESEARCH_SOURCE_PACKET_V9_REVIEW, RESEARCH_SOURCE_PACKET_V9_STRICT_REVIEW, ResearchSourcePacketPending, type ResearchPacketAccess } from './research-source-packets';
+import { researchPacketsFromDefinitions, configuredResearchPacketDefinitions, reviewResearchSourcePackets, researchSourcePacketPolicy, researchSourcePacketPolicyContract, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW, RESEARCH_SOURCE_PACKET_V5_REVIEW, RESEARCH_SOURCE_PACKET_V6_REVIEW, RESEARCH_SOURCE_PACKET_V7_REVIEW, RESEARCH_SOURCE_PACKET_V8_REVIEW, RESEARCH_SOURCE_PACKET_V9_REVIEW, RESEARCH_SOURCE_PACKET_V9_STRICT_REVIEW, RESEARCH_SOURCE_PACKET_V9_RELATIONSHIP_REVIEW, ResearchSourcePacketPending, type ResearchPacketAccess } from './research-source-packets';
 import { researchHash } from './research-model';
 import type { ResearchSourcePacket } from './research-source-packet-model';
 import type { ResearchSourceSeed } from './research-types';
@@ -489,5 +489,40 @@ describe('V9 strict tool variant', () => {
       const failed = structuredClone(raw); Object.assign(failed.findings.workflow.qualityComponents, changed);
       expect((await strict.normalize(failed, [packet()], ['personal'])).findings[0].score).toBeLessThan(70);
     }
+  });
+});
+
+describe('relationship-aware V9 rendering policy', () => {
+  it('retains old V9 and strict contracts and uses the exact V9 wire with a fresh normalizer', async () => {
+    expect(await researchHash(JSON.stringify(researchSourcePacketPolicyContract(RESEARCH_SOURCE_PACKET_V9_REVIEW, 16384)))).toBe('cab5015d5ada5ad6a3524e4e43ba1ae263f7ce56d5ab7c6f7f0d97e857956d4e');
+    expect(await researchHash(JSON.stringify(researchSourcePacketPolicyContract(RESEARCH_SOURCE_PACKET_V9_STRICT_REVIEW, 16384)))).toBe('c152cc61940b60a86850545f54831965e93e908d06ea1e8cd0ef896e9397bf97');
+    const original = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V9_REVIEW), next = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V9_RELATIONSHIP_REVIEW);
+    expect(next.instructions).toBe(original.instructions); expect(next.schema).toBe(original.schema); expect(next.metadata).toBe(original.metadata);
+    expect(next.normalizerVersion).not.toBe(original.normalizerVersion); expect(next.reuseCompletedV4).toBeUndefined(); expect(next.reviewTransport).toBeUndefined();
+  });
+  it('does not reinterpret an old raw receipt and reuses only its own authenticated rendered result', async () => {
+    const raw: any = response(packet()); raw.findings.workflow.relationshipSupport = 'bounded_inference';
+    raw.findings.workflow.relationshipExplanation = 'Our editorial inference connects these documented approval and draft actions; no outcome is observed.';
+    raw.findings.workflow.claim = { readerDecision: { mode: 'informative', question: 'What boundary is documented?', answer: 'Human approval precedes changes.' },
+      factualCore: { kind: 'observation', observation: 'The publisher describes an approval boundary.' },
+      whyItMatters: 'A useful permission decision.', limitations: 'Publisher descriptions, not measured results.' };
+    const test = harness(vi.fn(async () => structuredClone(raw))), old = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V9_REVIEW), next = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V9_RELATIONSHIP_REVIEW);
+    const original = await reviewResearchSourcePackets([packet()], test.access, old);
+    expect(original.acceptedIdeas).toEqual([]); const frozen = [...test.values].map(([id, value]) => [id, JSON.stringify(value)]);
+    await expect(reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, next)).rejects.toBeInstanceOf(ResearchSourcePacketPending);
+    expect(test.generate).toHaveBeenCalledTimes(1);
+    const result = await reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 1 } }, next);
+    expect(result.acceptedIdeas).toHaveLength(1); expect(test.generate).toHaveBeenCalledTimes(2);
+    expect(result.acceptedIdeas[0].limitations).toContain(raw.findings.workflow.relationshipExplanation);
+    const plans = [...test.values.values()].filter((value: any) => value.request) as any[];
+    expect(plans[0].request).toEqual(plans[1].request); expect(plans[0].packet).toEqual(plans[1].packet);
+    const plan = plans.find(value => value.normalizerVersion === next.normalizerVersion), id = 'research-source-packet-attempt:v1:' + await researchHash(JSON.stringify(plan)), attempt = test.values.get(id) as any;
+    expect(attempt.raw).toEqual(raw); expect(attempt.rawHash).toBe(await researchHash(JSON.stringify(raw))); expect(attempt).not.toHaveProperty('normalizationOnly'); expect(attempt).not.toHaveProperty('reusedFrom');
+    expect(await reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, next)).toEqual(result);
+    expect(await reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, old)).toEqual(original);
+    for (const [key, bytes] of frozen) expect(JSON.stringify(test.values.get(key))).toBe(bytes);
+    test.values.set(id, { ...attempt, resultHash: 'changed' });
+    await expect(reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, next)).rejects.toThrow('normalized response changed');
+    expect(test.generate).toHaveBeenCalledTimes(2);
   });
 });

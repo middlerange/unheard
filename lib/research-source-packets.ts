@@ -12,7 +12,7 @@ import {
   RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
   researchSourcePacketMetadata, researchSourcePacketSchema, normalizeResearchSourcePacket,
   RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V6_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V7_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V8_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V9_INSTRUCTIONS,
-  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, researchSourcePacketSchemaV9, normalizeResearchSourcePacketV2, normalizeResearchSourcePacketV4, normalizeResearchSourcePacketV5, normalizeResearchSourcePacketV9, canonicalizeResearchSourcePacketV5,
+  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, researchSourcePacketSchemaV9, normalizeResearchSourcePacketV2, normalizeResearchSourcePacketV4, normalizeResearchSourcePacketV5, normalizeResearchSourcePacketV9, normalizeResearchSourcePacketV9Relationship, canonicalizeResearchSourcePacketV5,
   type ResearchSourcePacket,
 } from './research-source-packet-model';
 
@@ -72,6 +72,8 @@ export const RESEARCH_SOURCE_PACKET_V7_REVIEW = 'decision-completeness-v7';
 export const RESEARCH_SOURCE_PACKET_V8_REVIEW = 'decision-coverage-v8';
 export const RESEARCH_SOURCE_PACKET_V9_REVIEW = 'reader-decision-v9';
 export const RESEARCH_SOURCE_PACKET_V9_STRICT_REVIEW = 'reader-decision-v9-strict-tool-v1';
+export const RESEARCH_SOURCE_PACKET_V9_RELATIONSHIP_REVIEW = 'reader-decision-v9-relationship-v1';
+export const RESEARCH_SOURCE_PACKET_V9_RELATIONSHIP_NORMALIZER = 'structured-inference-v2+reader-decision-v9+verbatim-render-v2-relationship+complete-claim-text-v1';
 export const RESEARCH_SOURCE_PACKET_V9_NORMALIZER = 'structured-inference-v2+reader-decision-v9+verbatim-render-v1+complete-claim-text-v1';
 export const RESEARCH_SOURCE_PACKET_V5_NORMALIZER = 'structured-inference-v2+empty-unknown-frame-claim-fields-v1+complete-claim-text-v1';
 export const RESEARCH_SOURCE_PACKET_V4_NORMALIZER = 'structured-inference-v2+empty-content-angle-note-v1';
@@ -89,6 +91,8 @@ const defaultPolicy: ResearchSourcePacketPolicy = {
 };
 export function researchSourcePacketPolicy(reviewVersion?: string): ResearchSourcePacketPolicy {
   if (reviewVersion === undefined) return defaultPolicy;
+  if (reviewVersion === RESEARCH_SOURCE_PACKET_V9_RELATIONSHIP_REVIEW) return { ...researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V9_REVIEW),
+    normalizerVersion: RESEARCH_SOURCE_PACKET_V9_RELATIONSHIP_NORMALIZER, normalize: normalizeResearchSourcePacketV9Relationship };
   if (reviewVersion === RESEARCH_SOURCE_PACKET_V9_STRICT_REVIEW) return { ...researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V9_REVIEW),
     reviewTransport: 'anthropic-strict-tool-v1', schemaCompilerVersion: ANTHROPIC_STRICT_SCHEMA_VERSION,
     schema: (packet, profileIds) => anthropicStrictResearchSchema(researchSourcePacketSchemaV9(packet, profileIds)) };
