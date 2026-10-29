@@ -27,17 +27,17 @@ export type ResearchSourceDepthSource = {
   id: string; content: string; passages?: ResearchSourceReviewPassage[]; [key: string]: unknown;
 };
 export type ResearchSourceDepthGroup = {
-  id: string; kind: 'numbered_section' | 'captured_window'; title: string | null;
+  id: string; kind: 'numbered_section' | 'captured_window' | 'question_section'; title: string | null;
   start: number; bodyStart: number; end: number; selectablePassageIds: number[];
 };
 export type ResearchSourceDepthBinding = {
-  version: typeof RESEARCH_SOURCE_DEPTH_VERSION; bodyHash: string; catalogHash: string; groupsHash: string;
+  version: string; groupingVersion?: string; bodyHash: string; catalogHash: string; groupsHash: string;
 };
 export type ResearchSourceDepthMetadata = Record<string, unknown> & {
   id: string; passages: ResearchSourceReviewPassage[]; groups: Record<string, ResearchSourceDepthGroup>; depth: ResearchSourceDepthBinding;
 };
 export type ResearchSourceDepthProof = ResearchSourceReviewProof & {
-  depthVersion: typeof RESEARCH_SOURCE_DEPTH_VERSION; groupsHash: string; groupId: string | null; focalPassageIds: number[];
+  depthVersion: string; groupsHash: string; groupId: string | null; focalPassageIds: number[];
 };
 export type ResearchSourceDepthDiagnostic = ResearchSourceReviewDiagnostic & { groupId: string | null };
 export type ResearchSourceDepthResult = Omit<ResearchSourceReviewResult, 'proofs' | 'diagnostics'> & {
@@ -49,6 +49,11 @@ const stable = (value: unknown) => JSON.stringify(value, (_key, item) => item &&
   ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
 const family = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
+export type ResearchSourceDepthOptions = {
+  version: string; groupingVersion?: string;
+  groupBuilder: (source: ResearchSourceDepthSource, passages: ResearchSourceReviewPassage[], baseline: Record<string, ResearchSourceDepthGroup>) => Record<string, ResearchSourceDepthGroup>;
+};
+
 function groupsFor(source: ResearchSourceDepthSource, passages: ResearchSourceReviewPassage[]) {
   const sections = researchSectionInventory(source.content);
   const ranges = sections.length >= 2
@@ -59,9 +64,10 @@ function groupsFor(source: ResearchSourceDepthSource, passages: ResearchSourceRe
     && passage.start < group.end && passage.end > group.bodyStart).map(passage => passage.passageId) }]));
 }
 
-export function researchSourceDepthSchema(source: ResearchSourceDepthSource, enabledProfileIds: string[]) {
+export function researchSourceDepthSchema(source: ResearchSourceDepthSource, enabledProfileIds: string[], options?: ResearchSourceDepthOptions) {
   const baseline = researchSourceReviewSchemaForItems([source.id], enabledProfileIds);
-  const groups = groupsFor(source, researchSourceReviewPassages(source.content));
+  const passages = researchSourceReviewPassages(source.content), baselineGroups = groupsFor(source, passages);
+  const groups = options ? options.groupBuilder(source, passages, baselineGroups) : baselineGroups;
   const assessment = { $ref: '#/$defs/sourceAssessment' };
   return { ...baseline, properties: { findings: { ...baseline.properties.findings, properties: {
     [source.id]: { type: 'object', additionalProperties: false, properties: {
@@ -72,18 +78,19 @@ export function researchSourceDepthSchema(source: ResearchSourceDepthSource, ena
   } } } };
 }
 
-export async function researchSourceDepthRequestMetadata(source: ResearchSourceDepthSource): Promise<ResearchSourceDepthMetadata> {
-  const passages = researchSourceReviewPassages(source.content), groups = groupsFor(source, passages);
+export async function researchSourceDepthRequestMetadata(source: ResearchSourceDepthSource, options?: ResearchSourceDepthOptions): Promise<ResearchSourceDepthMetadata> {
+  const passages = researchSourceReviewPassages(source.content), baselineGroups = groupsFor(source, passages);
+  const groups = options ? options.groupBuilder(source, passages, baselineGroups) : baselineGroups;
   const [bodyHash, catalogHash, groupsHash] = await Promise.all([
     researchHash(source.content), researchHash(JSON.stringify(passages)), researchHash(JSON.stringify(groups)),
   ]);
   const { content: _content, excerpt: _excerpt, publicText: _publicText, sourceSections: _sections,
     passages: _passages, groups: _groups, depth: _depth, ...metadata } = source;
   return { ...metadata, id: source.id, passages, groups,
-    depth: { version: RESEARCH_SOURCE_DEPTH_VERSION, bodyHash, catalogHash, groupsHash } };
+    depth: { version: options?.version ?? RESEARCH_SOURCE_DEPTH_VERSION, ...(options?.groupingVersion ? { groupingVersion: options.groupingVersion } : {}), bodyHash, catalogHash, groupsHash } };
 }
 
-export async function normalizeResearchSourceDepth(raw: unknown, sources: ResearchSourceDepthSource[], enabledProfileIds: string[]): Promise<ResearchSourceDepthResult> {
+export async function normalizeResearchSourceDepth(raw: unknown, sources: ResearchSourceDepthSource[], enabledProfileIds: string[], options?: ResearchSourceDepthOptions): Promise<ResearchSourceDepthResult> {
   if (new Set(sources.map(source => source.id)).size !== sources.length) throw new Error('Source depth requires unique original source IDs');
   await normalizeResearchSourceReview({ findings: {} }, [], enabledProfileIds);
   const result: ResearchSourceDepthResult = { findings: [], proofs: [], diagnostics: [], bindings: [] }, seenFamilies = new Set<string>();
@@ -94,7 +101,7 @@ export async function normalizeResearchSourceDepth(raw: unknown, sources: Resear
   }
   for (const id of Object.keys(raw.findings)) if (!sources.some(source => source.id === id)) fail(id, null, 'Unknown original source ID', raw.findings[id]);
   for (const source of sources) {
-    const metadata = await researchSourceDepthRequestMetadata(source), { passages, groups, depth } = metadata;
+    const metadata = await researchSourceDepthRequestMetadata(source, options), { passages, groups, depth } = metadata;
     result.bindings.push({ ...depth, itemId: source.id, canonicalURL: typeof source.url === 'string' ? source.url : null });
     if (source.passages !== undefined && stable(source.passages) !== stable(passages)
       || source.groups !== undefined && stable(source.groups) !== stable(groups)
@@ -130,7 +137,7 @@ export async function normalizeResearchSourceDepth(raw: unknown, sources: Resear
         if (key && seenFamilies.has(identity)) { fail(source.id, group?.id ?? null, 'Duplicate source idea family; first whole/group claim retained', frame, index); continue; }
         if (key) seenFamilies.add(identity);
         result.findings.push(finding);
-        result.proofs.push({ ...proof, ideaIndex: index, depthVersion: RESEARCH_SOURCE_DEPTH_VERSION,
+        result.proofs.push({ ...proof, ideaIndex: index, depthVersion: depth.version,
           groupsHash: depth.groupsHash, groupId: group?.id ?? null, focalPassageIds });
       }
     }

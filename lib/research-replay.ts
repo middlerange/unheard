@@ -14,6 +14,7 @@ import { ResearchCoveragePending, RESEARCH_COVERAGE_VERSION, RESEARCH_WINDOW_SCO
 import { RESEARCH_SOURCE_REVIEW_INSTRUCTIONS, RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS, researchSourceReviewSchemaForItems } from './research-source-review-model';
 import { RESEARCH_SOURCE_DEPTH_PIPELINE_VERSION as RESEARCH_SOURCE_REVIEW_VERSION, RESEARCH_SOURCE_DEPTH_VERSION, RESEARCH_SOURCE_DEPTH_INSTRUCTIONS, RESEARCH_SOURCE_DEPTH_SONNET_INSTRUCTIONS, researchSourceDepthSchema } from './research-source-depth-model';
 import { RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION, RESEARCH_SOURCE_DEPTH_QUOTES_VERSION, RESEARCH_SOURCE_DEPTH_QUOTES_INSTRUCTIONS, RESEARCH_SOURCE_DEPTH_QUOTES_SONNET_INSTRUCTIONS } from './research-source-depth-quotes';
+import { RESEARCH_SOURCE_DEPTH_QUESTIONS_GROUPING_VERSION, RESEARCH_SOURCE_DEPTH_QUESTIONS_VERSION, RESEARCH_SOURCE_DEPTH_QUESTIONS_TRANSPORT, RESEARCH_SOURCE_DEPTH_QUESTIONS_INSTRUCTIONS, RESEARCH_SOURCE_DEPTH_QUESTIONS_SONNET_INSTRUCTIONS } from './research-source-depth-questions';
 import { RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS, researchSourcePacketSchema } from './research-source-packet-model';
 import { researchPacketsFromDefinitions, researchSourcePacketPolicy, researchSourcePacketPolicyContract, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW } from './research-source-packets';
 import { RESEARCH_SOURCE_ARTIFACT_VERSION, RESEARCH_SOURCE_ARTIFACT_INSTRUCTIONS, RESEARCH_SOURCE_ARTIFACT_MODEL, RESEARCH_SOURCE_ARTIFACT_FORMAT } from './research-source-artifact';
@@ -40,7 +41,7 @@ const prepareSchema = z.object({ operation: z.literal('prepare'), runId: z.uuid(
   windowStart: timestamp, windowEnd: timestamp, inventorySha256: z.string().regex(/^[a-f0-9]{64}$/),
   inventoryCount: z.number().int().positive().max(100000), sourceIds: z.array(z.string().min(1).max(200)).min(1),
   depthModel: z.enum(['gpt-6-sol', 'claude-sonnet-5-5']).optional(),
-  depthGroupingVersion: z.literal(RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION).optional(),
+  depthGroupingVersion: z.enum([RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION, RESEARCH_SOURCE_DEPTH_QUESTIONS_GROUPING_VERSION]).optional(),
   artifactSourceIds: z.array(z.string().min(1).max(200)).min(1).refine(ids => new Set(ids).size === ids.length, 'Artifact source IDs must be unique').optional(),
   sourcePackets: z.array(sourcePacketDefinitionSchema).min(1).optional(),
   sourcePacketReviewVersion: z.enum([RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW]).optional(),
@@ -50,7 +51,7 @@ const prepareSchema = z.object({ operation: z.literal('prepare'), runId: z.uuid(
   .refine(input => input.observationWindowStart === undefined && input.observationWindowEnd === undefined
     || input.observationWindowStart !== undefined && input.observationWindowEnd !== undefined && input.observationWindowStart < input.observationWindowEnd, 'Observation windows require both ordered boundaries')
   .refine(input => new Set(input.sourceIds).size === input.sourceIds.length, 'Source IDs must be unique')
-  .refine(input => !input.depthGroupingVersion || input.depthModel === 'claude-sonnet-5-5', 'Quote grouping requires the explicit Sonnet research grader')
+  .refine(input => !input.depthGroupingVersion || input.depthModel === 'claude-sonnet-5-5', 'Depth grouping requires the explicit Sonnet research grader')
   .refine(input => !input.sourcePackets || new Set(input.sourcePackets.map(packet => packet.id)).size === input.sourcePackets.length, 'Packet IDs must be unique')
   .refine(input => !input.sourcePacketReviewVersion || !!input.sourcePackets, 'A packet review policy requires source packets');
 export const researchReplayRequestSchema = z.discriminatedUnion('operation', [prepareSchema,
@@ -96,7 +97,7 @@ async function immutable(teamId: string, id: string, value: unknown) {
 }
 function sourceReviewVersion(grouping?: Config['depthGroupingVersion'], artifacts?: Config['artifactSourceIds']) {
   if (artifacts) return RESEARCH_SOURCE_REVIEW_VERSION.replace(/depth-v1$/, 'depth-artifact-routed-v1');
-  return grouping ? RESEARCH_SOURCE_REVIEW_VERSION.replace(/depth-v1$/, 'depth-quotes-v2') : RESEARCH_SOURCE_REVIEW_VERSION;
+  return grouping ? RESEARCH_SOURCE_REVIEW_VERSION.replace(/depth-v1$/, grouping === RESEARCH_SOURCE_DEPTH_QUESTIONS_GROUPING_VERSION ? 'depth-quotes-and-questions-v2' : 'depth-quotes-v2') : RESEARCH_SOURCE_REVIEW_VERSION;
 }
 async function contractHash(depthModel?: Config['depthModel'], extensions?: Pick<Config, 'depthGroupingVersion' | 'sourcePackets' | 'artifactSourceIds' | 'sourcePacketReviewVersion'>) {
   const contract = { model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION,
@@ -115,7 +116,8 @@ async function contractHash(depthModel?: Config['depthModel'], extensions?: Pick
   return researchHash(JSON.stringify(extensions?.depthGroupingVersion || extensions?.sourcePackets || extensions?.artifactSourceIds ? { ...contract,
     extensions: { ...(extensions.depthGroupingVersion ? { depthGroupingVersion: extensions.depthGroupingVersion, quotePolicy: RESEARCH_SOURCE_DEPTH_QUOTES_VERSION,
       quoteInstructions: RESEARCH_SOURCE_DEPTH_QUOTES_INSTRUCTIONS, quoteSonnetInstructions: RESEARCH_SOURCE_DEPTH_QUOTES_SONNET_INSTRUCTIONS, outputBudgetVersion: 'group-count-1024-plus2048-v1',
-      transportBudgetVersion: 'quote-output-over16384-declared240000-lease270000-v1' } : {}),
+      transportBudgetVersion: 'quote-output-over16384-declared240000-lease270000-v1',
+      ...(extensions.depthGroupingVersion === RESEARCH_SOURCE_DEPTH_QUESTIONS_GROUPING_VERSION ? { questionPolicy: RESEARCH_SOURCE_DEPTH_QUESTIONS_VERSION, questionInstructions: RESEARCH_SOURCE_DEPTH_QUESTIONS_INSTRUCTIONS, questionSonnetInstructions: RESEARCH_SOURCE_DEPTH_QUESTIONS_SONNET_INSTRUCTIONS, routing: 'attributed-quotes-first-questions-second-default-depth-v1', questionTransport: RESEARCH_SOURCE_DEPTH_QUESTIONS_TRANSPORT } : {}) } : {}),
       ...(extensions.sourcePackets ? { packetVersion: RESEARCH_SOURCE_PACKET_VERSION, packetInstructions: RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
         packetModel: 'claude-sonnet-5-5', packetOutputTokens: RESEARCH_EVIDENCE_OUTPUT_TOKENS,
         packetSchema: researchSourcePacketSchema({ id: 'packet', primarySourceId: 'primary',
@@ -157,7 +159,7 @@ async function loadConfig(run: Run): Promise<Config> {
   const config: Config = JSON.parse(row.value);
   if (config.runId !== run.id || config.icp !== run.icp || config.version !== RESEARCH_PROMPT_VERSION
     || config.depthModel !== undefined && config.depthModel !== 'gpt-6-sol' && config.depthModel !== 'claude-sonnet-5-5'
-    || config.depthGroupingVersion !== undefined && config.depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION
+    || config.depthGroupingVersion !== undefined && config.depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION && config.depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUESTIONS_GROUPING_VERSION
     || config.sourcePacketReviewVersion !== undefined && (![RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW].includes(config.sourcePacketReviewVersion) || !config.sourcePackets?.length)
     || config.artifactSourceIds !== undefined && (!Array.isArray(config.artifactSourceIds) || !config.artifactSourceIds.length || new Set(config.artifactSourceIds).size !== config.artifactSourceIds.length)
     || config.model !== RESEARCH_MODEL || config.coverageVersion !== RESEARCH_COVERAGE_VERSION || config.sourceReviewVersion !== sourceReviewVersion(config.depthGroupingVersion, config.artifactSourceIds)

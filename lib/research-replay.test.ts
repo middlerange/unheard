@@ -422,27 +422,29 @@ describe('configured replay persistence and paid cache boundary', () => {
     query("UPDATE research_runs SET status='completed' WHERE id='normal-active'");
   },60000);
   it('changes only attributed-quote depth requests and pins their adaptive output budget', async()=>{
-    const baselineId='a1000000-0000-4000-8000-000000000001',quoteId='a1000000-0000-4000-8000-000000000002';
+    const baselineId='a1000000-0000-4000-8000-000000000001',quoteId='a1000000-0000-4000-8000-000000000002',faqId='a1000000-0000-4000-8000-000000000003';
     const quoteBody=body+'\n'+Array.from({length:20},(_,index)=>`“The team explicitly checks user entry route ${index} before deciding which onboarding requirement to show.” —Alex Morgan\n`).join('\n');
-    const sources=[{...item('quote-focused-source'),content:quoteBody},item('quote-unfocused-source')];
-    const originalFetch=globalThis.fetch,observed:Array<{model:string;quote:boolean;tokens:number}>=[];
+    const sources=[{...item('quote-focused-source'),content:quoteBody},item('quote-unfocused-source'),{...item('faq-focused-source'),content:body+'\n\nFrequently asked questions\n\nHow does the routing mode choose a destination?\n\n'+body+'\n\nCan every account inspect its routing history?\n\n'+body}];
+    const originalFetch=globalThis.fetch,observed:Array<{model:string;quote:boolean;question:boolean;tokens:number;timeout?:number;lease?:number}>=[];
     vi.stubGlobal('fetch',vi.fn(async(_url:string,init:RequestInit)=>{
       const request=JSON.parse(String(init.body)),payload=JSON.parse(request.messages[0].content),source=payload.items[0];
-      if(source.depth){observed.push({model:request.model,quote:source.depth.version==='research-source-depth-quotes-v2',tokens:request.max_tokens});
+      if(source.depth){observed.push({model:request.model,quote:source.depth.version==='research-source-depth-quotes-v2',question:source.depth.version==='research-source-depth-questions-v1',tokens:request.max_tokens,timeout:source.reviewTimeoutMs,lease:source.reviewClaimLeaseMs});
         const value=rejectedSourceReview(payload);
         return Response.json({id:'quote-depth',model:request.model,stop_reason:'tool_use',content:[{type:'tool_use',name:'submit_research',input:value}],usage:{input_tokens:10,output_tokens:10}});}
       return originalFetch(_url,init);
     }));
     try{
-      for(const [runId,grouped]of[[baselineId,false],[quoteId,true]]as const){
-        const request={...prepare(runId,sources.length),depthModel:'claude-sonnet-5-5',...(grouped?{depthGroupingVersion:'literal-attributed-quotes-v1'}:{})};
+      for(const [runId,grouping]of[[baselineId,undefined],[quoteId,'literal-attributed-quotes-v1'],[faqId,'attributed-quotes-and-questions-v2']]as const){
+        const request={...prepare(runId,sources.length),depthModel:'claude-sonnet-5-5',...(grouping?{depthGroupingVersion:grouping}:{})};
         const prepared=await researchReplayAction('team',request);
-        expect('sourceReviewVersion' in prepared ? prepared.sourceReviewVersion : null).toBe(grouped?'research-source-review-v1+consistency-v1+depth-quotes-v2':'research-source-review-v1+consistency-v1+depth-v1');
+        expect('sourceReviewVersion' in prepared ? prepared.sourceReviewVersion : null).toBe(grouping==='attributed-quotes-and-questions-v2'?'research-source-review-v1+consistency-v1+depth-quotes-and-questions-v2':grouping?'research-source-review-v1+consistency-v1+depth-quotes-v2':'research-source-review-v1+consistency-v1+depth-v1');
         await researchReplayAction('team',{operation:'upload',runId,chunkIndex:0,items:sources});await researchReplayAction('team',{operation:'start',runId});
         let steps=0;while(await rankPending(runId))if(++steps>20)throw Error('Quote replay failed to finish');
       }
-      expect(observed.filter(row=>!row.quote)).toHaveLength(2);expect(observed.filter(row=>row.quote)).toHaveLength(1);
+      expect(observed.filter(row=>!row.quote&&!row.question)).toHaveLength(3);expect(observed.filter(row=>row.quote)).toHaveLength(1);expect(observed.filter(row=>row.question)).toHaveLength(1);
+      expect(query('SELECT operation,COUNT(*) n FROM research_usage WHERE run_id=? GROUP BY operation',[faqId])).toEqual([{operation:'replay_review_evidence',n:1}]);
       expect(observed.find(row=>row.quote)?.tokens).toBe(23552);
+      expect(observed.find(row=>row.question)).toMatchObject({timeout:240000,lease:270000});
       expect(query('SELECT operation,COUNT(*) n FROM research_usage WHERE run_id=? GROUP BY operation',[quoteId])).toEqual([{operation:'replay_review_evidence',n:1}]);
       const saved=(await researchReplayStatus('team',quoteId)).records.find(row=>row.id.endsWith(':config'))!.value;
       query('UPDATE research_cache SET value=? WHERE id=?',[JSON.stringify({...saved,depthGroupingVersion:undefined}),`research-replay:${quoteId}:config`]);

@@ -10,8 +10,9 @@ import { coverResearchEvidence, ResearchCoveragePending, RESEARCH_COVERAGE_VERSI
 import { reviewResearchSources, ResearchSourceReviewPending, RESEARCH_SOURCE_REVIEW_VERSION, type ResearchSourceReviewRequest, type ResearchSourceReviewPolicy } from "./research-source-review";
 import { RESEARCH_SOURCE_REVIEW_CONSISTENCY_VERSION, RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS } from "./research-source-review-model";
 import { RESEARCH_SOURCE_DEPTH_VERSION, RESEARCH_SOURCE_DEPTH_INSTRUCTIONS, RESEARCH_SOURCE_DEPTH_SONNET_INSTRUCTIONS, researchSourceDepthSchema, researchSourceDepthRequestMetadata, normalizeResearchSourceDepth } from "./research-source-depth-model";
-import { researchAttributedQuoteRanges, researchSourceDepthQuotePolicy, researchSourceQuoteDepthRequestMetadata,
+import { researchSourceDepthQuotePolicy, researchSourceQuoteDepthRequestMetadata,
   RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION, RESEARCH_SOURCE_DEPTH_QUOTES_VERSION, RESEARCH_SOURCE_DEPTH_QUOTES_SONNET_INSTRUCTIONS } from "./research-source-depth-quotes";
+import { RESEARCH_SOURCE_DEPTH_QUESTIONS_GROUPING_VERSION, RESEARCH_SOURCE_DEPTH_QUESTIONS_VERSION, RESEARCH_SOURCE_DEPTH_QUESTIONS_TRANSPORT, RESEARCH_SOURCE_DEPTH_QUESTIONS_SONNET_INSTRUCTIONS, researchSourceDepthGroupingRoute, researchSourceDepthQuestionPolicy, researchSourceQuestionDepthRequestMetadata } from "./research-source-depth-questions";
 import { reviewResearchSourcePackets, configuredResearchPacketDefinitions, researchPacketsFromDefinitions, researchSourcePacketPolicy, researchSourcePacketPolicyContract } from "./research-source-packets";
 import type { ResearchSourcePacket } from "./research-source-packet-model";
 import { researchSourceArtifactPolicy, researchSourceArtifactContract, RESEARCH_SOURCE_ARTIFACT_VERSION, RESEARCH_SOURCE_ARTIFACT_FORMAT } from "./research-source-artifact";
@@ -1187,7 +1188,7 @@ async function cachedModel(
         depthModel = config.depthModel;
       }
       if (config?.depthGroupingVersion !== undefined) {
-        if (config.depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION) throw new Error("Unknown frozen quote grouping policy");
+        if (config.depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION && config.depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUESTIONS_GROUPING_VERSION) throw new Error("Unknown frozen depth grouping policy");
         depthGroupingVersion = config.depthGroupingVersion;
       }
       if (config?.artifactSourceIds !== undefined) {
@@ -1223,9 +1224,9 @@ async function cachedModel(
         artifactSourceIds = policy.artifactSourceIds;
       }
       if (depthModel !== undefined && depthModel !== "gpt-6-sol" && depthModel !== "claude-sonnet-5-5") throw new Error("Unknown configured depth-review model");
-      if (depthGroupingVersion !== undefined && depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION) throw new Error("Unknown configured quote grouping policy");
+      if (depthGroupingVersion !== undefined && depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION && depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUESTIONS_GROUPING_VERSION) throw new Error("Unknown configured depth grouping policy");
     }
-    if (depthGroupingVersion && depthModel !== "claude-sonnet-5-5") throw new Error("Quote grouping requires the explicit Sonnet research grader");
+    if (depthGroupingVersion && depthModel !== "claude-sonnet-5-5") throw new Error("Depth grouping requires the explicit Sonnet research grader");
     const depthPolicy: ResearchSourceReviewPolicy = {
       version: RESEARCH_SOURCE_DEPTH_VERSION, instructions: depthModel === "claude-sonnet-5-5" ? RESEARCH_SOURCE_DEPTH_SONNET_INSTRUCTIONS : RESEARCH_SOURCE_DEPTH_INSTRUCTIONS,
       ...(depthModel ? { model: depthModel } : {}),
@@ -1237,7 +1238,7 @@ async function cachedModel(
       normalize: normalizeResearchSourceDepth,
     };
     if (depthGroupingVersion) {
-      activeReviewPhase.version = RESEARCH_SOURCE_DEPTH_QUOTES_VERSION;
+      activeReviewPhase.version = depthGroupingVersion === RESEARCH_SOURCE_DEPTH_QUESTIONS_GROUPING_VERSION ? RESEARCH_SOURCE_DEPTH_QUESTIONS_VERSION : RESEARCH_SOURCE_DEPTH_QUOTES_VERSION;
       const quotePolicy: ResearchSourceReviewPolicy = { ...researchSourceDepthQuotePolicy,
         model: depthModel, instructions: RESEARCH_SOURCE_DEPTH_QUOTES_SONNET_INSTRUCTIONS,
         requestMetadata: async source => {
@@ -1248,7 +1249,20 @@ async function cachedModel(
             ...(reviewOutputTokens > RESEARCH_EVIDENCE_OUTPUT_TOKENS ? { reviewTimeoutMs: 240_000, reviewClaimLeaseMs: 270_000 } : {}) };
         },
       };
-      depthPolicy.policyForSource = source => researchAttributedQuoteRanges(source.content).length ? quotePolicy : depthPolicy;
+      const questionPolicy: ResearchSourceReviewPolicy = { ...researchSourceDepthQuestionPolicy,
+        model: depthModel, instructions: RESEARCH_SOURCE_DEPTH_QUESTIONS_SONNET_INSTRUCTIONS,
+        requestMetadata: async source => {
+          const { groups, depth } = await researchSourceQuestionDepthRequestMetadata(source);
+          const reviewOutputTokens = Math.max(outputTokens, 1024 * (Object.keys(groups).length + 1) + 2048);
+          if (reviewOutputTokens > 128_000) throw new Error("Required question groups exceed the model output budget; no groups were dropped");
+          return { groups, depth, reviewTransport: "anthropic-tool-v1", reviewOutputTokens,
+            ...RESEARCH_SOURCE_DEPTH_QUESTIONS_TRANSPORT };
+        },
+      };
+      depthPolicy.policyForSource = source => {
+        const route = researchSourceDepthGroupingRoute(source.content, depthGroupingVersion!);
+        return route === "quotes" ? quotePolicy : route === "questions" ? questionPolicy : depthPolicy;
+      };
     }
     if (artifactSourceIds.length) {
       const artifactIds = new Set(artifactSourceIds), otherwise = depthPolicy.policyForSource;
