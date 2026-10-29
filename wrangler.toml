@@ -5,6 +5,9 @@ compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 preview_urls = true
 
+[limits]
+subrequests = 50_000
+
 [vars]
 RESEARCH_DEPTH_MODEL = "claude-sonnet-5-5"
 RESEARCH_DEPTH_GROUPING_VERSION = "attributed-quotes-and-questions-v2"
