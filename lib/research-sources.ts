@@ -2285,6 +2285,27 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
     "notes": "Original event organizer's written takeaways, dated June 4, 2026. Preserve individual speaker attribution: the organizer's summaries are not verified verbatim speaker transcripts. Retain actual publication and first observation, and distinguish practitioner positions from measured outcomes. The ordinary article body limit may exclude later sessions; do not claim a captured prefix is the complete event or article. Related-reference qualification applies the unchanged profile and evidence rules; activation is not qualification or match credit. Known-page backfill is not historical blind discovery."
   },
   {
+    "id": "salesforce-engineering-originals",
+    "name": "Salesforce Engineering — original architecture and product accounts",
+    "url": "https://engineering.salesforce.com/",
+    "kind": "web",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 1,
+    "notes": "Discover public original engineering articles from the publisher index. Assess concrete implications for product experiences, customer communication, reliability and adoption under each configured profile. Attribute vendor accounts, preserve original publication and actual first observation, and distinguish implemented mechanisms from independent outcome evidence. Returned index links do not establish complete publisher history."
+  },
+  {
+    "id": "salesforce-personalization-decisioning-reference",
+    "name": "Salesforce Engineering — real-time personalization decisioning",
+    "url": "https://engineering.salesforce.com/ai-powered-personalization-in-under-100ms-optimizing-real-time-decisioning-at-scale/",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "notes": "Original public engineering interview published March 12, 2025, describing the Salesforce Personalization decisioning pipeline. Preserve first-party attribution, individual behavior and profile inputs, streaming updates, ranking, caching and fallback boundaries, and early-adoption/pilot scope. Reported latency practices are not an independently verified SLA or proof of conversion uplift. This older known-page reference is not a new release or historical blind discovery."
+  },
+  {
     "id": "creatorscience-katelyn-replay-reference",
     "name": "Creator Science — Katelyn Bourgoin interview replay",
     "url": "https://creatorscience.com/podcast/katelyn-bourgoin-replay/",
