@@ -1,3 +1,5 @@
+import { ResearchModelRateLimitError } from "./research-provider-error";
+import { readResearchRetrySidecar, writeResearchRetrySidecar } from "./research-retry-sidecar";
 import { researchHash } from "./research-model";
 import { prepareResearchQuoteRepair, type CitationRepair, type EvidenceCacheInput, type EvidenceCacheValue, type EvidenceFailure } from "./research-evidence-cache";
 
@@ -10,7 +12,7 @@ type RepairPlan = {
 type Receipt = {
   state: "started" | "completed" | "failed"; contextId: string; sourceId: string; bodyHash: string; gradeHash: string;
   result?: EvidenceCacheValue; selection?: unknown; error?: string; failureKind?: "unsupported_core" | "request_failure" | "invalid_selection" | "validation_failure";
-  rawGrade?: unknown;
+  rawGrade?: unknown; nonce?: string; startedAt?: number; rejections?: number;
 };
 class UnsupportedQuoteCoreError extends Error {}
 function stableJson(value: unknown): string {
@@ -109,6 +111,10 @@ type RepairAccess = {
   read: (id: string) => Promise<Receipt | null>;
   claim: (id: string, receipt: Receipt) => Promise<boolean>;
   save: (id: string, receipt: Receipt) => Promise<void>;
+  resume?: (id: string, expected: Receipt, receipt: Receipt) => Promise<boolean>;
+  writeImmutable?: (id: string, value: unknown) => Promise<void>;
+  verifyRetryRejection?: (usageId: string) => Promise<boolean>;
+  now?: () => number;
   select: (data: unknown, schema: Record<string, unknown>, outputTokens: number) => Promise<unknown>;
   validate: (value: unknown) => Promise<EvidenceCacheValue>;
 };
@@ -131,12 +137,18 @@ export async function repairResearchCitation(raw: unknown, item: EvidenceCacheIn
   const plan = await researchQuoteRepairPlan(raw, item, profiles, contextId);
   if (!plan.invalidFamilies.length) return access.validate(plan.value);
   if (!plan.passages.length) throw new Error("Quote repair has no bounded source passages");
-  const initial: Receipt = { state: "started", contextId, sourceId: item.id, bodyHash: plan.bodyHash, gradeHash: plan.gradeHash, rawGrade: raw };
+  const now = access.now || Date.now;
+  let initial: Receipt = { state: "started", contextId, sourceId: item.id, bodyHash: plan.bodyHash, gradeHash: plan.gradeHash, rawGrade: raw, nonce: crypto.randomUUID(), startedAt: now() };
+  const saveTransition = async (expected: Receipt, next: Receipt) => {
+    if (!access.resume) { await access.save(plan.id, next); return; }
+    const changed = await access.resume(plan.id, expected, next);
+    if (!changed && stableJson(await access.read(plan.id)) !== stableJson(next)) throw new Error("Quote repair receipt changed before it could be saved");
+  };
   const failedValue = async (receipt: Receipt): Promise<EvidenceCacheValue> => {
     const preserved = { ...receipt, rawGrade: receipt.rawGrade ?? raw };
     const failure = terminalFailure(item.id, plan.id, preserved);
     await verifyResearchEvidenceFailure(failure, item, profiles, contextId, preserved);
-    if (receipt.rawGrade === undefined) await access.save(plan.id, preserved);
+    if (receipt.rawGrade === undefined) await saveTransition(receipt, preserved);
     return { findings: [], evidenceFailures: [failure] };
   };
   const reuse = async (receipt: Receipt) => {
@@ -151,14 +163,26 @@ export async function repairResearchCitation(raw: unknown, item: EvidenceCacheIn
     return expected;
   };
   const saved = await access.read(plan.id);
-  if (saved) return reuse(saved);
-  if (!await access.claim(plan.id, initial)) {
+  if (saved) {
+    if (saved.state !== "started" || !saved.nonce || !Number.isFinite(saved.startedAt) || !access.writeImmutable || !access.resume) return reuse(saved);
+    if (saved.contextId !== contextId || saved.sourceId !== item.id || saved.bodyHash !== plan.bodyHash || saved.gradeHash !== plan.gradeHash) throw new Error("Quote repair receipt does not match source and grade");
+    const sidecar = await readResearchRetrySidecar({ read: access.read, writeImmutable: access.writeImmutable, verifyRetryRejection: access.verifyRetryRejection }, plan.id, saved as Receipt & { nonce: string; startedAt: number }, now());
+    if (!sidecar) return reuse(saved);
+    if (sidecar.rejections >= 3) throw new Error("Provider rate limit persisted after three rejected quote repairs; source coverage is incomplete and needs attention.");
+    if (sidecar.retryAt > now()) throw new ResearchModelRateLimitError("Quote repair provider cooldown is active", sidecar.retryAt - now(), false);
+    initial = { ...initial, rejections: sidecar.rejections };
+    if (!await access.resume(plan.id, saved, initial)) {
+      const concurrent = await access.read(plan.id);
+      if (!concurrent) throw new Error("Quote repair attempt receipt is unavailable");
+      return reuse(concurrent);
+    }
+  } else if (!await access.claim(plan.id, initial)) {
     const concurrent = await access.read(plan.id);
     if (!concurrent) throw new Error("Quote repair attempt receipt is unavailable");
     return reuse(concurrent);
   }
   let selection: unknown;
-  let phase: "request" | "application" | "validation" = "request";
+  let phase: "request" | "application" | "validation" | "persist" = "request";
   try {
     const primary = plan.value.findings[0];
     const claims = [primary, ...(primary.additionalIdeas || [])].filter(idea => plan.invalidFamilies.includes(idea.familyKey))
@@ -170,13 +194,20 @@ export async function repairResearchCitation(raw: unknown, item: EvidenceCacheIn
     phase = "validation";
     const result = await access.validate(repaired);
     assertGradeUnchanged(plan.value, result);
-    await access.save(plan.id, { ...initial, state: "completed", selection, result });
+    phase = "persist";
+    await saveTransition(initial, { ...initial, state: "completed", selection, result });
     return result;
   } catch (error) {
+    if (phase === "persist") throw error;
+    if (phase === "request" && error instanceof ResearchModelRateLimitError && access.writeImmutable && initial.nonce && Number.isFinite(initial.startedAt)) {
+      const stored = await writeResearchRetrySidecar({ read: access.read, writeImmutable: access.writeImmutable, verifyRetryRejection: access.verifyRetryRejection }, plan.id, initial as Receipt & { nonce: string; startedAt: number }, error, now());
+      if (stored) throw error;
+      throw new Error("Provider rate limit persisted after three rejected quote repairs; source coverage is incomplete and needs attention.");
+    }
     const failureKind = error instanceof UnsupportedQuoteCoreError ? "unsupported_core"
       : phase === "request" ? "request_failure" : phase === "application" ? "invalid_selection" : "validation_failure";
     const receipt: Receipt = { ...initial, state: "failed", selection, failureKind, error: error instanceof Error ? error.message : "Quote repair failed" };
-    await access.save(plan.id, receipt);
+    await saveTransition(initial, receipt);
     return failedValue(receipt);
   }
 }

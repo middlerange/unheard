@@ -195,7 +195,7 @@ describe('Claude research transport', () => {
 
   it('preserves a known rejection when diagnostic-only storage fails', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'test');
-    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ error: { type: 'rate_limit_error' } }, { status: 429 }));
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ error: { type: 'rate_limit_error' } }, { status: 429, headers: { 'retry-after': '60' } }));
     rejectionStorage.mockRejectedValueOnce(new Error('Diagnostic cache unavailable'));
     const logger = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     await expect(callResearchModel('system', {}, {}, 100, context)).rejects.toBeInstanceOf(ResearchModelRateLimitError);

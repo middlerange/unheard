@@ -1,4 +1,6 @@
 import { ResearchCacheOnlyMiss } from "./research-cache-only";
+import { ResearchModelRateLimitError } from "./research-provider-error";
+import { claimedResearchModel } from "./research-claimed-model";
 import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "./db/client";
@@ -33,6 +35,7 @@ import {
   research_runs,
   research_settings,
   research_sources,
+  research_usage,
 } from "./schema";
 import { RESEARCH_SOURCE_SEEDS } from "./research-sources";
 import { researchWatchUrlAliases } from "./research-watch-urls";
@@ -954,6 +957,11 @@ async function collectForRun(
     .where(eq(research_runs.id, run.id));
   return { collected: count, error };
 }
+async function verifyClaudeRateLimitUsage(teamId: string, usageId: string) {
+  const db = await getDb();
+  const row = await db.select({ model: research_usage.model, status: research_usage.status }).from(research_usage).where(and(eq(research_usage.id, usageId), eq(research_usage.team_id, teamId))).get();
+  return row?.status === "http_429" && row.model.startsWith("claude-");
+}
 async function researchReplayCacheOnly(run: typeof research_runs.$inferSelect) {
   if (run.mode !== "replay") return false;
   const db = await getDb();
@@ -977,6 +985,40 @@ async function baseCachedModel(
   const db = await getDb();
   const audience = await getFrozenResearchAudience(run);
   const enabledProfileIds = audience.publishingProfiles.map(profile => profile.id);
+  // A verified HTTP 429 is safe to retry only after the provider's deadline.
+  // The shared team/model record survives workflow restarts and concurrent callers.
+  const cooldownId = `research-model-cooldown:v1:${run.team_id}:${RESEARCH_MODEL}`;
+  async function callAfterCooldown(...args: Parameters<typeof callResearchModel>) {
+    const requestHash = await researchHash(JSON.stringify([run.team_id, run.id, RESEARCH_MODEL, RESEARCH_PROMPT_VERSION, ...args]));
+    const requestId = `research-model-claim:v1:${requestHash}`;
+    const read = async (key: string) => {
+      const row = await db.select().from(research_cache).where(and(eq(research_cache.id, key), eq(research_cache.team_id, run.team_id))).get();
+      return row ? JSON.parse(row.value) : null;
+    };
+    return claimedResearchModel(requestId, requestHash, {
+      read,
+      claim: async (key, value) => (await db.insert(research_cache).values({ id: key, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now() }).onConflictDoNothing().returning({ id: research_cache.id })).length === 1,
+      save: async (key, expected, value) => (await db.update(research_cache).set({ value: JSON.stringify(value) }).where(and(eq(research_cache.id, key), eq(research_cache.team_id, run.team_id), eq(research_cache.value, JSON.stringify(expected)))).returning({ id: research_cache.id })).length === 1,
+      writeImmutable: async (key, value) => { await retryResearchStorage(async () => db.insert(research_cache).values({ id: key, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now() }).onConflictDoNothing()); },
+      verifyRetryRejection: usageId => verifyClaudeRateLimitUsage(run.team_id, usageId),
+      invoke: async () => {
+        const cooldown = await read(cooldownId), retryAt = cooldown?.retryAt;
+        if (cooldown) {
+          if (cooldown.version !== "provider-429-cooldown-v1" || cooldown.model !== RESEARCH_MODEL || typeof cooldown.usageId !== "string" || !cooldown.usageId || !Number.isFinite(retryAt)
+            || !await verifyClaudeRateLimitUsage(run.team_id, cooldown.usageId)) throw new Error("Research provider cooldown receipt is malformed");
+          if (retryAt > Date.now()) throw new ResearchModelRateLimitError("Research provider cooldown is active", retryAt - Date.now(), false);
+        }
+        return callResearchModel(...args);
+      },
+      onRejection: async error => {
+        if (!error.usageId || !await verifyClaudeRateLimitUsage(run.team_id, error.usageId)) throw new Error("Rate-limit rejection has no verified usage receipt; no automatic retry.");
+        const retryAt = Date.now() + error.retryAfterMs;
+        const value = JSON.stringify({ version: "provider-429-cooldown-v1", model: RESEARCH_MODEL, retryAt, usageId: error.usageId });
+        await retryResearchStorage(async () => db.insert(research_cache).values({ id: cooldownId, team_id: run.team_id, value, created_at: Date.now() })
+          .onConflictDoUpdate({ target: research_cache.id, set: { value: sql`CASE WHEN json_extract(${research_cache.value}, '$.retryAt') >= ${retryAt} THEN ${research_cache.value} ELSE ${value} END` } }));
+      },
+    });
+  }
   const selectionAudience = researchSelectionAudience(audience);
   const id = await researchHash(
     JSON.stringify([
@@ -1076,9 +1118,14 @@ async function baseCachedModel(
       },
       save: async (receiptId, receipt) => retryResearchStorage(async () => db.update(research_cache)
         .set({ value: JSON.stringify(receipt) }).where(and(eq(research_cache.id, receiptId), eq(research_cache.team_id, run.team_id)))),
+      resume: async (receiptId, expected, receipt) => (await retryResearchStorage(async () => db.update(research_cache)
+        .set({ value: JSON.stringify(receipt) }).where(and(eq(research_cache.id, receiptId), eq(research_cache.team_id, run.team_id), eq(research_cache.value, JSON.stringify(expected))))
+        .returning({ id: research_cache.id }))).length === 1,
+      writeImmutable: async (receiptId, receipt) => { await retryResearchStorage(async () => db.insert(research_cache).values({ id: receiptId, team_id: run.team_id, value: JSON.stringify(receipt), created_at: Date.now() }).onConflictDoNothing()); },
+      verifyRetryRejection: usageId => verifyClaudeRateLimitUsage(run.team_id, usageId),
       select: async (data, repairSchema, tokens) => {
         if (cacheOnly) throw new ResearchCacheOnlyMiss("quote_repair");
-        return (await callResearchModel(
+        return (await callAfterCooldown(
           RESEARCH_QUOTE_REPAIR_INSTRUCTIONS, data, repairSchema, tokens,
           { teamId: run.team_id, runId: run.id, stage: "research", operation: run.mode === "replay" ? "replay_quote_repair" : "quote_repair" },
         )).value;
@@ -1092,7 +1139,7 @@ async function baseCachedModel(
     const focused = stage === "evidence" && Array.isArray(items) && items.length === 1 && Boolean(items[0]?.windowFocus);
     const operation = focused ? "window_evidence" : stage;
     const usage = { teamId: run.team_id, runId: run.id, stage: "research" as const, operation: run.mode === "replay" ? `replay_${operation}` : operation };
-    if (stage !== "evidence") return (await callResearchModel(
+    if (stage !== "evidence") return (await callAfterCooldown(
       system, { ...selectionAudience, items }, schema, outputTokens, usage,
     )).value;
     const sources = items as EvidenceCacheInput[];
@@ -1105,7 +1152,7 @@ async function baseCachedModel(
         let raw = await priorQuoteGrade(item);
         if (raw === null) {
           const sectionIds = researchSourceSections({ content: typeof item.content === "string" ? item.content : null }).sourceSections.map(section => section.id);
-          raw = normalizeResearchSectionChecks((await callResearchModel(
+          raw = normalizeResearchSectionChecks((await callAfterCooldown(
             system, { ...selectionAudience, items: [item] },
             evidenceJsonSchemaForItems([item.id], enabledProfileIds, { sectionCoverage: true, sectionIds }), outputTokens, usage,
           )).value, [item]);
@@ -1119,8 +1166,12 @@ async function baseCachedModel(
         await cacheValidResearchEvidenceItems(output, [item], evidenceAccess);
         return output;
       }));
-      const failed = results.find(result => result.status === "rejected");
-      if (failed?.status === "rejected") throw failed.reason;
+      const failed = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+      // Unknown, permanent and transport failures must never be hidden by a
+      // sibling 429, because their provider outcome may be indeterminate.
+      const unsafe = failed.find(result => !(result.reason instanceof ResearchModelRateLimitError));
+      if (unsafe) throw unsafe.reason;
+      if (failed.length) throw failed.reduce((longest, result) => result.reason.retryAfterMs > longest.reason.retryAfterMs ? result : longest).reason;
       for (const result of results) if (result.status === "fulfilled") {
         findings.push(...result.value.findings);
         failures.push(...result.value.evidenceFailures || []);
@@ -1191,6 +1242,7 @@ async function cachedModel(
   };
   const storage: Omit<ResearchCoverageAccess, "generate"> = {
       context, budget, read,
+      verifyRetryRejection: usageId => verifyClaudeRateLimitUsage(run.team_id, usageId),
       claim: async (id, value) => (await db.insert(research_cache).values({ id, team_id: run.team_id, value: JSON.stringify(value), created_at: Date.now() })
         .onConflictDoNothing().returning({ id: research_cache.id })).length === 1,
       save: async (id, expected, value) => (await db.update(research_cache).set({ value: JSON.stringify(value) })
@@ -1970,7 +2022,8 @@ export async function processResearchJob(job: ResearchJob) {
   if (!run) throw new Error("Run not found");
   if (run.mode === "replay" && job.operation !== "fail") {
     const { processResearchReplay } = await import("./research-replay");
-    return processResearchReplay(run, job.operation);
+    try { return await processResearchReplay(run, job.operation); }
+    catch (error) { if (error instanceof ResearchModelRateLimitError) return { pending: true, retryAfterMs: error.retryAfterMs }; throw error; }
   }
   if (job.operation === "drafts" || job.operation === "drafts_interim") {
     const { processResearchDraftJob } = await import("./research-drafts");
@@ -2033,7 +2086,8 @@ export async function processResearchJob(job: ResearchJob) {
         .where(eq(research_runs.id, run.id));
       return { ok: true };
     }
-    return rankRun(run);
+    try { return await rankRun(run); }
+    catch (error) { if (error instanceof ResearchModelRateLimitError) return { ok: true, pending: true, retryAfterMs: error.retryAfterMs }; throw error; }
   }
   throw new Error("Unknown research operation");
 }

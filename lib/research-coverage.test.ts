@@ -1,3 +1,4 @@
+import { ResearchModelRateLimitError } from "./research-provider-error";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -80,6 +81,46 @@ async function failureValue(item: ResearchCoverageSource, access: ResearchCovera
   await put(plan.id, receipt);
   return { findings: [], evidenceFailures: [{ itemId: item.id, receiptId: plan.id, reason: "Terminal quote grounding failure (unsupported_core): No captured passage supports the existing core." }] };
 }
+
+describe("window evidence verified 429 cooldowns", () => {
+  it("waits before reclaiming only the rejected window while retaining the successful sibling", async () => {
+    const item = source("window-throttle"), h = await harness([item]);
+    const access = { ...h.access, context: { ...context, model: "claude-haiku-5-5" }, verifyRetryRejection: async (id: string) => id === "usage-window" };
+    let throttled = false;
+    h.generate.mockImplementation(async window => {
+      if (!throttled) { throttled = true; const error = new ResearchModelRateLimitError("HTTP 429", 40_000); error.usageId = "usage-window"; throw error; }
+      return h.defaultGenerate(window);
+    });
+    await expect(coverResearchEvidence([item], grade(item), access)).rejects.toMatchObject({ retryAfterMs: 40_000 });
+    expect(h.generate).toHaveBeenCalledTimes(2);
+    const receipts = await h.records("research-coverage-attempt:");
+    const success = receipts.find(row => row.value.state === "assessed")!;
+    expect(success).toBeDefined();
+    h.clock.value += 39_999;
+    await expect(coverResearchEvidence([item], grade(item), access)).rejects.toMatchObject({ retryAfterMs: 1 });
+    expect(h.generate).toHaveBeenCalledTimes(2);
+    h.clock.value++;
+    const done = await finish([item], grade(item), access);
+    expect(done.value.findings).toHaveLength(1);
+    expect((await h.read(success.id))).toEqual(success.value);
+    expect((await h.records("research-retry-sidecar:"))[0].value).toMatchObject({ confirmedRejection: true, usageId: "usage-window", rejections: 1 });
+  });
+  it("fails visibly after three confirmed 429s without inventing source failure", async () => {
+    const item = source("window-exhausted", 34), h = await harness([item]);
+    const access = { ...h.access, context: { ...context, model: "claude-haiku-5-5" }, verifyRetryRejection: async (id: string) => id.startsWith("usage-") };
+    let calls = 0, target = -1;
+    h.generate.mockImplementation(async window => {
+      const start = (window.windowFocus as { window: { start: number } }).window.start;
+      if (target === -1) target = start;
+      if (target === start) { const error = new ResearchModelRateLimitError("HTTP 429", 1_000); error.usageId = `usage-${++calls}`; throw error; }
+      return h.defaultGenerate(window);
+    });
+    for (let n = 0; n < 2; n++) { await expect(coverResearchEvidence([item], grade(item), access)).rejects.toBeInstanceOf(ResearchCoveragePending); h.clock.value += 1_000; }
+    await expect(coverResearchEvidence([item], grade(item), access)).rejects.toThrow("source coverage is incomplete");
+    await expect(coverResearchEvidence([item], grade(item), access)).rejects.toThrow("source coverage is incomplete");
+    expect(calls).toBe(3); expect((await h.records("research-retry-sidecar:")).map(row => row.value.rejections).sort()).toEqual([1,2,3]);
+  });
+});
 
 describe("checkpointed generic evidence coverage with real SQLite receipts", () => {
   it("spends at most2 windows then checkpoints without advancing a replay offset; terminal reuse spends zero", async () => {

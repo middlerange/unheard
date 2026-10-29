@@ -1,3 +1,5 @@
+import { ResearchModelRateLimitError } from "./research-provider-error";
+import { readResearchRetrySidecar, writeResearchRetrySidecar } from "./research-retry-sidecar";
 import { researchEvidenceFailures, researchEvidenceItemCacheId, validateResearchEvidenceCacheValue, type EvidenceCacheContext, type EvidenceCacheInput, type EvidenceCacheValue, type EvidenceFailure } from "./research-evidence-cache";
 import { matchResearchQuote, researchEvidenceSchema, researchHash, validateResearchEvidence, validateResearchEvidenceProfiles, validateResearchSectionCoverage, type ResearchEvidence } from "./research-model";
 import type { ResearchAudience } from "./research-audience";
@@ -20,13 +22,13 @@ export type ResearchSourceReviewPolicy = {
 };
 export type SourceReviewMultiProof = ResearchSourceReviewProof & { reviewManifestId: string };
 export type SourceReviewEvidenceValue = EvidenceCacheValue & { sourceReviewManifestIds: string[]; multiProofs: SourceReviewMultiProof[]; sourceReviewDiagnostics: Array<ResearchSourceReviewDiagnostic & { reviewManifestId: string }> };
-export type ResearchSourceReviewAccess = Pick<ResearchCoverageAccess, "read" | "claim" | "save" | "writeImmutable" | "budget" | "now"> & {
+export type ResearchSourceReviewAccess = Pick<ResearchCoverageAccess, "read" | "claim" | "save" | "writeImmutable" | "budget" | "now" | "verifyRetryRejection"> & {
   context: EvidenceCacheContext;
   generate: (request: ResearchSourceReviewRequest) => Promise<unknown>;
 };
 export class ResearchSourceReviewPending extends ResearchCoveragePending {
-  constructor(planIds: string[], manifestIds: string[], public readonly pendingSources: number, public readonly activeSources: number) {
-    super(planIds, manifestIds, pendingSources, activeSources);
+  constructor(planIds: string[], manifestIds: string[], public readonly pendingSources: number, public readonly activeSources: number, cooldownMs = 0) {
+    super(planIds, manifestIds, pendingSources, activeSources, cooldownMs);
     this.name = "ResearchSourceReviewPending";
     this.message = `Whole-source review checkpoint pending (${pendingSources} sources, ${activeSources} in flight)`;
   }
@@ -39,7 +41,7 @@ export function researchSourceReviewDeadlines(metadata: Record<string, unknown>)
   return { timeoutMs: 240_000 as const, claimLeaseMs: 270_000 as const };
 }
 type FailureParent = { failure: EvidenceFailure; receipt: NonNullable<Parameters<typeof verifyResearchEvidenceFailure>[4]> };
-type Receipt = { version: string; planId: string; planHash: string; sourceId: string; bodyHash: string; nonce: string; startedAt: number } & (
+type Receipt = { version: string; planId: string; planHash: string; sourceId: string; bodyHash: string; nonce: string; startedAt: number; rejections?: number } & (
   { state: "started" } | { state: "completed"; completedAt: number; raw: unknown; rawHash: string; resultHash: string }
   | { state: "failed" | "indeterminate"; completedAt: number; reason: string }
 );
@@ -161,23 +163,39 @@ export async function reviewResearchSources(items: ResearchSourceReviewInput[], 
   }
   for (const item of work) {
     const receipt = await readReceipt(item);
-    if (receipt?.state === "started" && now() - receipt.startedAt >= item.deadlines.claimLeaseMs) await save(item, receipt, { ...receipt, state: "indeterminate", completedAt: now(), reason: `Declared source review exceeded${item.deadlines.claimLeaseMs / 1000} seconds; provider outcome is indeterminate and will not be retried.` });
+    if (receipt?.state === "started" && !await readResearchRetrySidecar(access, item.receiptId, receipt, now()) && now() - receipt.startedAt >= item.deadlines.claimLeaseMs) await save(item, receipt, { ...receipt, state: "indeterminate", completedAt: now(), reason: `Declared source review exceeded${item.deadlines.claimLeaseMs / 1000} seconds; provider outcome is indeterminate and will not be retried.` });
   }
-  const waiting: Array<{ item: Work; active: boolean }> = [];
-  for (const item of work) { const receipt = await readReceipt(item); if (!receipt || receipt.state === "started") waiting.push({ item, active: Boolean(receipt) }); }
+  const waiting: Array<{ item: Work; receipt: Receipt | null; sidecar: Awaited<ReturnType<typeof readResearchRetrySidecar>> }> = [];
+  for (const item of work) {
+    const receipt = await readReceipt(item);
+    if (!receipt || receipt.state === "started") {
+      const sidecar = receipt?.state === "started" ? await readResearchRetrySidecar(access, item.receiptId, receipt, now()) : null;
+      if (sidecar && sidecar.rejections >= 3) throw new Error("Provider rate limit persisted after three rejected source reviews; source coverage is incomplete and needs attention.");
+      waiting.push({ item, receipt, sidecar });
+    }
+  }
+  const cooldownMs = Math.max(0, ...waiting.map(({ sidecar }) => sidecar ? sidecar.retryAt - now() : 0));
   const running: Promise<void>[] = [];
-  for (const { item } of waiting.sort((a, b) => Number(b.active) - Number(a.active)).slice(0, 2)) {
-    if (!budget.remaining || await readReceipt(item)) continue;
+  waiting.sort((a, b) => Number(Boolean(b.receipt && !b.sidecar)) - Number(Boolean(a.receipt && !a.sidecar)));
+  for (const { item, receipt, sidecar } of waiting.slice(0, 2)) {
+    if (cooldownMs > 0 || !budget.remaining || receipt && !sidecar) continue;
     budget.remaining--;
-    const started: Receipt = { version: item.policy.version, planId: item.planId, planHash: item.planHash, sourceId: item.source.id, bodyHash: item.bodyHash, nonce: crypto.randomUUID(), startedAt: now(), state: "started" };
-    const inserted = await retryResearchStorage(() => access.claim(item.receiptId, started));
+    const started: Receipt = { version: item.policy.version, planId: item.planId, planHash: item.planHash, sourceId: item.source.id, bodyHash: item.bodyHash, nonce: crypto.randomUUID(), startedAt: now(), state: "started", ...(sidecar ? { rejections: sidecar.rejections } : {}) };
+    const inserted = await retryResearchStorage(() => receipt ? access.save(item.receiptId, receipt, started) : access.claim(item.receiptId, started));
     if (!inserted && stable(await access.read(item.receiptId)) !== stable(started)) { budget.remaining++; continue; }
     running.push((async () => {
-      let terminal: Receipt;
+      let terminal: Receipt, received = false;
       try {
-        const raw = await access.generate(item.request) ?? null, result = await normalize(item, raw);
+        const raw = await access.generate(item.request) ?? null; received = true;
+        const result = await normalize(item, raw);
         terminal = { ...started, state: "completed", completedAt: now(), raw, rawHash: await researchHash(json(raw)), resultHash: await researchHash(stable(result)) };
-      } catch (error) { terminal = { ...started, state: "failed", completedAt: now(), reason: (error instanceof Error ? error.message : "Source review request failed").slice(0, 600) }; }
+      } catch (error) {
+        if (!received && error instanceof ResearchModelRateLimitError && item.request.model.startsWith("claude-")) {
+          const stored = await writeResearchRetrySidecar(access, item.receiptId, started, error, now());
+          if (stored) return;
+          throw new Error("Provider rate limit persisted after three rejected source reviews; source coverage is incomplete and needs attention.");
+        } else terminal = { ...started, state: "failed", completedAt: now(), reason: (error instanceof Error ? error.message : "Source review request failed").slice(0, 600) };
+      }
       await save(item, started, terminal);
     })());
   }
@@ -190,7 +208,7 @@ export async function reviewResearchSources(items: ResearchSourceReviewInput[], 
   let pendingSources = 0, activeSources = 0;
   for (const item of work) {
     const receipt = await readReceipt(item);
-    if (!receipt || receipt.state === "started") { pendingSources++; if (receipt) activeSources++; continue; }
+    if (!receipt || receipt.state === "started") { pendingSources++; if (receipt && !await readResearchRetrySidecar(access, item.receiptId, receipt, now())) activeSources++; continue; }
     const result = await completed(item, receipt), original = parentIdeas(item.parent);
     const selected = new Map(original.filter(idea => family(idea.familyKey)).map(idea => [family(idea.familyKey), { idea, proof: null as ResearchSourceReviewProof | null }]));
     const oldFamilies = new Set(selected.keys()), selections: Array<{ familyKey: string; decision: string }> = [];
@@ -226,7 +244,10 @@ export async function reviewResearchSources(items: ResearchSourceReviewInput[], 
     appendUnique(multiProofs, selectedProofs.map(proof => ({ ...proof, reviewManifestId: manifestId })));
     appendUnique(diagnostics, (result?.diagnostics || []).map(diagnostic => ({ ...diagnostic, reviewManifestId: manifestId })));
   }
-  if (pendingSources) throw new ResearchSourceReviewPending(work.map(item => item.planId), manifestIds, pendingSources, activeSources);
+  if (pendingSources) {
+    const delays = await Promise.all(work.map(async item => { const receipt = await readReceipt(item); const sidecar = receipt?.state === "started" ? await readResearchRetrySidecar(access, item.receiptId, receipt, now()) : null; return sidecar ? sidecar.retryAt - now() : 0; }));
+    throw new ResearchSourceReviewPending(work.map(item => item.planId), manifestIds, pendingSources, activeSources, Math.max(0, ...delays));
+  }
   const merged = validateResearchEvidenceCacheValue({ findings: sources.flatMap(source => findings.has(source.id) ? [findings.get(source.id)!] : []), ...(failures.size ? { evidenceFailures: [...failures.values()] } : {}), ...(base.citationRepairs?.length ? { citationRepairs: base.citationRepairs } : {}) }, sources, profileIds, [...failures.values()]);
   const { findings: _oldFindings, evidenceFailures: _oldFailures, citationRepairs: _oldRepairs, ...metadata } = baseValue;
   return { value: { ...metadata, ...merged, sourceReviewManifestIds: manifestIds, multiProofs, sourceReviewDiagnostics: diagnostics }, manifestIds };

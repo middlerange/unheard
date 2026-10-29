@@ -3,7 +3,7 @@ import { RESEARCH_POST_MIN_SCORE } from "./research-policy";
 import { beginResearchUsage, finishResearchUsage, type ResearchUsageContext } from "./research-usage";
 import type { ModelUsage } from "./research-pricing";
 import { anthropicResearchRequest, anthropicResearchOutput, type AnthropicResearchResponse } from "./research-anthropic";
-import { researchProviderRejection } from "./research-provider-error";
+import { researchProviderRejection, ResearchModelRateLimitError } from "./research-provider-error";
 import { getDb } from "./db/client";
 import { research_cache } from "./schema";
 import { retryResearchStorage } from "./research-storage";
@@ -396,6 +396,7 @@ export async function callResearchModel(
       } catch (storageError) {
         throw new Error(`${error.message} Rejection usage could not be saved.`, { cause: storageError });
       }
+      if (error instanceof ResearchModelRateLimitError) error.usageId = usageId;
       const value = JSON.stringify(diagnostic), createdAt = Date.now();
       try {
         const db = await getDb();

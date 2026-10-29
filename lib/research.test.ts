@@ -2027,6 +2027,51 @@ describe("research persistence and team isolation", () => {
       else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 90_000);
+  it.each(['resume', 'mixed-403', 'mixed-timeout', 'no-retry-after'] as const)('handles provider response through normal rank: %s', async scenario => {
+    const seed = RESEARCH_SOURCE_SEEDS.find(source => source.feedUrl && source.kind === 'rss')!;
+    let current = Date.now(); const now = current, team = `retry-${scenario}`, runId = `${team}-run`;
+    const quote = 'A practitioner checks each user entry route before adding an onboarding requirement.';
+    const ids = scenario.startsWith('mixed-') ? [`${team}-a`, `${team}-b`] : [`${team}-a`];
+    execute({ queries: [
+      { sql: 'INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,?,?)', params: [team, team, team, now, now] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_count,source_ids) VALUES(?,?,'scan','collecting',1,1,?,'Product managers',1,?)", params: [runId, team, now, JSON.stringify([seed.id])] },
+      { sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: [`${runId}-source`, runId, seed.id] },
+      ...ids.map(id => ({ sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,'public_feed')", params: [id, team, seed.id, `${new URL(seed.url).origin}/${id}`, 'Practical workflow', quote, now - 1000, now, `${quote} ${'Detailed practitioner account. '.repeat(25)}`] })),
+    ] });
+    const prior = process.env.ANTHROPIC_API_KEY; process.env.ANTHROPIC_API_KEY = 'mock-key';
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => current);
+    let attempts = 0, release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const request = JSON.parse(String(init?.body)), payload = JSON.parse(request.messages[0].content);
+      const n = ++attempts;
+      if (scenario.startsWith('mixed-')) {
+        if (n === 2) release(); await gate;
+        if (scenario === 'mixed-timeout' && n === 2) throw new Error('transport timeout');
+        return new Response(JSON.stringify({ type: 'error', error: { type: n === 1 ? 'rate_limit_error' : 'permission_error', message: 'rejected' } }), { status: n === 1 ? 429 : 403, headers: { 'retry-after': '30', 'content-type': 'application/json' } });
+      }
+      if (n === 1) return new Response(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'busy' } }), { status: 429, headers: scenario === 'resume' ? { 'retry-after': '30' } : {} });
+      const value = { findings: payload.items.map((source: { id: string }) => ({ itemId: source.id, score: 84, summary: 'Check entry routes before adding a setup requirement.', whyItMatters: 'Each route may present a different friction point.', contentAngle: 'Audit entry paths before adding gates.', evidence: quote, limitations: 'A single practitioner account.', familyKey: source.id })) };
+      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 10, output_tokens: 5 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify(value) }] }] });
+    });
+    try {
+      if (scenario !== 'resume') {
+        await expect(processResearchJob({ operation: 'rank', runId })).rejects.toThrow(scenario === 'mixed-403' ? '403' : scenario === 'mixed-timeout' ? 'timeout' : '429');
+        expect(attempts).toBe(ids.length);
+        await expect(processResearchJob({ operation: 'rank', runId })).rejects.toThrow('no automatic retry');
+        expect(attempts).toBe(ids.length);
+      } else {
+        expect(await processResearchJob({ operation: 'rank', runId })).toMatchObject({ pending: true, retryAfterMs: 31_000 });
+        expect(await processResearchJob({ operation: 'rank', runId })).toMatchObject({ pending: true, retryAfterMs: 31_000 });
+        expect(attempts).toBe(1); current += 31_000;
+        let finished = await processResearchJob({ operation: 'rank', runId }), iterations = 0;
+        while ('pending' in finished && finished.pending) { if (++iterations > 20) throw Error('Rank did not finish'); finished = await processResearchJob({ operation: 'rank', runId }); }
+        expect(finished).toMatchObject({ pending: false });
+        expect(attempts).toBeGreaterThan(1);
+        expect(execute({ queries: [{ sql: 'SELECT item_id FROM research_findings WHERE run_id=?', params: [runId] }] })[0].results).toEqual([{ item_id: ids[0] }]);
+      }
+    } finally { fetcher.mockRestore(); clock.mockRestore(); if (prior === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prior; }
+  }, 90_000);
+
   it("resumes more than eighteen shortlisted stories without re-screening hydrated evidence or new arrivals", async () => {
     const seed = RESEARCH_SOURCE_SEEDS.find(source => source.kind === "rss" && source.feedUrl)!;
     const now = Date.now();

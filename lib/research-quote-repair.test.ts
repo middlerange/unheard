@@ -1,3 +1,4 @@
+import { ResearchModelRateLimitError } from "./research-provider-error";
 import { describe, expect, it, vi } from "vitest";
 import { researchEvidenceSchema, validateResearchSectionCoverage } from "./research-model";
 import { researchEvidenceFailures, researchEvidenceItemCacheId, reuseResearchEvidenceItems, validateResearchEvidenceCacheValue, type EvidenceCacheContext, type EvidenceCacheInput } from "./research-evidence-cache";
@@ -14,19 +15,22 @@ function grade(source: EvidenceCacheInput = item) {
   }] };
 }
 function harness() {
-  const receipts = new Map<string, any>();
+  const receipts = new Map<string, any>(), clock = { value: 1_000_000 };
   const select = vi.fn(async () => ({ "fixed-prompt-measurement": { passageId: 0, supportsCore: true } }));
   const access = {
     read: async (id: string) => receipts.get(id) ?? null,
     claim: vi.fn(async (id: string, receipt: any) => { if (receipts.has(id)) return false; receipts.set(id, structuredClone(receipt)); return true; }),
     save: vi.fn(async (id: string, receipt: any) => { receipts.set(id, structuredClone(receipt)); }),
+    resume: vi.fn(async (id: string, expected: any, receipt: any) => { if (JSON.stringify(receipts.get(id)) !== JSON.stringify(expected)) return false; receipts.set(id, structuredClone(receipt)); return true; }),
+    writeImmutable: async (id: string, value: unknown) => { if (!receipts.has(id)) receipts.set(id, structuredClone(value)); },
+    verifyRetryRejection: async (id: string) => id.startsWith('usage-'), now: () => clock.value,
     select,
     validate: async (value: unknown) => {
       const output = validateResearchEvidenceCacheValue(value, [item], ["personal"]);
       return output;
     },
   };
-  return { receipts, select, access };
+  return { receipts, select, access, clock };
 }
 
 describe("bounded citation-only passage selection", () => {
@@ -61,6 +65,18 @@ describe("bounded citation-only passage selection", () => {
     expect([...h.receipts.values()][0].state).toBe("completed");
   });
 
+  it("preserves completed repair when a committed save acknowledgement is lost", async () => {
+    const h = harness(), resume = h.access.resume;
+    h.access.resume = vi.fn(async (id, expected, next) => {
+      const saved = await resume(id, expected, next);
+      return saved && next.state !== "completed";
+    });
+    const first = await repairResearchCitation(grade(), item, ["personal"], "lost-save", h.access);
+    expect(await repairResearchCitation(grade(), item, ["personal"], "lost-save", h.access)).toEqual(first);
+    expect(h.select).toHaveBeenCalledTimes(1);
+    expect([...h.receipts.values()][0].state).toBe("completed");
+  });
+
   it("reuses a verified successful receipt without another paid selection", async () => {
     const h = harness();
     const first = await repairResearchCitation(grade(), item, ["personal"], "context-a", h.access);
@@ -86,6 +102,18 @@ describe("bounded citation-only passage selection", () => {
     expect(h.select).toHaveBeenCalledTimes(1);
   });
 
+  it("reuses the original grade and resumes only a confirmed rejected quote selection after cooldown", async () => {
+    const h = harness(), error = new ResearchModelRateLimitError("HTTP 429", 30_000); error.usageId = 'usage-quote';
+    h.select.mockRejectedValueOnce(error);
+    await expect(repairResearchCitation(grade(), item, ["personal"], "context-429", h.access)).rejects.toBe(error);
+    await expect(repairResearchCitation(grade(), item, ["personal"], "context-429", h.access)).rejects.toMatchObject({ retryAfterMs: 30_000, confirmedRejection: false });
+    expect(h.select).toHaveBeenCalledTimes(1);
+    h.clock.value += 30_000;
+    const result = await repairResearchCitation(grade(), item, ["personal"], "context-429", h.access);
+    expect(result.findings).toHaveLength(1); expect(h.select).toHaveBeenCalledTimes(2);
+    expect(await repairResearchCitation(grade(), item, ["personal"], "context-429", h.access)).toEqual(result);
+    expect(h.select).toHaveBeenCalledTimes(2);
+  });
   it("fences transport-unknown and concurrent attempts before another request", async () => {
     const h = harness(); h.select.mockRejectedValueOnce(new Error("Unknown transport outcome"));
     const failed = await repairResearchCitation(grade(), item, ["personal"], "context-a", h.access);

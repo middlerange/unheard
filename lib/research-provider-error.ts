@@ -26,7 +26,8 @@ function duration(value: string | null) {
 }
 
 export class ResearchModelRateLimitError extends Error {
-  constructor(message: string, readonly retryAfterMs: number) {
+  usageId?: string;
+  constructor(message: string, readonly retryAfterMs: number, readonly confirmedRejection = true) {
     super(message);
     this.name = 'ResearchModelRateLimitError';
   }
@@ -70,13 +71,16 @@ export async function researchProviderRejection(response: Response, provider: st
   const quota = [code, type].some(value => value === 'insufficient_quota' || value === 'billing_hard_limit_reached');
   const codeAbsent = body?.error?.code === undefined || body?.error?.code === null;
   const rateCode = code === 'rate_limit_exceeded' || code === 'rate_limit_error';
-  const temporary = response.status === 429 && !quota
+  const classifiedRateLimit = response.status === 429 && !quota
     && ((rateCode && (!type || type === 'rate_limit_error')) || (codeAbsent && type === 'rate_limit_error'));
   const retry = response.headers.get('retry-after');
   const retryMs = retry && /^\d+(?:\.\d+)?$/.test(retry) ? Number(retry) * 1000
     : retry && Number.isFinite(Date.parse(retry)) ? Math.max(0, Date.parse(retry) - now) : null;
   const resets = [retryMs, duration(response.headers.get('x-ratelimit-reset-tokens')), duration(response.headers.get('x-ratelimit-reset-requests'))]
     .filter((value): value is number => value !== null && Number.isFinite(value) && value >= 0);
+  // Claude spend/tier limits can be a 429 without any usable reset. Do not
+  // assume a 60-second cooldown or repeatedly bill an unrecoverable request.
+  const temporary = classifiedRateLimit && (provider !== 'Anthropic' || retryMs !== null && Number.isFinite(retryMs));
   const retryAfterMs = temporary ? Math.max(1000, resets.length ? Math.ceil(Math.max(...resets)) + 1000 : 60000) : null;
   const requestId = inspected.requestId;
   const limits = Object.fromEntries(['x-ratelimit-limit-tokens', 'x-ratelimit-remaining-tokens', 'x-ratelimit-limit-requests', 'x-ratelimit-remaining-requests'].flatMap(name => {

@@ -1,3 +1,4 @@
+import { ResearchModelRateLimitError } from "./research-provider-error";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -72,6 +73,45 @@ async function failedBase(item: ResearchSourceReviewInput, h: Awaited<ReturnType
   await h.put(plan.id, receipt);
   return { findings: [], evidenceFailures: [{ itemId: item.id, receiptId: plan.id, reason: "Terminal quote grounding failure (unsupported_core): No captured passage supports this claim." }] };
 }
+
+describe("source review verified 429 cooldowns", () => {
+  it("waits durably, reclaims only the rejected source and keeps successful sibling unchanged", async () => {
+    const a = source("throttle-a"), b = source("throttle-b"), h = await harness();
+    const access = { ...h.access, verifyRetryRejection: async (id: string) => id === "usage-429" };
+    let attemptsA = 0, attemptsB = 0;
+    h.generate.mockImplementation(async request => {
+      const id = String(request.data.items[0].id);
+      if (id === a.id && ++attemptsA === 1) { const error = new ResearchModelRateLimitError("HTTP 429", 45_000); error.usageId = "usage-429"; throw error; }
+      if (id === b.id) attemptsB++;
+      return rawReview(request);
+    });
+    const base = { findings: [...baseGrade(a).findings, ...baseGrade(b).findings] };
+    await expect(reviewResearchSources([a,b], base, access)).rejects.toMatchObject({ retryAfterMs: 45_000 });
+    expect(attemptsA).toBe(1); expect(attemptsB).toBe(1);
+    const receipts = await h.records("research-source-review-attempt:");
+    const bBefore = receipts.find((row: any) => row.value.sourceId === b.id)!.value;
+    expect(bBefore.state).toBe("completed");
+    expect((await h.records("research-retry-sidecar:")).map((row: any) => row.value)).toMatchObject([{ confirmedRejection: true, usageId: "usage-429", rejections: 1 }]);
+    h.clock.value += 44_999;
+    await expect(reviewResearchSources([a,b], base, access)).rejects.toMatchObject({ retryAfterMs: 1 });
+    expect(attemptsA).toBe(1); expect(attemptsB).toBe(1);
+    h.clock.value++;
+    const done = await finish([a,b], base, access);
+    expect(done.value.findings).toHaveLength(2); expect(attemptsA).toBe(2); expect(attemptsB).toBe(1);
+    expect((await h.records("research-source-review-attempt:")).find((row: any) => row.value.sourceId === b.id)!.value).toEqual(bBefore);
+  });
+  it("stops with incomplete coverage after three confirmed 429s, not a fabricated terminal source failure", async () => {
+    const a = source("throttle-exhausted"), h = await harness();
+    let calls = 0;
+    const access = { ...h.access, verifyRetryRejection: async (id: string) => id.startsWith("usage-") };
+    h.generate.mockImplementation(async () => { const error = new ResearchModelRateLimitError("HTTP 429", 1_000); error.usageId = `usage-${++calls}`; throw error; });
+    for (let n = 0; n < 2; n++) { await expect(reviewResearchSources([a], baseGrade(a), access)).rejects.toBeInstanceOf(ResearchSourceReviewPending); h.clock.value += 1_000; }
+    await expect(reviewResearchSources([a], baseGrade(a), access)).rejects.toThrow("source coverage is incomplete");
+    await expect(reviewResearchSources([a], baseGrade(a), access)).rejects.toThrow("source coverage is incomplete");
+    expect(calls).toBe(3); expect((await h.records("research-source-review-attempt:"))[0].value.state).toBe("started");
+    expect((await h.records("research-retry-sidecar:")).map((row: any) => row.value.rejections).sort()).toEqual([1,2,3]);
+  });
+});
 
 describe("source-led whole-capture review with real SQLite checkpoints", () => {
   it("retains the default v1 immutable plan identity", async () => {

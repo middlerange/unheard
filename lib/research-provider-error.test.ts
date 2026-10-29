@@ -112,3 +112,15 @@ it('reports only fixed rejection reasons and structural types for nonstandard JS
     expect(JSON.stringify(result.diagnostic) + result.error.message).not.toContain(secret); expect(result.diagnostic.temporary).toBe(false);
   }
 });
+
+it('does not assume a retry delay for a Claude rate-limit rejection without reset headers', async () => {
+  const result = await researchProviderRejection(Response.json({ error: { type: 'rate_limit_error' } }, { status: 429 }), 'Anthropic');
+  expect(result.error).not.toBeInstanceOf(ResearchModelRateLimitError);
+  expect(result.diagnostic).toMatchObject({ temporary: false, retryAfterMs: null });
+});
+
+it('does not interpret a reset header alone as a Claude retry-after', async () => {
+  const result = await researchProviderRejection(Response.json({ error: { type: 'rate_limit_error' } }, { status: 429, headers: { 'x-ratelimit-reset-tokens': '10s' } }), 'Anthropic');
+  expect(result.error).not.toBeInstanceOf(ResearchModelRateLimitError);
+  expect(result.diagnostic).toMatchObject({ temporary: false, retryAfterMs: null });
+});

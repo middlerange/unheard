@@ -130,6 +130,36 @@ describe('configured replay persistence and paid cache boundary', () => {
     }));
   });
   afterAll(()=>{fault=undefined;vi.unstubAllGlobals();globalThis.__contentHubResearchWorkflow__=undefined;sqlite.close();rmSync(folder,{recursive:true,force:true});});
+  it('resumes a replay after a confirmed 429 cooldown without repeating the first request early', async () => {
+    const runId = 'abababab-abab-4bab-8bab-abababababab', source = item('replay-retry-proof');
+    await researchReplayAction('team', prepare(runId));
+    await researchReplayAction('team', { operation: 'upload', runId, chunkIndex: 0, items: [source] });
+    await researchReplayAction('team', { operation: 'start', runId });
+    const original = vi.mocked(globalThis.fetch).getMockImplementation()!, now = Date.now();
+    let current = now, attempts = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => current);
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      if (++attempts === 1) return new Response(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'busy' } }), { status: 429, headers: { 'retry-after': '30', 'content-type': 'application/json' } });
+      return original(url, init!);
+    });
+    try {
+      let pending = await processResearchJob({ operation: 'rank', runId });
+      while (!attempts) pending = await processResearchJob({ operation: 'rank', runId });
+      expect(pending).toMatchObject({ pending: true, retryAfterMs: 31_000 });
+      expect(attempts).toBe(1);
+      expect(await processResearchJob({ operation: 'rank', runId })).toMatchObject({ pending: true, retryAfterMs: 31_000 });
+      expect(attempts).toBe(1);
+      current += 31_000;
+      let result = await processResearchJob({ operation: 'rank', runId }), iterations = 0;
+      while ('pending' in result && result.pending) { if (++iterations > 20) throw Error('Replay did not finish'); result = await processResearchJob({ operation: 'rank', runId }); }
+      const status = await researchReplayStatus('team', runId);
+      expect(status.run.status).toBe('completed');
+      expect(status.run.findings_count).toBeGreaterThan(0);
+      expect(attempts).toBeGreaterThan(1);
+      expect(query("SELECT status FROM research_usage WHERE run_id=? ORDER BY created_at", [runId]).map((row:any) => row.status)).toContain('http_429');
+    } finally { fetcher.mockRestore(); clock.mockRestore(); query("DELETE FROM research_cache WHERE id LIKE 'research-model-cooldown:v1:team:%'"); }
+  });
+
   it.each(['gpt-6-sol','claude-sonnet-5-5'] as const)('freezes the optional depth-only model pin %s and preserves completed old replay status reads', async depthModel => {
     const defaultId=depthModel==='gpt-6-sol'?'90909090-9090-4090-8090-909090909090':'96969696-9696-4696-8696-969696969696';
     const overrideId=depthModel==='gpt-6-sol'?'91919191-9191-4191-8191-919191919191':'97979797-9797-4797-8797-979797979797';
