@@ -335,6 +335,27 @@ describe('opt-in structured packet qualification v2', () => {
     expect(next).toEqual(await normalizeResearchSourcePacketV2(response(frame(), [frame('child')]), [packet()], profiles));
     expect(JSON.stringify(raw)).toBe(before);
   });
+  it('v5 preserves complete long primary and additional claims with the same score and literal proofs', async () => {
+    const baseline = await normalizeResearchSourcePacketV4(response(frame(), [frame('child')]), [packet()], profiles);
+    const primary = frame(), child = frame('child');
+    for (const claim of [primary.claim, child.claim]) for (const field of ['summary', 'contentAngle', 'whyItMatters', 'limitations'] as const)
+      claim[field] = claim[field].repeat(100);
+    const raw = response(primary, [child]), before = JSON.stringify(raw);
+    expect((await normalizeResearchSourcePacketV4(raw, [packet()], profiles)).findings).toEqual([]);
+    const result = await normalizeResearchSourcePacketV5(raw, [packet()], profiles);
+    expect(result.diagnostics).toEqual([]); expect(result.findings).toHaveLength(2);
+    for (const [index, candidate] of [primary, child].entries()) {
+      for (const field of ['summary', 'contentAngle', 'whyItMatters', 'limitations'] as const) expect(result.findings[index][field]).toBe(candidate.claim[field]);
+      expect(result.findings[index].score).toBe(baseline.findings[index].score);
+      expect(result.findings[index].qualityComponents).toEqual(baseline.findings[index].qualityComponents);
+    }
+    expect(result.packetProofs).toEqual(baseline.packetProofs);
+    expect(JSON.stringify(raw)).toBe(before);
+    const unsupported = response({ ...primary, qualityComponents: { ...primary.qualityComponents, sourceSupport: 'unsupported' } });
+    expect((await normalizeResearchSourcePacketV5(unsupported, [packet()], profiles)).findings[0].score).toBeLessThan(70);
+    const unknown = response({ ...primary, claim: { ...primary.claim, note: 'meaningful unknown text' } });
+    expect((await normalizeResearchSourcePacketV5(unknown, [packet()], profiles)).diagnostics[0].reason).toContain('unknown fields');
+  });
   it.each([0, false, ' ', 'nonempty', [null], { note: null }])('v5 retains unknown nonempty or meaningful value %j for strict rejection', async value => {
     for (const raw of [response({ ...frame(), unknown: value }), response({ ...frame(), claim: { ...frame().claim, unknown: value } })]) {
       expect(canonicalizeResearchSourcePacketV5(raw).removedPaths).toEqual([]);

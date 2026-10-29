@@ -1,4 +1,4 @@
-import { evidenceJsonSchemaForItems, researchEvidenceSchema, researchHash, validateResearchEvidence, validateResearchEvidenceProfiles, type ResearchEvidence } from './research-model';
+import { evidenceJsonSchemaForItems, researchEvidenceSchema, completePacketClaimResearchEvidenceSchema, researchHash, validateResearchEvidence, validateResearchEvidenceProfiles, type ResearchEvidence } from './research-model';
 import { RESEARCH_POST_MIN_SCORE } from './research-policy';
 import { RESEARCH_SOURCE_REVIEW_CONSISTENCY_INSTRUCTIONS, researchSourceReviewPassages, type ResearchSourceReviewPassage } from './research-source-review-model';
 
@@ -250,10 +250,10 @@ export function canonicalizeResearchSourcePacketV5(raw: unknown): { value: unkno
 }
 
 export async function normalizeResearchSourcePacketV5(raw: unknown, packets: ResearchSourcePacket[], enabledProfileIds: string[]): Promise<ResearchSourcePacketResult> {
-  return normalizeResearchSourcePacketV2(canonicalizeResearchSourcePacketV5(raw).value, packets, enabledProfileIds);
+  return normalizePacket(canonicalizeResearchSourcePacketV5(raw).value, packets, enabledProfileIds, 'structured-inference-v2', completePacketClaimResearchEvidenceSchema);
 }
 
-async function normalizePacket(raw: unknown, packets: ResearchSourcePacket[], enabledProfileIds: string[], policy: 'verbatim-v1' | 'structured-inference-v2'): Promise<ResearchSourcePacketResult> {
+async function normalizePacket(raw: unknown, packets: ResearchSourcePacket[], enabledProfileIds: string[], policy: 'verbatim-v1' | 'structured-inference-v2', evidenceSchema = researchEvidenceSchema): Promise<ResearchSourcePacketResult> {
   if (!enabledProfileIds.length || new Set(enabledProfileIds).size !== enabledProfileIds.length || enabledProfileIds.some(id => !id)) throw new Error('Packet review requires the full unique publishing-profile roster');
   if (new Set(packets.map(packet => packet.id)).size !== packets.length) throw new Error('Packet review requires unique packet IDs');
   const result: ResearchSourcePacketResult = { findings: [], packetProofs: [], diagnostics: [], bindings: [] };
@@ -303,7 +303,7 @@ async function normalizePacket(raw: unknown, packets: ResearchSourcePacket[], en
         }
         if (citations.length && citations[0].sourceId !== packet.primarySourceId) throw new Error('Packet first citation must anchor the real primary document');
         const supportingEvidence = proofSources.flatMap(source => source.passages.map(passage => passage.text));
-        const finding = researchEvidenceSchema.parse({ findings: [{ itemId: packet.primarySourceId,
+        const finding = evidenceSchema.parse({ findings: [{ itemId: packet.primarySourceId,
           claimBasis: frame.claimBasis, profileChecks: frame.profileChecks, claim: { ...frame.claim, evidence: supportingEvidence[0] || '' }, familyKey: frame.familyKey, qualityComponents: frame.qualityComponents }] }).findings[0];
         if (finding.qualificationRubric !== 'source_qualification_v1') throw new Error('Packet requires the unchanged categorical qualification rubric');
         validateResearchEvidenceProfiles([finding], enabledProfileIds);

@@ -18,7 +18,7 @@ import { RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION, RESEARCH_SOURCE_DEPTH_QU
 import { RESEARCH_SOURCE_DEPTH_QUESTIONS_GROUPING_VERSION, RESEARCH_SOURCE_DEPTH_QUESTIONS_VERSION, RESEARCH_SOURCE_DEPTH_QUESTIONS_TRANSPORT, RESEARCH_SOURCE_DEPTH_QUESTIONS_INSTRUCTIONS, RESEARCH_SOURCE_DEPTH_QUESTIONS_SONNET_INSTRUCTIONS } from './research-source-depth-questions';
 import { RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS, researchSourcePacketSchema } from './research-source-packet-model';
 import { researchPacketsFromDefinitions, researchSourcePacketPolicy, researchSourcePacketPolicyContract, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW, RESEARCH_SOURCE_PACKET_V5_REVIEW } from './research-source-packets';
-import { RESEARCH_SOURCE_ARTIFACT_VERSION, RESEARCH_SOURCE_ARTIFACT_INSTRUCTIONS, RESEARCH_SOURCE_ARTIFACT_MODEL, RESEARCH_SOURCE_ARTIFACT_FORMAT } from './research-source-artifact';
+import { RESEARCH_SOURCE_ARTIFACT_VERSION, RESEARCH_SOURCE_ARTIFACT_INSTRUCTIONS, RESEARCH_SOURCE_ARTIFACT_MODEL, RESEARCH_SOURCE_ARTIFACT_FORMAT, researchSourceArtifactContract, validResearchArtifactSourceFormats } from './research-source-artifact';
 import { RESEARCH_MODEL, RESEARCH_PROMPT_VERSION, RESEARCH_SCREEN_INSTRUCTIONS, RESEARCH_EVIDENCE_INSTRUCTIONS,
   RESEARCH_SCREEN_BATCH_SIZE, RESEARCH_EVIDENCE_BATCH_SIZE, RESEARCH_EVIDENCE_OUTPUT_TOKENS, RESEARCH_SECTION_COVERAGE_INSTRUCTIONS, researchHash, researchScreeningSchema,
   researchEvidenceSchema, screeningJsonSchemaForItems, evidenceJsonSchemaForItems, validateResearchScreening,
@@ -44,6 +44,7 @@ const prepareSchema = z.object({ cacheOnly: z.literal(true).optional(), operatio
   depthModel: z.enum(['gpt-6-sol', 'claude-sonnet-5-5']).optional(),
   depthGroupingVersion: z.enum([RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION, RESEARCH_SOURCE_DEPTH_QUESTIONS_GROUPING_VERSION]).optional(),
   artifactSourceIds: z.array(z.string().min(1).max(200)).min(1).refine(ids => new Set(ids).size === ids.length, 'Artifact source IDs must be unique').optional(),
+  artifactSourceFormats: z.record(z.string().min(1).max(200), z.literal('research_intake_form')).refine(map => Object.keys(map).length > 0, 'Artifact format overrides must not be empty').optional(),
   sourcePackets: z.array(sourcePacketDefinitionSchema).min(1).optional(),
   sourcePacketReviewVersion: z.enum([RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW, RESEARCH_SOURCE_PACKET_V5_REVIEW]).optional(),
   freshnessWindowStart: timestamp.optional(), observationWindowStart: timestamp.optional(), observationWindowEnd: timestamp.optional(),
@@ -53,6 +54,7 @@ const prepareSchema = z.object({ cacheOnly: z.literal(true).optional(), operatio
     || input.observationWindowStart !== undefined && input.observationWindowEnd !== undefined && input.observationWindowStart < input.observationWindowEnd, 'Observation windows require both ordered boundaries')
   .refine(input => new Set(input.sourceIds).size === input.sourceIds.length, 'Source IDs must be unique')
   .refine(input => !input.depthGroupingVersion || input.depthModel === 'claude-sonnet-5-5', 'Depth grouping requires the explicit Sonnet research grader')
+  .refine(input => input.artifactSourceFormats === undefined || validResearchArtifactSourceFormats(input.artifactSourceFormats, input.artifactSourceIds), 'Artifact formats require overridden IDs in artifactSourceIds')
   .refine(input => !input.sourcePackets || new Set(input.sourcePackets.map(packet => packet.id)).size === input.sourcePackets.length, 'Packet IDs must be unique')
   .refine(input => !input.sourcePacketReviewVersion || !!input.sourcePackets, 'A packet review policy requires source packets');
 export const researchReplayRequestSchema = z.discriminatedUnion('operation', [prepareSchema,
@@ -100,7 +102,7 @@ function sourceReviewVersion(grouping?: Config['depthGroupingVersion'], artifact
   if (artifacts) return RESEARCH_SOURCE_REVIEW_VERSION.replace(/depth-v1$/, 'depth-artifact-routed-v1');
   return grouping ? RESEARCH_SOURCE_REVIEW_VERSION.replace(/depth-v1$/, grouping === RESEARCH_SOURCE_DEPTH_QUESTIONS_GROUPING_VERSION ? 'depth-quotes-and-questions-v2' : 'depth-quotes-v2') : RESEARCH_SOURCE_REVIEW_VERSION;
 }
-async function contractHash(depthModel?: Config['depthModel'], extensions?: Pick<Config, 'depthGroupingVersion' | 'sourcePackets' | 'artifactSourceIds' | 'sourcePacketReviewVersion' | 'cacheOnly'>) {
+async function contractHash(depthModel?: Config['depthModel'], extensions?: Pick<Config, 'depthGroupingVersion' | 'sourcePackets' | 'artifactSourceIds' | 'sourcePacketReviewVersion' | 'cacheOnly' | 'artifactSourceFormats'>) {
   const contract = { model: RESEARCH_MODEL, version: RESEARCH_PROMPT_VERSION,
     coverageVersion: RESEARCH_COVERAGE_VERSION, coverageScope: RESEARCH_WINDOW_SCOPE_INSTRUCTIONS,
     sourceReviewVersion: RESEARCH_SOURCE_REVIEW_VERSION, sourceReviewInstructions: RESEARCH_SOURCE_REVIEW_INSTRUCTIONS,
@@ -131,7 +133,9 @@ async function contractHash(depthModel?: Config['depthModel'], extensions?: Pick
         artifactPolicy: RESEARCH_SOURCE_ARTIFACT_VERSION, artifactFormat: RESEARCH_SOURCE_ARTIFACT_FORMAT,
         artifactInstructions: RESEARCH_SOURCE_ARTIFACT_INSTRUCTIONS, artifactModel: RESEARCH_SOURCE_ARTIFACT_MODEL,
         artifactSchema: researchSourceDepthSchema({ id: 'item', content: '' }, ['profile']), artifactOutputTokens: RESEARCH_EVIDENCE_OUTPUT_TOKENS,
-        artifactRouting: 'explicit-artifact-before-attributed-quote-before-depth-v1' } : {}) } } : contract));
+        artifactRouting: 'explicit-artifact-before-attributed-quote-before-depth-v1',
+        ...(extensions.artifactSourceFormats ? { artifactSourceFormats: extensions.artifactSourceFormats,
+          artifactFormContract: researchSourceArtifactContract(RESEARCH_EVIDENCE_OUTPUT_TOKENS, 'research_intake_form') } : {}) } : {}) } } : contract));
 }
 export function researchReplayEligibility(item: ResearchReplayItem, config: Pick<Config, 'sourceIds' | 'windowStart' | 'windowEnd'> & Partial<Pick<Config, 'articleWatchUrls' | 'observationWindowStart' | 'observationWindowEnd'>>) {
   if (!config.sourceIds.includes(item.sourceId)) return 'source_not_in_frozen_roster';
@@ -163,6 +167,7 @@ async function loadConfig(run: Run): Promise<Config> {
     || config.depthGroupingVersion !== undefined && config.depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION && config.depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUESTIONS_GROUPING_VERSION
     || config.sourcePacketReviewVersion !== undefined && (![RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW, RESEARCH_SOURCE_PACKET_V5_REVIEW].includes(config.sourcePacketReviewVersion) || !config.sourcePackets?.length)
     || config.artifactSourceIds !== undefined && (!Array.isArray(config.artifactSourceIds) || !config.artifactSourceIds.length || new Set(config.artifactSourceIds).size !== config.artifactSourceIds.length)
+    || config.artifactSourceFormats !== undefined && !validResearchArtifactSourceFormats(config.artifactSourceFormats, config.artifactSourceIds)
     || config.model !== RESEARCH_MODEL || config.coverageVersion !== RESEARCH_COVERAGE_VERSION || config.sourceReviewVersion !== sourceReviewVersion(config.depthGroupingVersion, config.artifactSourceIds)
     || config.contractHash !== await contractHash(config.depthModel, config)) throw new Error('Replay scoring contract changed; prepare a new replay');
   await getFrozenResearchAudience(run);
@@ -211,6 +216,7 @@ export async function researchReplayAction(teamId: string, input: unknown) {
       ...(saved.cacheOnly ? { cacheOnly: true } : {}), ...(saved.depthGroupingVersion ? { depthGroupingVersion: saved.depthGroupingVersion } : {}), ...(saved.sourcePackets ? { sourcePacketVersion: researchSourcePacketPolicy(saved.sourcePacketReviewVersion).version, sourcePacketCount: saved.sourcePackets.length,
         ...(saved.sourcePacketReviewVersion ? { sourcePacketReviewVersion: saved.sourcePacketReviewVersion } : {}) } : {}),
       ...(saved.artifactSourceIds ? { artifactReviewVersion: RESEARCH_SOURCE_ARTIFACT_VERSION, artifactSourceCount: saved.artifactSourceIds.length } : {}),
+      ...(saved.artifactSourceFormats ? { artifactSourceFormats: saved.artifactSourceFormats } : {}),
       version: saved.version, coverageVersion: saved.coverageVersion, sourceReviewVersion: saved.sourceReviewVersion, uploadChunkSize: 20 };
   }
   const run = await loadRun(teamId, data.runId), config = await loadConfig(run);
@@ -223,7 +229,6 @@ export async function researchReplayAction(teamId: string, input: unknown) {
     await immutable(teamId, prefix(run.id) + 'upload:' + data.chunkIndex, { chunkIndex: data.chunkIndex, items: data.items });
     return { runId: run.id, chunkIndex: data.chunkIndex, uploaded: data.items.length };
   }
-  if (!process.env.ANTHROPIC_API_KEY) throw new Error('Set ANTHROPIC_API_KEY in Cloudflare secrets to run research');
   const uploaded = await chunks(run), items = uploaded.flatMap(chunk => chunk.items);
   if (items.length !== config.inventoryCount || new Set(items.map(item => item.id)).size !== items.length
     || uploaded.some((chunk, index) => chunk.chunkIndex !== index)) throw new Error('Replay inventory is incomplete or contains duplicate IDs/chunks');
@@ -242,6 +247,7 @@ export async function researchReplayAction(teamId: string, input: unknown) {
       if (packet.sourceIds.some(id => { const item = items.find(item => item.id === id)!; return item.publishedAt !== null && item.publishedAt >= config.windowEnd; })) throw Error('Packet reference is published after the frozen publication window');
     }
   }
+  if (!process.env.ANTHROPIC_API_KEY) throw new Error('Set ANTHROPIC_API_KEY in Cloudflare secrets to run research');
   const plan: Plan = { config, uploadedSha256: await researchHash(JSON.stringify(items)), entries, eligibleIds };
   await immutable(teamId, prefix(run.id) + 'plan', plan);
   await getFrozenResearchAudience(run);

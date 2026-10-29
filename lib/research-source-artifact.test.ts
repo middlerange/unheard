@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { researchSourceArtifactPolicy, researchSourceArtifactContract, RESEARCH_SOURCE_ARTIFACT_VERSION, RESEARCH_SOURCE_ARTIFACT_FORMAT } from './research-source-artifact';
+import { researchSourceArtifactPolicy, researchSourceArtifactContract, RESEARCH_SOURCE_ARTIFACT_VERSION, RESEARCH_SOURCE_ARTIFACT_FORMAT, RESEARCH_SOURCE_ARTIFACT_INSTRUCTIONS, RESEARCH_SOURCE_ARTIFACT_MODEL, researchSourceArtifactRoutingContract, validResearchArtifactSourceFormats } from './research-source-artifact';
 import { normalizeResearchSourceDepth, researchSourceDepthRequestMetadata, researchSourceDepthSchema } from './research-source-depth-model';
+import { researchHash, RESEARCH_EVIDENCE_OUTPUT_TOKENS } from './research-model';
+import { researchSourceFormContract, researchSourceFormPolicy } from './research-source-form';
 import { researchSourceReviewPassages } from './research-source-review-model';
 
 const content = 'The public card lists three exports per week and two tracked projects in the entry tier. Its next tier lists twenty exports per week and ten tracked projects. The page provides no readable price and does not say that the free-start button grants an ongoing free plan.';
@@ -17,6 +19,33 @@ function assessment(support: 'supported_bounded_claim' | 'incomplete_support' = 
 }
 const raw = (support?: 'supported_bounded_claim' | 'incomplete_support') => ({ findings: { [source.id]: { wholeSource: assessment(support), groups: {} } } });
 describe('opt-in public artifact review', () => {
+  it('preserves the V1 contract serialization and hash when no format override is supplied', async () => {
+    const legacy = { version: RESEARCH_SOURCE_ARTIFACT_VERSION, format: RESEARCH_SOURCE_ARTIFACT_FORMAT,
+      instructions: RESEARCH_SOURCE_ARTIFACT_INSTRUCTIONS, model: RESEARCH_SOURCE_ARTIFACT_MODEL,
+      schema: researchSourceDepthSchema({ id: 'item', content: '' }, ['profile']), outputTokens: RESEARCH_EVIDENCE_OUTPUT_TOKENS };
+    expect(JSON.stringify(researchSourceArtifactContract())).toBe(JSON.stringify(legacy));
+    expect(await researchHash(JSON.stringify(researchSourceArtifactRoutingContract()))).toBe(await researchHash(JSON.stringify(legacy)));
+    expect(researchSourceArtifactContract(16384, 'inspectable_public_artifact')).toEqual(researchSourceArtifactContract(16384));
+  });
+  it('dispatches only an explicit form format to its exact contract, schema and standard normalizer', async () => {
+    const policy = researchSourceArtifactPolicy(16384, 'research_intake_form'), form = researchSourceFormPolicy(16384);
+    expect(researchSourceArtifactContract(16384, 'research_intake_form')).toEqual(researchSourceFormContract(16384));
+    expect(policy.normalize).toBe(form.normalize); expect(policy.instructions).toBe(form.instructions);
+    expect(policy.sourceSchema!(source, ['personal'])).toEqual(form.sourceSchema!(source, ['personal']));
+    expect(await policy.requestMetadata!(source)).toEqual(await form.requestMetadata!(source));
+    const routes = { [source.id]: 'research_intake_form' as const };
+    expect(researchSourceArtifactRoutingContract(16384, routes)).toEqual({ artifact: researchSourceArtifactContract(16384),
+      artifactSourceFormats: routes, form: researchSourceFormContract(16384) });
+    const unexpected = 'unknown' as never;
+    expect(() => researchSourceArtifactPolicy(16384, unexpected)).toThrow('Unknown artifact review format');
+    expect(() => researchSourceArtifactContract(16384, unexpected)).toThrow('Unknown artifact review format');
+  });
+  it('requires a nonempty map of form overrides from the frozen artifact IDs', () => {
+    expect(validResearchArtifactSourceFormats({ [source.id]: 'research_intake_form' }, [source.id])).toBe(true);
+    for (const value of [{}, [], null, { [source.id]: 'inspectable_public_artifact' }, { other: 'research_intake_form' }])
+      expect(validResearchArtifactSourceFormats(value, [source.id])).toBe(false);
+    expect(validResearchArtifactSourceFormats({ [source.id]: 'research_intake_form' }, undefined)).toBe(false);
+  });
   it('uses the existing categorical schema, score and literal source normalizer unchanged', async () => {
     const policy = researchSourceArtifactPolicy(), metadata = await researchSourceDepthRequestMetadata(source);
     expect(policy.sourceSchema!(source, ['personal'])).toEqual(researchSourceDepthSchema(source, ['personal']));

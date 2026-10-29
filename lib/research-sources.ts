@@ -1636,6 +1636,7 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "reference-0d592efb9d95",
+    "artifactReview": { "enabled": false, "format": "research_intake_form" },
     "name": "Reference — dWL6Xd",
     "url": "https://tally.so/r/dWL6Xd",
     "kind": "web",
@@ -2168,6 +2169,8 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
   },
   {
     "id": "google-ads-audience-signals-reference",
+    "freeArticleFallback": true,
+    "freeArticleFallbackOnRedirect": true,
     "name": "Google Ads — audience signal inputs and setup",
     "url": "https://support.google.com/google-ads/answer/14753570?hl=en",
     "kind": "web",

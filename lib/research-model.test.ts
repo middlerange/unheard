@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import {
-  validateResearchEvidenceCoverage, matchResearchQuote, validateResearchScreening, validateResearchEvidence, researchScreeningSchema, screeningJsonSchema, screeningJsonSchemaForItems, researchEvidenceSchema,
+  validateResearchEvidenceCoverage, matchResearchQuote, validateResearchScreening, validateResearchEvidence, researchScreeningSchema, screeningJsonSchema, screeningJsonSchemaForItems, researchEvidenceSchema, completePacketClaimResearchEvidenceSchema,
   RESEARCH_SCREEN_BATCH_SIZE, openAIResearchOutput, callResearchModel, evidenceJsonSchemaForItems,
   validateResearchEvidenceProfiles, validateResearchSectionCoverage, normalizeResearchSectionChecks,
 } from "./research-model";
@@ -71,6 +71,37 @@ describe("profile-specific rubric components",()=>{
     expect(()=>researchEvidenceSchema.parse({findings:[{...assessed,qualityComponents:{...assessed.qualityComponents,sourceSupport:26}}]})).toThrow();
     const parsed=researchEvidenceSchema.parse({findings:[{...assessed,profileChecks:{personal:checks.personal}}]}).findings;
     expect(()=>validateResearchEvidenceProfiles(parsed,["company","personal"])).toThrow("every supplied");
+  });
+});
+
+describe("opt-in complete packet claim text", () => {
+  const fields = ["summary", "contentAngle", "whyItMatters", "limitations"] as const;
+  const assessed = { ...finding, claimBasis: "described_method", profileChecks: {
+    personal: { fits: true, relevance: 22, reason: "A concrete supported practitioner decision." },
+  }, qualityComponents: { sourceSupport: "supported_bounded_claim", usefulDecision: "concrete_decision", scopeHonesty: "accurately_bounded" } };
+  it("preserves every complete string and shares the default categorical score", () => {
+    const original = researchEvidenceSchema.parse({ findings: [assessed] }).findings[0];
+    const long = { ...assessed, ...Object.fromEntries(fields.map(field => [field, assessed[field].repeat(2000)])) };
+    expect(() => researchEvidenceSchema.parse({ findings: [long] })).toThrow();
+    const parsed = completePacketClaimResearchEvidenceSchema.parse({ findings: [long] }).findings[0];
+    for (const field of fields) expect(parsed[field]).toBe(long[field]);
+    expect(parsed.score).toBe(original.score);
+    expect(parsed.qualityComponents).toEqual(original.qualityComponents);
+    expect(parsed.profileChecks).toEqual(original.profileChecks);
+    expect(parsed.evidence).toBe(quote);
+    const { itemId, summary, evidence, contentAngle, whyItMatters, limitations, ...rest } = long;
+    expect(completePacketClaimResearchEvidenceSchema.parse({ findings: { [itemId]: { ...rest,
+      claim: { summary, evidence, contentAngle, whyItMatters, limitations } } } }).findings[0]).toEqual(parsed);
+  });
+  it("retains strict strings, evidence bounds, category gates and profile/family requirements", () => {
+    const parse = (changes: Record<string, unknown>) => completePacketClaimResearchEvidenceSchema.parse({ findings: [{ ...assessed, ...changes }] }).findings[0];
+    for (const field of fields) for (const value of [null, 1, {}, []]) expect(() => parse({ [field]: value })).toThrow();
+    expect(() => parse({ evidence: "x".repeat(601) })).toThrow();
+    expect(() => parse({ familyKey: "" })).toThrow();
+    expect(() => parse({ profileChecks: undefined })).toThrow();
+    expect(parse({ summary: "Long attributed supported description. ".repeat(200), qualityComponents: {
+      ...assessed.qualityComponents, sourceSupport: "unsupported" } }).score).toBeLessThan(70);
+    expect(() => parse({ qualityComponents: { ...assessed.qualityComponents, sourceSupport: "invented" } })).toThrow();
   });
 });
 

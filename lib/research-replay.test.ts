@@ -9,6 +9,8 @@ import { processResearchJob, createResearchRun, cachedResearchSourcePackets } fr
 import { createSyncResearchSqlite } from './research-test-sqlite';
 import { researchHash } from './research-model';
 import { RESEARCH_SOURCE_SEEDS } from './research-sources';
+import { RESEARCH_SOURCE_FORM_FORMAT, RESEARCH_SOURCE_FORM_VERSION } from './research-source-form';
+import { researchSourceArtifactRoutingContract } from './research-source-artifact';
 import { RESEARCH_SOURCE_ARTIFACT_VERSION } from './research-source-artifact';
 const state = vi.hoisted(() => ({ db: null as unknown }));
 vi.mock('./db/client', () => ({ getDb: async () => state.db }));
@@ -35,6 +37,10 @@ const runIds = ['11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-
 it('rejects labels, expected outcomes, private URLs and unsupported inventory sizes before preparation', () => {
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), expectedGrade: 90 }).success).toBe(false);
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), artifactSourceIds: [] }).success).toBe(false);
+  for (const artifactSourceFormats of [{}, { missing: 'research_intake_form' }, { routed: 'unknown' }, { routed: 'inspectable_public_artifact' }, { '': 'research_intake_form' }])
+    expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), artifactSourceIds: ['routed'], artifactSourceFormats }).success).toBe(false);
+  expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), artifactSourceFormats: { routed: 'research_intake_form' } }).success).toBe(false);
+  expect(researchReplayRequestSchema.parse({ ...prepare(runIds[0]), artifactSourceIds: ['routed', 'default'], artifactSourceFormats: { routed: 'research_intake_form' } })).toHaveProperty('artifactSourceFormats.routed', 'research_intake_form');
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), sourcePacketReviewVersion: 'coherent-synthesis-v2' }).success).toBe(false);
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), sourcePacketReviewVersion: 'unknown' }).success).toBe(false);
   expect(researchReplayRequestSchema.safeParse({ ...prepare(runIds[0]), sourcePacketReviewVersion: 'reader-decision-synthesis-v3' }).success).toBe(false);
@@ -623,8 +629,70 @@ describe('configured replay persistence and paid cache boundary', () => {
       expect(query('SELECT COUNT(*) n FROM research_findings')[0].n).toBe(0);expect(query('SELECT COUNT(*) n FROM research_drafts')[0].n).toBe(0);
     }finally{vi.stubGlobal('fetch',originalFetch);}
   },60000);
-  it('freezes a trailing-slash artifact watch by actual item ID without rewriting its query or archive identity',async()=>{
-    const seed={id:'test-artifact-watch',name:'Public artifact',url:'https://publisher.example/artifact?view=public',kind:'web' as const,category:'practitioner' as const,enabled:true,priority:1 as const,notes:'Public artifact reference',pageMode:'article' as const,artifactReview:{enabled:true,format:'inspectable_public_artifact' as const}};
+  it('freezes mixed artifact formats, reuses earlier parents and rejects route changes before inference', async () => {
+    const ids = ['a4100000-0000-4000-8000-000000000001', 'a4100000-0000-4000-8000-000000000002', 'a4100000-0000-4000-8000-000000000003'];
+    const sources = ['mixed-form', 'mixed-public-card', 'mixed-ordinary'].map(id => item(id)), artifactSourceIds = sources.slice(0, 2).map(source => source.id);
+    const artifactSourceFormats = { [sources[0].id]: RESEARCH_SOURCE_FORM_FORMAT }, calls: Array<{ id: string; format?: string }> = [], originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      const request = JSON.parse(String(init.body)), payload = JSON.parse(request.messages[0].content), source = payload.items[0];
+      calls.push({ id: source.id, format: source.artifact?.format });
+      if (!source.artifact) return originalFetch(_url, init);
+      if (source.artifact.format === RESEARCH_SOURCE_FORM_FORMAT) {
+        expect(source.artifact.version).toBe(RESEARCH_SOURCE_FORM_VERSION); expect(source).not.toHaveProperty('groups'); expect(source).not.toHaveProperty('depth');
+        expect(request.tools[0].input_schema.$defs.sourceAssessment.properties).not.toHaveProperty('wholeSource');
+      } else expect(source).toHaveProperty('depth');
+      return Response.json({ id: 'mixed-format-message', model: request.model, stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'submit_research', input: rejectedSourceReview(payload) }], usage: { input_tokens: 10, output_tokens: 10 } });
+    }));
+    try {
+      for (const [index, runId] of ids.entries()) {
+        const before = calls.length, pin = index ? { artifactSourceIds, artifactSourceFormats } : {};
+        const prepared = await researchReplayAction('team', { ...prepare(runId, sources.length), ...pin });
+        if (index) expect(prepared).toMatchObject({ artifactReviewVersion: RESEARCH_SOURCE_ARTIFACT_VERSION, artifactSourceFormats });
+        else expect(prepared).not.toHaveProperty('artifactSourceFormats');
+        await researchReplayAction('team', { operation: 'upload', runId, chunkIndex: 0, items: sources }); await researchReplayAction('team', { operation: 'start', runId });
+        let steps = 0; while (await rankPending(runId)) if (++steps > 25) throw Error('Mixed-format replay did not finish');
+        if (index === 1) expect(calls.slice(before)).toEqual([{ id: sources[0].id, format: RESEARCH_SOURCE_FORM_FORMAT }, { id: sources[1].id, format: 'inspectable_public_artifact' }]);
+        if (index === 2) expect(calls.slice(before)).toEqual([]);
+        const configId = `research-replay:${runId}:config`, frozen = JSON.parse(query('SELECT value FROM research_cache WHERE id=?', [configId])[0].value);
+        if (index === 0) {
+          const coldRunId = 'a4100000-0000-4000-8000-000000000004', beforeCold = calls.length;
+          const beforeClaims = query("SELECT COUNT(*) n FROM research_cache WHERE id LIKE 'research-source-review-attempt:%'")[0].n;
+          await researchReplayAction('team', { ...prepare(coldRunId, sources.length), cacheOnly: true, artifactSourceIds, artifactSourceFormats });
+          await researchReplayAction('team', { operation: 'upload', runId: coldRunId, chunkIndex: 0, items: sources });
+          await researchReplayAction('team', { operation: 'start', runId: coldRunId });
+          let coldSteps = 0; while (await rankPending(coldRunId)) if (++coldSteps > 8) throw Error('Warm-parent form cache-only route did not terminate');
+          expect((await researchReplayStatus('team', coldRunId)).run.error).toContain('cached-only-miss');
+          expect(calls).toHaveLength(beforeCold);
+          expect(query("SELECT COUNT(*) n FROM research_cache WHERE id LIKE 'research-source-review-attempt:%'")[0].n).toBe(beforeClaims);
+          expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?', [coldRunId])[0].n).toBe(0);
+        }
+        if (index === 1) {
+          for (const changed of [undefined, { missing: RESEARCH_SOURCE_FORM_FORMAT }, { [sources[0].id]: 'unknown' }, { [sources[1].id]: RESEARCH_SOURCE_FORM_FORMAT }]) {
+            query('UPDATE research_cache SET value=? WHERE id=?', [JSON.stringify({ ...frozen, artifactSourceFormats: changed }), configId]);
+            const beforeInvalid = calls.length;
+            await expect(researchReplayAction('team', { operation: 'start', runId })).rejects.toThrow('contract changed'); expect(calls).toHaveLength(beforeInvalid);
+          }
+          query('UPDATE research_cache SET value=? WHERE id=?', [JSON.stringify(frozen), configId]);
+        }
+      }
+    } finally { vi.stubGlobal('fetch', originalFetch); }
+  }, 60000);
+  it('rejects an unuploaded form override and fails a cold cached-only form route without an inference claim', async () => {
+    const missingId = 'a4200000-0000-4000-8000-000000000001', coldId = 'a4200000-0000-4000-8000-000000000002', source = item('cold-form-route');
+    const beforeCalls = paidCalls + reviewCalls, beforeAttempts = query("SELECT COUNT(*) n FROM research_cache WHERE id LIKE 'research-%-attempt:%'")[0].n;
+    await researchReplayAction('team', { ...prepare(missingId), artifactSourceIds: ['not-uploaded'], artifactSourceFormats: { 'not-uploaded': RESEARCH_SOURCE_FORM_FORMAT } });
+    await researchReplayAction('team', { operation: 'upload', runId: missingId, chunkIndex: 0, items: [source] });
+    await expect(researchReplayAction('team', { operation: 'start', runId: missingId })).rejects.toThrow('eligible captured readable');
+    await researchReplayAction('team', { ...prepare(coldId), cacheOnly: true, artifactSourceIds: [source.id], artifactSourceFormats: { [source.id]: RESEARCH_SOURCE_FORM_FORMAT } });
+    await researchReplayAction('team', { operation: 'upload', runId: coldId, chunkIndex: 0, items: [source] }); await researchReplayAction('team', { operation: 'start', runId: coldId });
+    let steps = 0; while (await rankPending(coldId)) if (++steps > 5) throw Error('Cold form cache-only route did not terminate');
+    expect((await researchReplayStatus('team', coldId)).run.error).toContain('cached-only-miss');
+    expect(paidCalls + reviewCalls).toBe(beforeCalls);
+    expect(query("SELECT COUNT(*) n FROM research_cache WHERE id LIKE 'research-%-attempt:%'")[0].n).toBe(beforeAttempts);
+    expect(query('SELECT COUNT(*) n FROM research_usage WHERE run_id=?', [coldId])[0].n).toBe(0);
+  });
+  it.each(['inspectable_public_artifact', 'research_intake_form'] as const)('freezes a trailing-slash %s watch by actual item ID without rewriting its query or archive identity',async format=>{
+    const seed={id:'test-artifact-watch',name:'Public artifact',url:'https://publisher.example/artifact?view=public',kind:'web' as const,category:'practitioner' as const,enabled:true,priority:1 as const,notes:'Public artifact reference',pageMode:'article' as const,artifactReview:{enabled:true,format}};
     const storedUrl='https://publisher.example/artifact/?view=public',archiveId='saastr-practitioner-cases';
     RESEARCH_SOURCE_SEEDS.push(seed);const now=Date.now(),icp=query("SELECT icp FROM research_runs WHERE id='saved-audience'")[0].icp;
     query("INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('normal-artifact','Normal artifact','normal-artifact',?,?)",[now,now]);
@@ -634,7 +702,7 @@ describe('configured replay persistence and paid cache boundary', () => {
     const originalFetch=globalThis.fetch;let artifactCalls=0;
     vi.stubGlobal('fetch',vi.fn(async(_url:string,init:RequestInit)=>{
       const request=JSON.parse(String(init.body)),payload=JSON.parse(request.messages[0].content),source=payload.items[0];
-      if(!source.artifact)return originalFetch(_url,init);artifactCalls++;expect(request.model).toBe('claude-sonnet-5-5');
+      if(!source.artifact)return originalFetch(_url,init);artifactCalls++;expect(request.model).toBe('claude-sonnet-5-5');expect(source.artifact.format).toBe(format);
       return Response.json({id:'normal-artifact-message',model:request.model,stop_reason:'tool_use',content:[{type:'tool_use',name:'submit_research',input:rejectedSourceReview(payload)}],usage:{input_tokens:10,output_tokens:10}});
     }));
     try{
@@ -642,6 +710,9 @@ describe('configured replay persistence and paid cache boundary', () => {
       expect(artifactCalls).toBe(1);expect(JSON.parse(query("SELECT source_ids FROM research_runs WHERE id='normal-artifact-run'")[0].source_ids)).toEqual([seed.id]);
       const policy=JSON.parse(query("SELECT value FROM research_cache WHERE id='research-depth-policy:normal-artifact-run'")[0].value);
       expect(policy.artifactSourceIds).toEqual(['normal-artifact-item']);expect(policy.artifactContractHash).toMatch(/^[a-f0-9]{64}$/);expect(policy.model).toBeUndefined();
+      const formats = format === 'research_intake_form' ? { 'normal-artifact-item': 'research_intake_form' as const } : undefined;
+      expect(policy.artifactSourceFormats).toEqual(formats);
+      expect(policy.artifactContractHash).toBe(await researchHash(JSON.stringify(researchSourceArtifactRoutingContract(16384, formats))));
       expect(query("SELECT source_id,canonical_url FROM research_items WHERE id='normal-artifact-item'")[0]).toEqual({source_id:archiveId,canonical_url:storedUrl});
       expect(query("SELECT COUNT(*) n FROM research_drafts WHERE team_id='normal-artifact'")[0].n).toBe(0);
     }finally{vi.stubGlobal('fetch',originalFetch);RESEARCH_SOURCE_SEEDS.splice(RESEARCH_SOURCE_SEEDS.indexOf(seed),1);for(const table of['research_findings','research_cache','research_items','research_runs','research_sources','teams'])query(`DELETE FROM ${table} WHERE ${table==='teams'?'id':'team_id'}='normal-artifact'`);}

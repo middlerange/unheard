@@ -1,4 +1,6 @@
 // Shared research API contracts; secrets and fetched article bodies stay server-side.
+export type ResearchArtifactFormat = 'inspectable_public_artifact' | 'research_intake_form';
+export type ResearchArtifactSourceFormats = Record<string, 'research_intake_form'>;
 export type ResearchSourceSeed = {
   id: string;
   name: string;
@@ -19,13 +21,14 @@ export type ResearchSourceSeed = {
   trustedArticleHosts?: string[];
   hydratePublishedWindowOnly?: boolean;
   freeArticleFallback?: boolean;
+  freeArticleFallbackOnRedirect?: boolean;
   backfillUrls?: string[];
   maxDiscoveryLinks?: number;
   discoveryQueries?: string[];
   discoveryProvider?: "treg" | "hackernews";
   discoverySearchType?: "web" | "news";
   discoveryBlockedHosts?: string[];
-  artifactReview?: { enabled: boolean; format: 'inspectable_public_artifact' };
+  artifactReview?: { enabled: boolean; format: ResearchArtifactFormat };
   referencePacket?: {
     id: string;
     enabled: boolean;

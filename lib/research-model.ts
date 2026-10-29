@@ -81,119 +81,123 @@ const qualificationPoints = {
   usefulDecision: { concrete_decision: 30, useful_distinction_or_signal: 24, generic: 10, none: 0 },
   scopeHonesty: { accurately_bounded: 15, material_gap: 7, misleading: 0 },
 } as const;
-const evidenceIdea = z.object({
-  chosenProfileId: z.string().nullable().optional(),
-  profileFit: text.optional(),
-  summary: text,
-  evidence: z.string().max(600),
-  contentAngle: text,
-  whyItMatters: text,
-  limitations: text,
-  familyKey: z.union([z.string().min(3).max(160), z.literal("")]),
-  score: z.number().int().min(0).max(100).default(0),
-  claimBasis: z.enum(["measured_observation", "reported_capability", "described_method", "reasoned_position", "no_useful_core"]).optional(),
-  profileChecks: z.union([
-    z.record(z.string(), profileCheck),
-    z.array(profileCheck.extend({ profileId: z.string().min(1) }).strict())
-      .refine(checks => new Set(checks.map(check => check.profileId)).size === checks.length, "Profile checks must not repeat a profile")
-      .transform(checks => Object.fromEntries(checks.map(({ profileId, ...check }) => [profileId, check]))),
-  ]).optional(),
-  qualityComponents: qualityComponents.optional(),
-  qualificationRubric: z.literal("source_qualification_v1").optional(),
-});
-function scoreResearchIdea<T extends z.infer<typeof evidenceIdea>>(idea: T): T {
-  if (!idea.profileChecks || !idea.qualityComponents) return idea;
-  const best = idea.claimBasis === "no_useful_core" ? undefined : Object.entries(idea.profileChecks).filter(([, check]) => check.fits && check.relevance > 0)
-    .sort(([a, x], [b, y]) => y.relevance - x.relevance || a.localeCompare(b))[0];
-  let score = best ? best[1].relevance + idea.qualityComponents.sourceSupport + idea.qualityComponents.usefulDecision + idea.qualityComponents.scopeHonesty : 0;
-  if (idea.qualificationRubric && best && !(best[1].relevance >= 16 && idea.qualityComponents.sourceSupport === 25
-    && idea.qualityComponents.usefulDecision >= 24 && idea.qualityComponents.scopeHonesty === 15))
-    score = Math.min(score, RESEARCH_POST_MIN_SCORE - 1);
-  return { ...idea, chosenProfileId: best?.[0] ?? null,
-    profileFit: best?.[1].reason ?? "No supplied profile has a supported reader decision according to the per-profile checks.", score };
-}
-const evidenceAssessment = z.object({
-  itemId: z.string(),
-  ...evidenceIdea.shape,
-  additionalIdeas: z.array(evidenceIdea.strict()).optional(),
-  sectionChecks: z.array(z.object({
-    sectionId: z.string().min(1), familyKeys: z.array(z.string().min(1).max(160)),
-    notPostworthyReason: z.string().max(600),
-  }).strict()).optional(),
-});
-const flatResearchEvidenceSchema = z.object({
-  findings: z.union([
-    z.array(evidenceAssessment),
-    z.record(z.string(), evidenceAssessment.omit({ itemId: true }).strict())
-      .transform(value => Object.entries(value).map(([itemId, assessment]) => ({ itemId, ...assessment }))),
-  ]).refine(findings => findings.length <= 12, "Evidence response exceeds the source batch size"),
-}).superRefine(({ findings }, context) => {
-  findings.forEach((finding, index) => [finding, ...(finding.additionalIdeas || [])].forEach(idea => {
-    if ((idea.profileChecks !== undefined || idea.qualityComponents !== undefined || idea.claimBasis !== undefined || idea.qualificationRubric !== undefined)
-      && (!idea.profileChecks || !idea.qualityComponents || !idea.claimBasis))
-      context.addIssue({ code: "custom", path: ["findings", index], message: "Claim basis, profile checks and quality components must be supplied together" });
-  }));
-}).transform(({ findings }) => ({ findings: findings.map(finding => ({ ...scoreResearchIdea(finding),
-  ...(finding.additionalIdeas ? { additionalIdeas: finding.additionalIdeas.map(scoreResearchIdea) } : {}),
-})) })).superRefine(({ findings }, context) => {
-  findings.forEach((finding, index) => {
-    const families = new Set<string>();
-    [finding, ...(finding.additionalIdeas || [])].forEach((idea, ideaIndex) => {
-      if (idea.familyKey === "" && idea.score >= RESEARCH_POST_MIN_SCORE)
-        context.addIssue({ code: "custom", path: ["findings", index, "familyKey"], message: "A story family is required for every qualifying idea" });
-      const family = idea.familyKey.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-      if (family && families.has(family)) context.addIssue({ code: "custom", path: ["findings", index, "additionalIdeas", ideaIndex], message: "Distinct ideas must have distinct story families" });
-      if (family) families.add(family);
+const claimFields = ["summary", "evidence", "contentAngle", "whyItMatters", "limitations"] as const;
+function createResearchEvidenceSchema(claimText: z.ZodString) {
+  const evidenceIdea = z.object({
+    chosenProfileId: z.string().nullable().optional(),
+    profileFit: text.optional(),
+    summary: claimText,
+    evidence: z.string().max(600),
+    contentAngle: claimText,
+    whyItMatters: claimText,
+    limitations: claimText,
+    familyKey: z.union([z.string().min(3).max(160), z.literal("")]),
+    score: z.number().int().min(0).max(100).default(0),
+    claimBasis: z.enum(["measured_observation", "reported_capability", "described_method", "reasoned_position", "no_useful_core"]).optional(),
+    profileChecks: z.union([
+      z.record(z.string(), profileCheck),
+      z.array(profileCheck.extend({ profileId: z.string().min(1) }).strict())
+        .refine(checks => new Set(checks.map(check => check.profileId)).size === checks.length, "Profile checks must not repeat a profile")
+        .transform(checks => Object.fromEntries(checks.map(({ profileId, ...check }) => [profileId, check]))),
+    ]).optional(),
+    qualityComponents: qualityComponents.optional(),
+    qualificationRubric: z.literal("source_qualification_v1").optional(),
+  });
+  function scoreResearchIdea<T extends z.infer<typeof evidenceIdea>>(idea: T): T {
+    if (!idea.profileChecks || !idea.qualityComponents) return idea;
+    const best = idea.claimBasis === "no_useful_core" ? undefined : Object.entries(idea.profileChecks).filter(([, check]) => check.fits && check.relevance > 0)
+      .sort(([a, x], [b, y]) => y.relevance - x.relevance || a.localeCompare(b))[0];
+    let score = best ? best[1].relevance + idea.qualityComponents.sourceSupport + idea.qualityComponents.usefulDecision + idea.qualityComponents.scopeHonesty : 0;
+    if (idea.qualificationRubric && best && !(best[1].relevance >= 16 && idea.qualityComponents.sourceSupport === 25
+      && idea.qualityComponents.usefulDecision >= 24 && idea.qualityComponents.scopeHonesty === 15))
+      score = Math.min(score, RESEARCH_POST_MIN_SCORE - 1);
+    return { ...idea, chosenProfileId: best?.[0] ?? null,
+      profileFit: best?.[1].reason ?? "No supplied profile has a supported reader decision according to the per-profile checks.", score };
+  }
+  const evidenceAssessment = z.object({
+    itemId: z.string(),
+    ...evidenceIdea.shape,
+    additionalIdeas: z.array(evidenceIdea.strict()).optional(),
+    sectionChecks: z.array(z.object({
+      sectionId: z.string().min(1), familyKeys: z.array(z.string().min(1).max(160)),
+      notPostworthyReason: z.string().max(600),
+    }).strict()).optional(),
+  });
+  const flatResearchEvidenceSchema = z.object({
+    findings: z.union([
+      z.array(evidenceAssessment),
+      z.record(z.string(), evidenceAssessment.omit({ itemId: true }).strict())
+        .transform(value => Object.entries(value).map(([itemId, assessment]) => ({ itemId, ...assessment }))),
+    ]).refine(findings => findings.length <= 12, "Evidence response exceeds the source batch size"),
+  }).superRefine(({ findings }, context) => {
+    findings.forEach((finding, index) => [finding, ...(finding.additionalIdeas || [])].forEach(idea => {
+      if ((idea.profileChecks !== undefined || idea.qualityComponents !== undefined || idea.claimBasis !== undefined || idea.qualificationRubric !== undefined)
+        && (!idea.profileChecks || !idea.qualityComponents || !idea.claimBasis))
+        context.addIssue({ code: "custom", path: ["findings", index], message: "Claim basis, profile checks and quality components must be supplied together" });
+    }));
+  }).transform(({ findings }) => ({ findings: findings.map(finding => ({ ...scoreResearchIdea(finding),
+    ...(finding.additionalIdeas ? { additionalIdeas: finding.additionalIdeas.map(scoreResearchIdea) } : {}),
+  })) })).superRefine(({ findings }, context) => {
+    findings.forEach((finding, index) => {
+      const families = new Set<string>();
+      [finding, ...(finding.additionalIdeas || [])].forEach((idea, ideaIndex) => {
+        if (idea.familyKey === "" && idea.score >= RESEARCH_POST_MIN_SCORE)
+          context.addIssue({ code: "custom", path: ["findings", index, "familyKey"], message: "A story family is required for every qualifying idea" });
+        const family = idea.familyKey.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+        if (family && families.has(family)) context.addIssue({ code: "custom", path: ["findings", index, "additionalIdeas", ideaIndex], message: "Distinct ideas must have distinct story families" });
+        if (family) families.add(family);
+      });
     });
   });
-});
-const claimFields = ["summary", "evidence", "contentAngle", "whyItMatters", "limitations"] as const;
-const wireClaimSchema = evidenceIdea.pick({ summary: true, evidence: true, contentAngle: true, whyItMatters: true, limitations: true }).strict();
-export const researchEvidenceSchema = z.preprocess((value, context) => {
-  if (!value || typeof value !== "object" || !("findings" in value)) return value;
-  function normalizeIdea(idea: unknown, path: Array<string | number>): unknown {
-    if (!idea || typeof idea !== "object") return idea;
-    let normalized: Record<string, unknown> = { ...idea };
-    if ("claim" in idea) {
-      if (claimFields.some(field => Object.hasOwn(idea, field))) {
-        context.addIssue({ code: "custom", path, message: "Nested claim must not collide with flat claim fields" });
-        return idea;
+  const wireClaimSchema = evidenceIdea.pick({ summary: true, evidence: true, contentAngle: true, whyItMatters: true, limitations: true }).strict();
+  return z.preprocess((value, context) => {
+    if (!value || typeof value !== "object" || !("findings" in value)) return value;
+    function normalizeIdea(idea: unknown, path: Array<string | number>): unknown {
+      if (!idea || typeof idea !== "object") return idea;
+      let normalized: Record<string, unknown> = { ...idea };
+      if ("claim" in idea) {
+        if (claimFields.some(field => Object.hasOwn(idea, field))) {
+          context.addIssue({ code: "custom", path, message: "Nested claim must not collide with flat claim fields" });
+          return idea;
+        }
+        const claim = wireClaimSchema.safeParse(idea.claim);
+        if (!claim.success) {
+          for (const issue of claim.error.issues) context.addIssue({ ...issue, path: [...path, "claim", ...issue.path] });
+          return idea;
+        }
+        const { claim: _claim, ...rest } = idea;
+        normalized = { ...rest, ...claim.data };
       }
-      const claim = wireClaimSchema.safeParse(idea.claim);
-      if (!claim.success) {
-        for (const issue of claim.error.issues) context.addIssue({ ...issue, path: [...path, "claim", ...issue.path] });
-        return idea;
+      const components = normalized.qualityComponents;
+      if (components && typeof components === "object" && Object.values(components).some(value => typeof value === "string")) {
+        const parsed = qualificationComponents.safeParse(components);
+        if (!parsed.success) {
+          for (const issue of parsed.error.issues) context.addIssue({ ...issue, path: [...path, "qualityComponents", ...issue.path] });
+          return normalized;
+        }
+        normalized = { ...normalized, qualificationRubric: Object.hasOwn(normalized, "qualificationRubric") ? normalized.qualificationRubric : "source_qualification_v1", qualityComponents: {
+          sourceSupport: qualificationPoints.sourceSupport[parsed.data.sourceSupport],
+          usefulDecision: qualificationPoints.usefulDecision[parsed.data.usefulDecision],
+          scopeHonesty: qualificationPoints.scopeHonesty[parsed.data.scopeHonesty],
+        } };
       }
-      const { claim: _claim, ...rest } = idea;
-      normalized = { ...rest, ...claim.data };
+      return normalized;
     }
-    const components = normalized.qualityComponents;
-    if (components && typeof components === "object" && Object.values(components).some(value => typeof value === "string")) {
-      const parsed = qualificationComponents.safeParse(components);
-      if (!parsed.success) {
-        for (const issue of parsed.error.issues) context.addIssue({ ...issue, path: [...path, "qualityComponents", ...issue.path] });
-        return normalized;
-      }
-      normalized = { ...normalized, qualificationRubric: Object.hasOwn(normalized, "qualificationRubric") ? normalized.qualificationRubric : "source_qualification_v1", qualityComponents: {
-        sourceSupport: qualificationPoints.sourceSupport[parsed.data.sourceSupport],
-        usefulDecision: qualificationPoints.usefulDecision[parsed.data.usefulDecision],
-        scopeHonesty: qualificationPoints.scopeHonesty[parsed.data.scopeHonesty],
-      } };
+    function normalizeAssessment(assessment: unknown, path: Array<string | number>) {
+      const normalized = normalizeIdea(assessment, path);
+      if (!normalized || typeof normalized !== "object" || !("additionalIdeas" in normalized) || !Array.isArray(normalized.additionalIdeas)) return normalized;
+      return { ...normalized, additionalIdeas: normalized.additionalIdeas.map((idea, index) => normalizeIdea(idea, [...path, "additionalIdeas", index])) };
     }
-    return normalized;
-  }
-  function normalizeAssessment(assessment: unknown, path: Array<string | number>) {
-    const normalized = normalizeIdea(assessment, path);
-    if (!normalized || typeof normalized !== "object" || !("additionalIdeas" in normalized) || !Array.isArray(normalized.additionalIdeas)) return normalized;
-    return { ...normalized, additionalIdeas: normalized.additionalIdeas.map((idea, index) => normalizeIdea(idea, [...path, "additionalIdeas", index])) };
-  }
-  const findings = value.findings;
-  return { ...value, findings: Array.isArray(findings)
-    ? findings.map((assessment, index) => normalizeAssessment(assessment, ["findings", index]))
-    : findings && typeof findings === "object"
-      ? Object.fromEntries(Object.entries(findings).map(([id, assessment]) => [id, normalizeAssessment(assessment, ["findings", id])]))
-      : findings };
-}, flatResearchEvidenceSchema);
+    const findings = value.findings;
+    return { ...value, findings: Array.isArray(findings)
+      ? findings.map((assessment, index) => normalizeAssessment(assessment, ["findings", index]))
+      : findings && typeof findings === "object"
+        ? Object.fromEntries(Object.entries(findings).map(([id, assessment]) => [id, normalizeAssessment(assessment, ["findings", id])]))
+        : findings };
+  }, flatResearchEvidenceSchema);
+}
+export const researchEvidenceSchema = createResearchEvidenceSchema(text);
+export const completePacketClaimResearchEvidenceSchema = createResearchEvidenceSchema(z.string());
 export type ResearchEvidence = z.infer<
   typeof researchEvidenceSchema
 >["findings"][number];

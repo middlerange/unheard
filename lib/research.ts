@@ -16,7 +16,8 @@ import { researchSourceDepthQuotePolicy, researchSourceQuoteDepthRequestMetadata
 import { RESEARCH_SOURCE_DEPTH_QUESTIONS_GROUPING_VERSION, RESEARCH_SOURCE_DEPTH_QUESTIONS_VERSION, RESEARCH_SOURCE_DEPTH_QUESTIONS_TRANSPORT, RESEARCH_SOURCE_DEPTH_QUESTIONS_SONNET_INSTRUCTIONS, researchSourceDepthGroupingRoute, researchSourceDepthQuestionPolicy, researchSourceQuestionDepthRequestMetadata } from "./research-source-depth-questions";
 import { reviewResearchSourcePackets, configuredResearchPacketDefinitions, researchPacketsFromDefinitions, researchSourcePacketPolicy, researchSourcePacketPolicyContract } from "./research-source-packets";
 import type { ResearchSourcePacket } from "./research-source-packet-model";
-import { researchSourceArtifactPolicy, researchSourceArtifactContract, RESEARCH_SOURCE_ARTIFACT_VERSION, RESEARCH_SOURCE_ARTIFACT_FORMAT } from "./research-source-artifact";
+import type { ResearchArtifactSourceFormats } from "./research-types";
+import { researchSourceArtifactPolicy, researchSourceArtifactRoutingContract, validResearchArtifactSourceFormats, RESEARCH_SOURCE_ARTIFACT_VERSION, RESEARCH_SOURCE_ARTIFACT_FORMAT } from "./research-source-artifact";
 import { researchFindingDates, researchItemSignalKind } from "./research-dates";
 import { getDraftResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
 import { hasUsablePewResearchBody, isPewResearchSource } from "./research-pew";
@@ -1201,9 +1202,9 @@ async function cachedModel(
     });
     await recordPhase(activeReviewPhase.name, activeReviewPhase.version, [], checked.manifestIds, false);
     activeReviewPhase = { name: "source-depth", version: RESEARCH_SOURCE_DEPTH_VERSION };
-    let depthModel: string | undefined, depthGroupingVersion: string | undefined, artifactSourceIds: string[] = [];
+    let depthModel: string | undefined, depthGroupingVersion: string | undefined, artifactSourceIds: string[] = [], artifactSourceFormats: ResearchArtifactSourceFormats | undefined;
     if (run.mode === "replay") {
-      const config = await read(`research-replay:${run.id}:config`) as { depthModel?: unknown; depthGroupingVersion?: unknown; artifactSourceIds?: unknown } | null;
+      const config = await read(`research-replay:${run.id}:config`) as { depthModel?: unknown; depthGroupingVersion?: unknown; artifactSourceIds?: unknown; artifactSourceFormats?: unknown } | null;
       if (config?.depthModel !== undefined) {
         if (config.depthModel !== "gpt-6-sol" && config.depthModel !== "claude-sonnet-5-5") throw new Error("Unknown frozen depth-review model");
         depthModel = config.depthModel;
@@ -1217,22 +1218,30 @@ async function cachedModel(
           || new Set(config.artifactSourceIds).size !== config.artifactSourceIds.length) throw new Error("Unknown frozen artifact source routing");
         artifactSourceIds = config.artifactSourceIds;
       }
+      if (config?.artifactSourceFormats !== undefined) {
+        if (!validResearchArtifactSourceFormats(config.artifactSourceFormats, artifactSourceIds)) throw new Error("Unknown frozen artifact source formats");
+        artifactSourceFormats = config.artifactSourceFormats;
+      }
     } else {
       const policyId = `research-depth-policy:${run.id}`;
-      let policy = await read(policyId) as { model?: string; groupingVersion?: string; artifactSourceIds?: string[]; artifactContractHash?: string } | null;
+      let policy = await read(policyId) as { model?: string; groupingVersion?: string; artifactSourceIds?: string[]; artifactSourceFormats?: ResearchArtifactSourceFormats; artifactContractHash?: string } | null;
       if (!policy) {
         policy = { ...(process.env.RESEARCH_DEPTH_MODEL ? { model: process.env.RESEARCH_DEPTH_MODEL } : {}),
           ...(process.env.RESEARCH_DEPTH_GROUPING_VERSION ? { groupingVersion: process.env.RESEARCH_DEPTH_GROUPING_VERSION } : {}) };
         const activeSourceIds = JSON.parse(run.source_ids) as string[];
         const artifactSeeds = RESEARCH_SOURCE_SEEDS.filter(seed => seed.artifactReview?.enabled && activeSourceIds.includes(seed.id));
-        if (artifactSeeds.some(seed => seed.artifactReview!.format !== RESEARCH_SOURCE_ARTIFACT_FORMAT)) throw new Error("Unknown configured artifact format");
+        if (artifactSeeds.some(seed => seed.artifactReview!.format !== RESEARCH_SOURCE_ARTIFACT_FORMAT && seed.artifactReview!.format !== "research_intake_form")) throw new Error("Unknown configured artifact format");
         if (artifactSeeds.length) {
           const watchedUrls = new Set(artifactSeeds.map(seed => canonicalResearchUrl(seed.url)));
           const urls = researchWatchUrlAliases(artifactSeeds.map(seed => seed.url));
           const items = await db.select({ id: research_items.id, url: research_items.canonical_url }).from(research_items).where(and(eq(research_items.team_id, run.team_id),
             sql`${research_items.canonical_url} IN (SELECT value FROM json_each(${JSON.stringify(urls)}))`)).orderBy(research_items.id).all();
-          policy.artifactSourceIds = items.filter(item => watchedUrls.has(canonicalResearchUrl(item.url))).map(item => item.id);
-          policy.artifactContractHash = await researchHash(JSON.stringify(researchSourceArtifactContract(outputTokens)));
+          const routed = items.filter(item => watchedUrls.has(canonicalResearchUrl(item.url)));
+          policy.artifactSourceIds = routed.map(item => item.id);
+          const formats = Object.fromEntries(routed.filter(item => artifactSeeds.some(seed => canonicalResearchUrl(seed.url) === canonicalResearchUrl(item.url)
+            && seed.artifactReview!.format === "research_intake_form")).map(item => [item.id, "research_intake_form" as const]));
+          if (Object.keys(formats).length) policy.artifactSourceFormats = formats;
+          policy.artifactContractHash = await researchHash(JSON.stringify(researchSourceArtifactRoutingContract(outputTokens, policy.artifactSourceFormats)));
         }
         await storage.writeImmutable(policyId, policy);
         policy = await read(policyId) as typeof policy;
@@ -1241,9 +1250,11 @@ async function cachedModel(
       if (policy?.artifactSourceIds !== undefined) {
         if (!Array.isArray(policy.artifactSourceIds) || policy.artifactSourceIds.some(id => typeof id !== "string" || !id)
           || new Set(policy.artifactSourceIds).size !== policy.artifactSourceIds.length
-          || policy.artifactContractHash !== await researchHash(JSON.stringify(researchSourceArtifactContract(outputTokens)))) throw new Error("Frozen artifact review policy changed");
+          || policy.artifactSourceFormats !== undefined && !validResearchArtifactSourceFormats(policy.artifactSourceFormats, policy.artifactSourceIds)
+          || policy.artifactContractHash !== await researchHash(JSON.stringify(researchSourceArtifactRoutingContract(outputTokens, policy.artifactSourceFormats)))) throw new Error("Frozen artifact review policy changed");
         artifactSourceIds = policy.artifactSourceIds;
-      }
+        artifactSourceFormats = policy.artifactSourceFormats;
+      } else if (policy?.artifactSourceFormats !== undefined) throw new Error("Frozen artifact formats require source routing");
       if (depthModel !== undefined && depthModel !== "gpt-6-sol" && depthModel !== "claude-sonnet-5-5") throw new Error("Unknown configured depth-review model");
       if (depthGroupingVersion !== undefined && depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUOTES_GROUPING_VERSION && depthGroupingVersion !== RESEARCH_SOURCE_DEPTH_QUESTIONS_GROUPING_VERSION) throw new Error("Unknown configured depth grouping policy");
     }
@@ -1287,8 +1298,10 @@ async function cachedModel(
     }
     if (artifactSourceIds.length) {
       const artifactIds = new Set(artifactSourceIds), otherwise = depthPolicy.policyForSource;
-      const artifactPolicy = researchSourceArtifactPolicy(outputTokens);
-      depthPolicy.policyForSource = source => artifactIds.has(source.id) ? artifactPolicy : otherwise?.(source) ?? depthPolicy;
+      const artifactPolicies = new Map(artifactSourceIds.map(id => [id,
+        researchSourceArtifactPolicy(outputTokens, artifactSourceFormats && Object.hasOwn(artifactSourceFormats, id)
+          ? artifactSourceFormats[id] : RESEARCH_SOURCE_ARTIFACT_FORMAT)]));
+      depthPolicy.policyForSource = source => artifactPolicies.get(source.id) ?? otherwise?.(source) ?? depthPolicy;
       if (sources.some(source => artifactIds.has(source.id))) activeReviewPhase.version = RESEARCH_SOURCE_ARTIFACT_VERSION;
     }
     const expanded = await reviewResearchSources(sources, checked.value, reviewAccess, depthPolicy);

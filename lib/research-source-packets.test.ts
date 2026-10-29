@@ -126,6 +126,8 @@ describe('durable source packet inference', () => {
     const next = await reviewResearchSourcePackets([packet()], test.access, policy);
     expect(test.generate).toHaveBeenCalledTimes(4);
     expect(policy.normalizerVersion).toBe('structured-inference-v2+empty-content-angle-note-v1');
+    expect(await researchHash(policy.instructions)).toBe('54aaf1a1b678e66987b4ec013d77df1e9fad782c8af7ba16c1d6e9b51b48f17e');
+    expect(await researchHash(JSON.stringify(researchSourcePacketPolicyContract(RESEARCH_SOURCE_PACKET_V4_REVIEW, 16384)))).toBe('694ffac902650028b6a12b062d9b34ade2adb9114933c37d1809d4d2d0c124a6');
     expect(policy.qualificationPolicyVersion).toBe('research-source-packet-v2');
     expect(next.findings).toEqual(previous[2].findings); expect(next.packetProofs).toEqual(previous[2].packetProofs);
     expect(next.manifestIds).not.toEqual(previous[2].manifestIds);
@@ -152,6 +154,7 @@ describe('durable source packet inference', () => {
     const test = harness(vi.fn(async () => raw)), v4 = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW);
     const old = await reviewResearchSourcePackets([packet()], test.access, v4); expect(old.acceptedIdeas).toEqual([]);
     const before = [...test.values].map(([id, value]) => [id, JSON.stringify(value)]), v5 = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V5_REVIEW);
+    expect(v5.normalizerVersion).toBe('structured-inference-v2+empty-unknown-frame-claim-fields-v1+complete-claim-text-v1');
     expect(v5.instructions).toBe(v4.instructions); expect(v5.schema).toBe(v4.schema); expect(v5.metadata).toBe(v4.metadata);
     const next = await reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, v5);
     expect(next.acceptedIdeas).toHaveLength(1); expect(test.generate).toHaveBeenCalledTimes(1);
@@ -168,6 +171,34 @@ describe('durable source packet inference', () => {
     const id = [...test.values].find(([, value]: any) => value.normalizationOnly)![0];
     test.values.set(id, { ...attempt, removedPaths: [] });
     await expect(reviewResearchSourcePackets([packet()], { ...test.access, budget: { remaining: 0 } }, v5)).rejects.toThrow('authentic parent');
+  });
+  it('v5 authenticates all eight unchanged v4 parents and preserves long raw claims through zero-call resume', async () => {
+    const inputs = Array.from({ length: 8 }, (_, index) => ({ ...packet(), id: 'packet-' + index }));
+    const generate = vi.fn(async (request: { data: { items: Array<{ id: string }> } }) => {
+      const raw = response(inputs.find(input => input.id === request.data.items[0].id)!);
+      const claim = raw.findings[request.data.items[0].id].claim;
+      for (const field of ['summary', 'contentAngle', 'whyItMatters', 'limitations'] as const) claim[field] = claim[field].repeat(100);
+      return raw;
+    });
+    const test = harness(generate as never), v4 = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW);
+    for (let checkpoint = 0; checkpoint < 3; checkpoint++)
+      await expect(reviewResearchSourcePackets(inputs, { ...test.access, budget: { remaining: 2 } }, v4)).rejects.toBeInstanceOf(ResearchSourcePacketPending);
+    const old = await reviewResearchSourcePackets(inputs, { ...test.access, budget: { remaining: 2 } }, v4);
+    expect(old.acceptedIdeas).toEqual([]); expect(generate).toHaveBeenCalledTimes(8);
+    const parents = [...test.values].map(([id, value]) => [id, JSON.stringify(value)]);
+    const v5 = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V5_REVIEW), access = { ...test.access, budget: { remaining: 0 } };
+    const result = await reviewResearchSourcePackets(inputs, access, v5);
+    expect(result.acceptedIdeas).toHaveLength(8);
+    expect([...test.values.values()].filter((value: any) => value.normalizationOnly)).toHaveLength(8);
+    for (const [index, finding] of result.acceptedIdeas.entries()) {
+      const original = response(inputs[index]).findings[inputs[index].id];
+      for (const field of ['summary', 'contentAngle', 'whyItMatters', 'limitations'] as const) expect(finding[field]).toBe(original.claim[field].repeat(100));
+      expect(finding.score).toBe(92);
+    }
+    expect(await reviewResearchSourcePackets(inputs, access, v5)).toEqual(result);
+    expect(await reviewResearchSourcePackets(inputs, access, v4)).toEqual(old);
+    for (const [id, bytes] of parents) expect(JSON.stringify(test.values.get(id))).toBe(bytes);
+    expect(generate).toHaveBeenCalledTimes(8);
   });
   it.each(['plan', 'raw', 'result', 'manifest', 'source'])('v5 rejects changed authentic parent %s without a provider call', async mutation => {
     const test = harness(), v4 = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW);

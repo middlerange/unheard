@@ -286,3 +286,27 @@ it('preserves the complete timestamp interval through the opted-in original-page
   expect(result.content!.length).toBeGreaterThan(14_000);
   expect(fetcher.mock.calls.map(call => String(call[0]))).toEqual([source.url, endpoint]);
 });
+
+
+it('uses a reviewed exact article fallback without following a rejected source redirect', async () => {
+  const reviewed = { ...source, freeArticleFallback: true, freeArticleFallbackOnRedirect: true };
+  const fetcher = vi.fn(async (input: string | URL) => String(input) === source.url
+    ? new Response(null, { status: 302, headers: { location: 'https://foreign.example/consent' } })
+    : Response.json({ results: [record()], errors: [] }));
+  vi.stubGlobal('fetch', fetcher);
+  const result = await collectDiscoveredResearchSource(reviewed, end - 1, end, new Set());
+  expect(result.items[0]).toMatchObject({ url: source.url, publishedAt: null, contentProvenance: 'article' });
+  expect(fetcher.mock.calls.map(call => String(call[0]))).toEqual([source.url, endpoint]);
+});
+
+it('does not enable rejected-redirect fallback for an unreviewed article', async () => {
+  const fetcher = vi.fn(async () => new Response(null, { status: 302, headers: { location: 'https://foreign.example/consent' } }));
+  vi.stubGlobal('fetch', fetcher);
+  await expect(collectDiscoveredResearchSource(source, end - 1, end, new Set())).rejects.toThrow('Source redirect rejected');
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+it('requires the exact reviewed article even when the provider returns another approved-host page', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ results: [{ ...record(), final_url: 'https://publisher.example/other' }], errors: [] })));
+  await expect(fetchFreePublicWatchHtml({ ...source, freeArticleFallback: true, freeArticleFallbackOnRedirect: true })).rejects.toThrow('requested public page');
+});

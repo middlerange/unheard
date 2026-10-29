@@ -1,6 +1,8 @@
 import { RESEARCH_EVIDENCE_OUTPUT_TOKENS } from './research-model';
 import { RESEARCH_SOURCE_DEPTH_INSTRUCTIONS, researchSourceDepthRequestMetadata, researchSourceDepthSchema, normalizeResearchSourceDepth } from './research-source-depth-model';
 import type { ResearchSourceReviewPolicy } from './research-source-review';
+import type { ResearchArtifactFormat, ResearchArtifactSourceFormats } from './research-types';
+import { RESEARCH_SOURCE_FORM_FORMAT, researchSourceFormContract, researchSourceFormPolicy } from './research-source-form';
 
 export const RESEARCH_SOURCE_ARTIFACT_VERSION = 'research-source-artifact-v1';
 export const RESEARCH_SOURCE_ARTIFACT_FORMAT = 'inspectable_public_artifact';
@@ -17,13 +19,17 @@ A title naming the audience, an event invitation's schedule or list of activitie
 
 Submit the assessment exactly once through submit_research, including wholeSource and every required group. The tool only returns research data; it performs no external action.`;
 
-export function researchSourceArtifactContract(outputTokens = RESEARCH_EVIDENCE_OUTPUT_TOKENS) {
+export function researchSourceArtifactContract(outputTokens = RESEARCH_EVIDENCE_OUTPUT_TOKENS, format: ResearchArtifactFormat = RESEARCH_SOURCE_ARTIFACT_FORMAT) {
+  if (format === RESEARCH_SOURCE_FORM_FORMAT) return researchSourceFormContract(outputTokens);
+  if (format !== RESEARCH_SOURCE_ARTIFACT_FORMAT) throw new Error('Unknown artifact review format');
   return { version: RESEARCH_SOURCE_ARTIFACT_VERSION, format: RESEARCH_SOURCE_ARTIFACT_FORMAT,
     instructions: RESEARCH_SOURCE_ARTIFACT_INSTRUCTIONS, model: RESEARCH_SOURCE_ARTIFACT_MODEL,
     schema: researchSourceDepthSchema({ id: 'item', content: '' }, ['profile']), outputTokens };
 }
 
-export function researchSourceArtifactPolicy(outputTokens = RESEARCH_EVIDENCE_OUTPUT_TOKENS): ResearchSourceReviewPolicy {
+export function researchSourceArtifactPolicy(outputTokens = RESEARCH_EVIDENCE_OUTPUT_TOKENS, format: ResearchArtifactFormat = RESEARCH_SOURCE_ARTIFACT_FORMAT): ResearchSourceReviewPolicy {
+  if (format === RESEARCH_SOURCE_FORM_FORMAT) return researchSourceFormPolicy(outputTokens);
+  if (format !== RESEARCH_SOURCE_ARTIFACT_FORMAT) throw new Error('Unknown artifact review format');
   if (!Number.isInteger(outputTokens) || outputTokens <= 0 || outputTokens > 128_000) throw new Error('Artifact review requires a valid output budget');
   return { version: RESEARCH_SOURCE_ARTIFACT_VERSION, model: RESEARCH_SOURCE_ARTIFACT_MODEL,
     instructions: RESEARCH_SOURCE_ARTIFACT_INSTRUCTIONS, sourceSchema: researchSourceDepthSchema,
@@ -34,4 +40,16 @@ export function researchSourceArtifactPolicy(outputTokens = RESEARCH_EVIDENCE_OU
     },
     normalize: normalizeResearchSourceDepth,
   };
+}
+
+export function validResearchArtifactSourceFormats(value: unknown, sourceIds: readonly string[] | undefined): value is ResearchArtifactSourceFormats {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !sourceIds) return false;
+  const entries = Object.entries(value);
+  return entries.length > 0 && entries.every(([id, format]) => sourceIds.includes(id) && format === RESEARCH_SOURCE_FORM_FORMAT);
+}
+
+export function researchSourceArtifactRoutingContract(outputTokens = RESEARCH_EVIDENCE_OUTPUT_TOKENS, artifactSourceFormats?: ResearchArtifactSourceFormats) {
+  const artifact = researchSourceArtifactContract(outputTokens);
+  return artifactSourceFormats ? { artifact, artifactSourceFormats,
+    form: researchSourceArtifactContract(outputTokens, RESEARCH_SOURCE_FORM_FORMAT) } : artifact;
 }
