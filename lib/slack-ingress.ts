@@ -112,6 +112,18 @@ export async function handleSlackEvents(request: Request) {
   )
     return ack();
   const db = await getDb();
+  const { findSelectionForThread } = await import("./research-selection");
+  const selection = await findSelectionForThread(integration.team_id, event.channel, event.thread_ts);
+  if (selection && integration.enabled) {
+    await enqueueSlackJob(integration.team_id, "selection", {
+      draftId: selection.runId,
+      userId: event.user,
+      text: event.text,
+      channelId: event.channel,
+      threadTs: event.thread_ts,
+    }, `event-${data.event_id}`);
+    return ack();
+  }
   const draft = (
     await db
       .select()

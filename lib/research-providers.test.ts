@@ -22,7 +22,7 @@ it.each(['claude-haiku-5-5', 'claude-haiku-5-5-20261021'])('checks metadata with
   }));
   expect(fetcher.mock.calls[0]).toHaveLength(2);
   expect(result.research).toMatchObject({ status: 'metadata_accessible', resolvedModelId, httpStatus: 200, bodyKind: 'json', contentType: 'application/json', requestId: 'req_metadata_12345', generationAccess: 'not_tested', accountBalance: 'not_checked', automaticRetry: false });
-  expect(result.writing).toEqual({ provider: 'OpenAI', model: 'gpt-6-sol', checked: false });
+  expect(result.writing).toEqual({ provider: 'Anthropic', model: 'claude-sonnet-5-5', checked: false });
   expect(JSON.stringify(result)).not.toContain(secret);
 });
 

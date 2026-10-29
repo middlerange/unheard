@@ -93,7 +93,7 @@ declare global {
     | {
         create(input: {
           id: string;
-          params: { runId: string };
+          params: { runId: string; selectedWriting?: boolean };
         }): Promise<unknown>;
       }
     | undefined;
@@ -391,6 +391,16 @@ export async function dispatchResearchRun(runId: string) {
       )
     )
       throw error;
+  }
+}
+export async function dispatchSelectedResearchWriting(runId: string, selectionEventId: string) {
+  const workflow = globalThis.__contentHubResearchWorkflow__;
+  if (!workflow) throw new Error("Research Workflow is unavailable.");
+  const id = `selection-${await researchHash(`${runId}:${selectionEventId}`)}`;
+  try {
+    await workflow.create({ id, params: { runId, selectedWriting: true } });
+  } catch (error) {
+    if (!/already exists|duplicate|instance.*exists/i.test(error instanceof Error ? error.message : "")) throw error;
   }
 }
 export async function createResearchRun(
@@ -1610,7 +1620,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
     ]));
   }
   await db.update(research_runs).set({ status: "ranking" }).where(eq(research_runs.id, run.id));
-  if (progress?.pendingDrafts && run.editorial && run.days === 0.5) return { ok: true, pending: true, draftReady: true };
+
   if (!progress) {
     const sources = JSON.parse(run.source_ids) as string[];
     const discoveryCutoff = Date.now();
@@ -1754,7 +1764,6 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       });
     });
     const batch = full.flatMap(item => item.status === "fulfilled" && item.value.content ? [item.value] : []);
-    let draftReady = false;
     if (batch.length) {
       const input = batch.map(item => ({
         id: item.id, title: item.title, sourceId: item.source_id, publishedAt: item.published_at,
@@ -1787,8 +1796,6 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
           reason,
         });
       }
-      draftReady = run.editorial && run.days === 0.5 && accepted.length > 0;
-      if (draftReady) { progress.pendingDrafts = true; await persistProgress(progress); }
       await saveQualifiedResearchFindings(run, batch, accepted, diagnostics);
     }
     diagnostics.evidenceCount += batch.length;
@@ -1801,7 +1808,6 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       diagnostics.outcome = `Shortlisted ${progress.selectedIds.length} stories, but their public evidence could not be read.`;
     }
     await persistProgress(progress);
-    if (draftReady) return { ok: true, pending: true, draftReady: true };
   }
   if (progress.nextOffset < progress.selectedIds.length) return { ok: true, pending: true };
   if (!progress.selectedIds.length && diagnostics.screenedCount) {
@@ -1838,11 +1844,8 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
     const { snapshotHash, ...snapshot } = packetPlan;
     if (packetPlan.version !== "configured-public-reference-packets-v1" || packetPlan.runId !== run.id || packetPlan.teamId !== run.team_id
       || JSON.stringify(packetPlan.candidateIds) !== JSON.stringify(candidateIds) || snapshotHash !== await researchHash(JSON.stringify(snapshot))) throw new Error("Reference packet plan differs from the frozen run");
-    let packetDraftReady = false;
     try {
       const output = await cachedResearchSourcePackets(run, packetPlan.packets, coverageBudget);
-      packetDraftReady = run.editorial && run.days === 0.5 && output.acceptedIdeas.length > 0;
-      if (packetDraftReady) { progress.pendingDrafts = true; await persistProgress(progress); }
       await saveQualifiedResearchFindings(run, packetPlan.items, output.acceptedIdeas.map(finding => ({ ...finding, isAdditional: true })), diagnostics, output.packetProofs);
       const resultId = `research-reference-packets:${run.id}:result`, value = JSON.stringify(output);
       await db.insert(research_cache).values({ id: resultId, team_id: run.team_id, value, created_at: Date.now() }).onConflictDoNothing();
@@ -1852,7 +1855,6 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
     progress.referencePacketsComplete = true;
     diagnostics.outcome = `${diagnostics.outcome ?? ""} Related public-source packets were assessed with original source citations.`;
     await persistProgress(progress);
-    if (packetDraftReady) return { ok: true, pending: true, draftReady: true };
   }
   const failed = await db
     .select()
@@ -2025,12 +2027,33 @@ export async function processResearchJob(job: ResearchJob) {
     try { return await processResearchReplay(run, job.operation); }
     catch (error) { if (error instanceof ResearchModelRateLimitError) return { pending: true, retryAfterMs: error.retryAfterMs }; throw error; }
   }
+  if (job.operation === "selection") {
+    if (!run.editorial || run.mode !== "scan" || !["drafting", "completed"].includes(run.status)) return { skipped: true };
+    const { sendResearchSelection } = await import("./research-selection");
+    const result = await sendResearchSelection(run.team_id, run.id);
+    await db.update(research_runs).set({ status: "completed", completed_at: Date.now() }).where(eq(research_runs.id, run.id));
+    return result;
+  }
   if (job.operation === "drafts" || job.operation === "drafts_interim") {
     const { processResearchDraftJob } = await import("./research-drafts");
     return processResearchDraftJob(run.id, job.operation === "drafts_interim");
   }
-  if (terminal(run.status)) return { sourceIds: [], done: true };
   if (job.operation === "fail") {
+    if (job.writing) {
+      const diagnostic = /insufficient_quota|billing_hard_limit_reached/i.test(job.error || "")
+        ? "Writing stopped because the provider reported insufficient credits or quota. No automatic retry was attempted."
+        : /HTTP 429/i.test(job.error || "")
+          ? "Writing stopped because the provider rejected a request due to a rate or account limit. No automatic retry was attempted."
+          : /HTTP 403/i.test(job.error || "")
+            ? "Writing stopped because the provider rejected a request with HTTP 403. No automatic retry was attempted."
+            : "Writing stopped after a provider or processing error. The request outcome may be unknown; it will not be automatically repeated.";
+      await db.update(research_runs).set({ status: "completed", error: [run.error, diagnostic].filter(Boolean).join(" ").slice(0, 1000) }).where(eq(research_runs.id, run.id));
+      try {
+        const { notifySelectionThread } = await import("./research-selection");
+        await notifySelectionThread(run.team_id, run.id, diagnostic);
+      } catch (error) { console.error("Could not confirm selected-writing failure notice", error instanceof Error ? error.name : "error"); }
+      return { ok: true };
+    }
     await db
       .update(research_runs)
       .set({
@@ -2041,6 +2064,7 @@ export async function processResearchJob(job: ResearchJob) {
       .where(eq(research_runs.id, run.id));
     return { ok: true };
   }
+  if (terminal(run.status)) return { sourceIds: [], done: true };
   if (job.operation === "plan") {
     await db
       .update(research_runs)

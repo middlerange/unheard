@@ -16,12 +16,12 @@ describe('durable research execution', () => {
       return payload.operation === 'plan' ? { sourceIds: ['teresa-torres', 'lenny'] } : { status: 'completed' };
     };
     await runResearchWorkflow('run-1', step, invoke);
-    expect(operations).toEqual(['plan', 'teresa-torres', 'lenny', 'rank', 'drafts']);
+    expect(operations).toEqual(['plan', 'teresa-torres', 'lenny', 'rank', 'selection']);
     expect(options['Rank findings'].retries).toEqual({ limit: 0, delay: '1 second', backoff: 'constant' });
-    expect(options['Draft daily posts'].retries).toEqual({ limit: 0, delay: '1 second', backoff: 'constant' });
+    expect(options['Send candidates for selection'].retries).toEqual({ limit: 0, delay: '1 second', backoff: 'constant' });
   });
 
-  it('delivers each qualified 12-hour batch before ranking the next, without paid step retries', async () => {
+  it('finishes all ranking before requesting candidate selection', async () => {
     const events: string[] = []; let ranks = 0, interims = 0;
     const invoke = vi.fn(async (payload: { operation: string }) => {
       events.push(payload.operation);
@@ -33,7 +33,7 @@ describe('durable research execution', () => {
     const doStep = vi.fn(async (_name: string, _options: unknown, work: () => Promise<unknown>) => work());
     const sleep = vi.fn(async () => {});
     await runResearchWorkflow('incremental-run', { do: doStep, sleep }, invoke);
-    expect(events).toEqual(['plan', 'rank', 'drafts_interim', 'drafts_interim', 'rank', 'drafts_interim', 'rank', 'drafts']);
+    expect(events).toEqual(['plan', 'rank', 'rank', 'rank', 'selection']);
     for (const [name, options] of doStep.mock.calls) if (name.startsWith('Draft')) expect(options).toMatchObject({ retries: { limit: 0 } });
   });
 
@@ -59,7 +59,7 @@ describe('durable research execution', () => {
     });
     const doStep = vi.fn(async (_name: string, _config: unknown, work: () => Promise<unknown>) => work());
     await runResearchWorkflow('video-run', { do: doStep }, invoke);
-    expect(operations).toEqual(['plan', 'collect', 'collect', 'collect', 'rank', 'drafts']);
+    expect(operations).toEqual(['plan', 'collect', 'collect', 'collect', 'rank', 'selection']);
     expect(doStep.mock.calls.map(([name]) => name)).toContain('Collect public-video-source batch 3');
   });
 
@@ -76,7 +76,7 @@ describe('durable research execution', () => {
     const step = { do: async (_name: string, _options: unknown, work: () => Promise<unknown>) => work(), sleep };
     await runResearchWorkflow('cooldown-run', step, invoke);
     expect(sleep).toHaveBeenCalledWith('Wait for research collection round 1', '121 seconds');
-    expect(events).toEqual(['plan', 'limited', 'next-source', 'sleep:Wait for research collection round 1:121 seconds', 'limited', 'rank', 'drafts']);
+    expect(events).toEqual(['plan', 'limited', 'next-source', 'sleep:Wait for research collection round 1:121 seconds', 'limited', 'rank', 'selection']);
   });
 
   it('visits every pending source once per round until all batches finish, without a cooled source blocking ready work', async () => {
@@ -94,15 +94,15 @@ describe('durable research execution', () => {
     const sleep = vi.fn(async () => {});
     const doStep = vi.fn(async (_name: string, _options: unknown, work: () => Promise<unknown>) => work());
     await runResearchWorkflow('fair-run', { do: doStep, sleep }, invoke);
-    expect(events).toEqual(['limited:1', 'ready:1', 'failed-source:1', 'limited:2', 'ready:2', 'limited:3', 'ready:3', 'rank', 'drafts']);
+    expect(events).toEqual(['limited:1', 'ready:1', 'failed-source:1', 'limited:2', 'ready:2', 'limited:3', 'ready:3', 'rank', 'selection']);
     expect(sleep).not.toHaveBeenCalled();
     expect(doStep.mock.calls.map(([name]) => name)).toEqual([
       'Plan research collection', 'Collect limited', 'Collect ready', 'Collect failed-source',
-      'Collect limited batch 2', 'Collect ready batch 2', 'Collect limited batch 3', 'Collect ready batch 3', 'Rank findings', 'Draft daily posts',
+      'Collect limited batch 2', 'Collect ready batch 2', 'Collect limited batch 3', 'Collect ready batch 3', 'Rank findings', 'Send candidates for selection',
     ]);
     expect(calls['failed-source']).toBe(1);
     for (const [name, config] of doStep.mock.calls) {
-      if (name === 'Rank findings' || name === 'Draft daily posts') expect(config).toMatchObject({ retries: { limit: 0 } });
+      if (name === 'Rank findings' || name === 'Send candidates for selection') expect(config).toMatchObject({ retries: { limit: 0 } });
     }
   });
 
@@ -179,10 +179,10 @@ describe('durable research execution', () => {
     const doStep = vi.fn(async (_name: string, _config: unknown, work: () => Promise<unknown>) => work());
     expect(await runResearchWorkflow('large-run', { do: doStep }, invoke)).toEqual({ drafted: 1 });
     expect(doStep.mock.calls.map(([name]) => name)).toEqual([
-      'Plan research collection', 'Rank findings', 'Rank findings batch 2', 'Rank findings batch 3', 'Draft daily posts',
+      'Plan research collection', 'Rank findings', 'Rank findings batch 2', 'Rank findings batch 3', 'Send candidates for selection',
     ]);
     for (const [, config] of doStep.mock.calls.slice(1)) expect(config).toMatchObject({ retries: { limit: 0 } });
-    expect(invoke.mock.calls.map(([payload]) => payload.operation)).toEqual(['plan', 'rank', 'rank', 'rank', 'drafts']);
+    expect(invoke.mock.calls.map(([payload]) => payload.operation)).toEqual(['plan', 'rank', 'rank', 'rank', 'selection']);
   });
 
   it('waits for an existing evidence request before continuing the same ranking job', async () => {
@@ -197,7 +197,7 @@ describe('durable research execution', () => {
     const sleep = vi.fn(async () => {});
     expect(await runResearchWorkflow('coverage-wait', { do: doStep, sleep }, invoke)).toEqual({ drafted: 0 });
     expect(sleep).toHaveBeenCalledExactlyOnceWith('Wait for research evidence after batch 1', '15 seconds');
-    expect(invoke.mock.calls.map(([payload]) => payload.operation)).toEqual(['plan', 'rank', 'rank', 'drafts']);
+    expect(invoke.mock.calls.map(([payload]) => payload.operation)).toEqual(['plan', 'rank', 'rank', 'selection']);
     expect(doStep.mock.calls.find(([name]) => name === 'Rank findings batch 2')?.[1]).toMatchObject({ retries: { limit: 0 } });
   });
 
@@ -226,9 +226,9 @@ describe('durable research execution', () => {
       return { drafted: draftCalls * 3, pending: draftCalls < 9 };
     });
     const doStep = vi.fn(async (_name: string, _config: unknown, work: () => Promise<unknown>) => work());
-    expect(await runResearchWorkflow('uncapped-run', { do: doStep }, invoke)).toEqual({ drafted: 27, pending: false });
+    expect(await runResearchWorkflow('uncapped-run', { do: doStep }, invoke, true)).toEqual({ drafted: 27, pending: false });
     expect(draftCalls).toBe(9);
-    expect(doStep.mock.calls.map(([name]) => name)).toContain('Draft daily posts batch 9');
+    expect(doStep.mock.calls.map(([name]) => name)).toContain('Write selected candidates batch 9');
     for (const [, config] of doStep.mock.calls.slice(1)) expect(config).toMatchObject({ retries: { limit: 0 } });
   });
 
@@ -246,12 +246,12 @@ describe('durable research execution', () => {
       return completed.get(name);
     });
     const sleep = vi.fn(async () => {});
-    expect(await runResearchWorkflow('limited-writing', { do: doStep, sleep }, invoke)).toEqual({ drafted: 2, pending: false });
-    expect(sleep).toHaveBeenCalledWith('Wait for research writing cooldown after batch 1', '121 seconds');
-    expect(doStep.mock.calls.map(([name]) => name)).toEqual(['Plan research collection', 'Rank findings', 'Draft daily posts', 'Draft daily posts batch 2', 'Draft daily posts batch 3']);
+    expect(await runResearchWorkflow('limited-writing', { do: doStep, sleep }, invoke, true)).toEqual({ drafted: 2, pending: false });
+    expect(sleep).toHaveBeenCalledWith('Wait for selected writing batch 1', '121 seconds');
+    expect(doStep.mock.calls.map(([name]) => name)).toEqual(['Write selected candidates', 'Write selected candidates batch 2', 'Write selected candidates batch 3']);
     for (const [, options] of doStep.mock.calls.slice(1)) expect(options).toMatchObject({ retries: { limit: 0 } });
     const requests = invoke.mock.calls.length;
-    await runResearchWorkflow('limited-writing', { do: doStep, sleep }, invoke);
+    await runResearchWorkflow('limited-writing', { do: doStep, sleep }, invoke, true);
     expect(invoke).toHaveBeenCalledTimes(requests);
     expect(drafts).toBe(3);
   });
@@ -265,10 +265,10 @@ describe('durable research execution', () => {
     });
     const sleep = vi.fn(async () => {});
     const doStep = vi.fn(async (_name: string, _options: unknown, work: () => Promise<unknown>) => work());
-    await expect(runResearchWorkflow('unknown-writing', { do: doStep, sleep }, invoke)).rejects.toThrow('Model response interrupted');
+    await expect(runResearchWorkflow('unknown-writing', { do: doStep, sleep }, invoke, true)).rejects.toThrow('Model response interrupted');
     expect(sleep).not.toHaveBeenCalled();
-    expect(invoke.mock.calls.map(([payload]) => payload.operation)).toEqual(['plan', 'rank', 'drafts', 'fail']);
-    expect(doStep.mock.calls.find(([name]) => name === 'Draft daily posts')?.[1]).toMatchObject({ retries: { limit: 0 } });
+    expect(invoke.mock.calls.map(([payload]) => payload.operation)).toEqual(['drafts', 'fail']);
+    expect(doStep.mock.calls.find(([name]) => name === 'Write selected candidates')?.[1]).toMatchObject({ retries: { limit: 0 } });
   });
 
   it('signs internal dispatch and surfaces a failed handler response', async () => {

@@ -12,7 +12,7 @@ import { bindResearchEnvironment, invokeResearchProcess, runResearchWorkflow, ru
 
 export class ResearchWorkflow extends WorkflowEntrypoint {
   async run(event, step) {
-    return runResearchWorkflow(event.payload.runId, step, payload => invokeResearchProcess(handler, this.env, payload));
+    return runResearchWorkflow(event.payload.runId, step, payload => invokeResearchProcess(handler, this.env, payload), event.payload.selectedWriting === true, event.payload.selectionOnly === true);
   }
 }
 

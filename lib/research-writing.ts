@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const RESEARCH_WRITING_MODEL = "gpt-6-sol";
+export const RESEARCH_WRITING_MODEL = "claude-sonnet-5-5";
 export const RESEARCH_WRITING_VERSION = "research-draft-v12-novelty-context";
 export const RESEARCH_WRITING_STYLES = [
   "b2b-research-insight", "b2b-data-argument", "b2b-practitioner-teardown",

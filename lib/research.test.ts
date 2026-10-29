@@ -1275,6 +1275,52 @@ describe("research persistence and team isolation", () => {
     } finally { storageFault = undefined; fetcher.mockRestore(); if (priorKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = priorKey; }
   }, 60_000);
 
+  it("does not call writing without an authorized Slack selection, even for a drafting run or an interim job", async () => {
+    const team = "selection-gate-test", run = "selection-gate-test-run";
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)", params: [team, team, team] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp) VALUES(?,?,'scan','drafting',0.5,1,?,'Product teams')", params: [run, team, Date.now()] },
+    ] });
+    const fetcher = vi.spyOn(globalThis, "fetch");
+    try {
+      expect(await processResearchDraftJob(run)).toEqual({ drafted: 0, skipped: true });
+      expect(await processResearchDraftJob(run, true)).toEqual({ drafted: 0, skipped: true });
+      expect(fetcher).not.toHaveBeenCalled();
+      execute({ queries: [{ sql: "INSERT INTO research_cache(id,team_id,value,created_at) VALUES(?,?,?,?)", params: [`research-selection:${run}`, team, JSON.stringify({ state: "sent", candidateIds: ["one"], selectedIds: [] }), Date.now()] }] });
+      expect(await processResearchDraftJob(run)).toEqual({ drafted: 0, skipped: true });
+      expect(fetcher).not.toHaveBeenCalled();
+    } finally { fetcher.mockRestore(); }
+  }, 60_000);
+
+  it("writes only selected candidates and drains later replies, including distinct angles from one source", async () => {
+    const team = "selection-drain-test", run = "selection-drain-run", now = Date.now();
+    const quote = "The team moved account setup after the first preview so users could inspect the output first.";
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)", params: [team, team, team] },
+      { sql: "INSERT INTO channels(id,team_id,name,platform,group_name,research_enabled,system_prompt,created_at) VALUES(?,?,'Personal','linkedin','personal',1,'Explain specific product decisions and useful practitioner tests.',0)", params: [`${team}-li`, team] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_ids) VALUES(?,?,'scan','completed',0.5,1,?,'Product teams',?)", params: [run, team, now, JSON.stringify(["source"])] },
+      { sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,?)", params: ["selection-item", team, "source", "https://example.com/preview", "Preview before setup", quote, now-1000, now, quote.repeat(10), "article"] },
+      ...[1, 2].map(n => ({ sql: "INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", params: [`selection-f${n}`, team, run, "selection-item", "source", `Preview angle ${n}`, "https://example.com/preview", now-1000, 90, "Preview precedes setup.", "Commitment follows useful output.", `Inspect preview choice ${n}.`, quote, "Reported workflow, no conversion result.", now, `family-${n}`] })),
+      { sql: "INSERT INTO research_cache(id,team_id,value,created_at) VALUES(?,?,?,?)", params: [`research-selection:${run}`, team, JSON.stringify({ state: "sent", candidateIds: ["selection-f1", "selection-f2"], selectedIds: ["selection-f1"] }), now] },
+    ] });
+    const priorKey = process.env.ANTHROPIC_API_KEY; process.env.ANTHROPIC_API_KEY = "test-selection";
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const input = JSON.parse(request.messages[0].content);
+      if (input.proposed) return editorialReviewFixture();
+      return modelResponseFixture({ status: "completed", usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: "output_text", text: JSON.stringify({ ready: true, reason: "A bounded decision.", editorial: editorialFixture(quote), targets: [{ channelId: `${team}-li`, platform: "linkedin", content: `Show users an inspectable output before asking for account setup. Audit whether the setup step needs information that the first preview has not yet given them. Source: ${input.source.url}`, thread: [], supportQuote: quote, redditTitle: null, subreddit: null }] }) }] }] });
+    });
+    try {
+      await processResearchDraftJob(run);
+      expect(execute({ queries: [{ sql: "SELECT finding_id FROM research_drafts WHERE run_id=?", params: [run] }] })[0].results.map((r: any) => r.finding_id)).toEqual(["selection-f1"]);
+      execute({ queries: [{ sql: "UPDATE research_cache SET value=? WHERE id=?", params: [JSON.stringify({ state: "sent", candidateIds: ["selection-f1", "selection-f2"], selectedIds: ["selection-f1", "selection-f2"] }), `research-selection:${run}`] }] });
+      await processResearchDraftJob(run);
+      const findings = execute({ queries: [{ sql: "SELECT finding_id FROM research_drafts WHERE run_id=? ORDER BY finding_id", params: [run] }] })[0].results.map((r: any) => r.finding_id);
+      expect(findings).toEqual(["selection-f1", "selection-f2"]);
+      expect(fetcher).toHaveBeenCalledTimes(4);
+    } finally { fetcher.mockRestore(); if (priorKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = priorKey; }
+  }, 60_000);
+
   it.each([['committed reply lost', 1], ['checkpoint outage', 1], ['committed reply lost', 0.5]] as const)('persists writing once through storage failure without repeating paid requests: %s, %s days', async (mode, days) => {
     const teamId = `${mode === 'committed reply lost' ? 'writing-storage-committed' : 'writing-storage-outage'}-${days}`;
     const runId = `${teamId}-run`;

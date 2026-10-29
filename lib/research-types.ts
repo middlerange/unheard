@@ -120,11 +120,12 @@ export type ResearchSnapshot = {
   drafts: ResearchDraft[];
 };
 export type ResearchJob = {
-  operation: "plan" | "collect" | "rank" | "drafts" | "drafts_interim" | "fail" | "daily";
+  operation: "plan" | "collect" | "rank" | "drafts" | "drafts_interim" | "selection" | "fail" | "daily";
   runId?: string;
   sourceId?: string;
   error?: string;
   scheduledTime?: number;
+  writing?: boolean;
 };
 
 export type ResearchDraftContent = {

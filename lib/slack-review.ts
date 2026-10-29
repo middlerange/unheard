@@ -58,7 +58,7 @@ export async function getResearchDraft(teamId: string, id: string) {
 }
 export async function enqueueSlackJob(
   teamId: string,
-  kind: "review" | "edit" | "approve" | "reject",
+  kind: "review" | "edit" | "approve" | "reject" | "selection",
   payload: SlackJobPayload,
   id: string = crypto.randomUUID(),
 ) {
@@ -145,6 +145,12 @@ export async function retrySlackJobs() {
     )
     .limit(20);
   for (const job of abandoned) {
+    if (job.kind === "selection") {
+      // Selection dispatch uses a deterministic workflow ID; retrying this job
+      // recovers an interrupted dispatch without repeating a paid writer call.
+      await db.update(schema.slack_jobs).set({ status: "queued", updated_at: Date.now() }).where(and(eq(schema.slack_jobs.id, job.id), eq(schema.slack_jobs.status, "processing")));
+      continue;
+    }
     const reason =
       "The Slack operation was interrupted. Check its publishing outcome in Content Hub before retrying.";
     await db
@@ -1029,6 +1035,19 @@ export async function processSlackJob(jobId: string) {
     )
     .run();
   if (!changed(claim)) return { status: "already_processed" };
+  if (job.kind === "selection") {
+    try {
+      if (!payload.userId || !payload.channelId || !payload.threadTs || !payload.text) throw new Error("Incomplete candidate selection reply");
+      const { processSelectionReply } = await import("./research-selection");
+      await processSelectionReply(job.team_id, { runId: payload.draftId, userId: payload.userId, channelId: payload.channelId, threadTs: payload.threadTs, text: payload.text }, job.id);
+      await db.update(schema.slack_jobs).set({ status: "completed", updated_at: Date.now() }).where(eq(schema.slack_jobs.id, jobId));
+      return { status: "completed" };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Candidate selection failed";
+      await db.update(schema.slack_jobs).set({ status: "failed", error: message.slice(0, 1000), updated_at: Date.now() }).where(eq(schema.slack_jobs.id, jobId));
+      return { status: "failed", error: message };
+    }
+  }
   const draft = await getResearchDraft(job.team_id, payload.draftId);
   try {
     if (!draft) throw new Error("Research draft not found");

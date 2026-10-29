@@ -36,9 +36,22 @@ export async function invokeResearchProcess(handler, env, payload, path = '/api/
   return result;
 }
 
-export async function runResearchWorkflow(runId, step, invoke) {
+export async function runResearchWorkflow(runId, step, invoke, selectedWriting = false, selectionOnly = false) {
   const collectionOptions = { retries: { limit: 2, delay: '5 seconds', backoff: 'exponential' }, timeout: '10 minutes' };
   try {
+    const paidOptions = { retries: { limit: 0, delay: '1 second', backoff: 'constant' }, timeout: '10 minutes' };
+    if (selectionOnly) return await step.do('Send candidates for selection', paidOptions, () => invoke({ operation: 'selection', runId }));
+    if (selectedWriting) {
+      let batch = 1;
+      let drafts = await step.do('Write selected candidates', paidOptions, () => invoke({ operation: 'drafts', runId }));
+      while (drafts?.pending === true) {
+        if (Number.isFinite(drafts.retryAfterMs) && drafts.retryAfterMs > 0)
+          await step.sleep(`Wait for selected writing batch ${batch}`, `${Math.ceil(drafts.retryAfterMs / 1000)} seconds`);
+        batch++;
+        drafts = await step.do(`Write selected candidates batch ${batch}`, paidOptions, () => invoke({ operation: 'drafts', runId }));
+      }
+      return drafts;
+    }
     const plan = await step.do('Plan research collection', collectionOptions, () => invoke({ operation: 'plan', runId }));
     let pending = plan.sourceIds.map(sourceId => ({ sourceId, batch: 1 }));
     let round = 1;
@@ -61,40 +74,20 @@ export async function runResearchWorkflow(runId, step, invoke) {
     }
     // A model request can be billed even if its response is interrupted. Resume via
     // persisted analysis records rather than automatically repeating a paid step.
-    const paidOptions = { retries: { limit: 0, delay: '1 second', backoff: 'constant' }, timeout: '10 minutes' };
     let batch = 1;
     let ranking = await step.do('Rank findings', paidOptions, () => invoke({ operation: 'rank', runId }));
     while (ranking?.pending === true) {
-      if (ranking.draftReady === true) {
-        let draftBatch = 1;
-        let interim = await step.do(`Draft qualified findings after rank batch ${batch}`, paidOptions, () => invoke({ operation: 'drafts_interim', runId }));
-        while (interim?.pending === true) {
-          if (Number.isFinite(interim.retryAfterMs) && interim.retryAfterMs > 0)
-            await step.sleep(`Wait for interim writing after rank batch ${batch} draft ${draftBatch}`, `${Math.ceil(interim.retryAfterMs / 1000)} seconds`);
-          draftBatch++;
-          interim = await step.do(`Draft qualified findings after rank batch ${batch} part ${draftBatch}`, paidOptions, () => invoke({ operation: 'drafts_interim', runId }));
-        }
-      }
       if (Number.isFinite(ranking.retryAfterMs) && ranking.retryAfterMs > 0) {
         await step.sleep(`Wait for research evidence after batch ${batch}`, `${Math.ceil(ranking.retryAfterMs / 1000)} seconds`);
       }
       batch++;
       ranking = await step.do(`Rank findings batch ${batch}`, paidOptions, () => invoke({ operation: 'rank', runId }));
     }
-    batch = 1;
-    let drafts = await step.do('Draft daily posts', paidOptions, () => invoke({ operation: 'drafts', runId }));
-    while (drafts?.pending === true) {
-      if (Number.isFinite(drafts.retryAfterMs) && drafts.retryAfterMs > 0) {
-        await step.sleep(`Wait for research writing cooldown after batch ${batch}`, `${Math.ceil(drafts.retryAfterMs / 1000)} seconds`);
-      }
-      batch++;
-      drafts = await step.do(`Draft daily posts batch ${batch}`, paidOptions, () => invoke({ operation: 'drafts', runId }));
-    }
-    return drafts;
+    return await step.do('Send candidates for selection', paidOptions, () => invoke({ operation: 'selection', runId }));
   } catch (error) {
     try {
       await step.do('Record research failure', collectionOptions, () => invoke({
-        operation: 'fail', runId, error: error instanceof Error ? error.message.slice(0, 500) : 'Research failed.',
+        operation: 'fail', runId, ...(selectedWriting ? { writing: true } : {}), error: error instanceof Error ? error.message.slice(0, 500) : 'Research failed.',
       }));
     } catch (recordError) {
       console.error('Could not record research failure:', recordError);

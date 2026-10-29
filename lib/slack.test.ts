@@ -1005,3 +1005,64 @@ describe("safe live Slack review tests", () => {
     ).toHaveLength(0);
   });
 });
+
+describe("Research candidate selection", () => {
+  it("never silently truncates or repeats an uncertain Slack delivery", async () => {
+    const { sendResearchSelection } = await import("./research-selection");
+    run("INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp,source_ids)VALUES('selection-oversize','a','scan','completed',1,100,'Product leaders','[\"source\"]'),('selection-uncertain','a','scan','completed',1,100,'Product leaders','[\"source\"]')");
+    for (const id of ["selection-oversize", "selection-uncertain"]) {
+      run("INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key) VALUES(?,'a',?,'item','source','Article',?,1,90,'Summary','Why','Angle','Evidence','Limits',1,?)", [id, id, id === "selection-oversize" ? `https://example.com/${"x".repeat(40000)}` : "https://example.com/article", id]);
+    }
+    vi.stubGlobal("fetch", fetcher);
+    await expect(sendResearchSelection("a", "selection-oversize")).rejects.toThrow("single-message limit");
+    expect(fetcher).not.toHaveBeenCalled();
+    fetcher.mockRejectedValueOnce(new Error("connection lost"));
+    await expect(sendResearchSelection("a", "selection-uncertain")).rejects.toThrow("connection lost");
+    await expect(sendResearchSelection("a", "selection-uncertain")).rejects.toThrow("delivery is unconfirmed");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("freezes every distinct candidate in one message and only queues authorized replies", async () => {
+    const { sendResearchSelection, parseSelectionNumbers } = await import("./research-selection");
+    run("INSERT INTO research_runs(id,team_id,mode,status,days,created_at,icp,source_ids)VALUES('selection-run','a','scan','completed',1,100,'Product leaders','[\"source\"]')");
+    for (const [id, angle] of [["selection-a", "First angle"], ["selection-b", "Second angle"], ["selection-copy", "First angle"]]) {
+      run("INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,collected_at)VALUES(?,'a','source',?,'Title','Excerpt',1)", [`item-${id}`, `https://example.com/${id}`]);
+      run("INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key) VALUES(?,'a','selection-run',?,'source','Article','https://example.com/article',1,90,'Summary','Why',?,'Evidence','Limits',1,?)", [id, `item-${id}`, angle, id]);
+    }
+    vi.stubGlobal("fetch", fetcher);
+    expect(await sendResearchSelection("a", "selection-run")).toEqual({ count: 2, sent: true });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const packet = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
+    expect(packet.text).toContain("1. <https://example.com/article|Article> — First angle");
+    expect(packet.text).toContain("2. <https://example.com/article|Article> — Second angle");
+    expect(await sendResearchSelection("a", "selection-run")).toEqual({ count: 2, sent: true });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(parseSelectionNumbers("1, 2 1", 2)).toEqual([1, 2]);
+    expect(parseSelectionNumbers("1, 3", 2)).toBeNull();
+    expect(parseSelectionNumbers("1 and 2", 2)).toBeNull();
+    const event = (user: string, eventId: string) => JSON.stringify({ type: "event_callback", team_id: "T12345678", event_id: eventId, event: { type: "message", user, channel: "C12345678", thread_ts: "123.456", text: "2" } });
+    await handleSlackEvents(await signedRequest(event("U99999999", "EvUnauthorized")));
+    expect(row("SELECT count(*) AS n FROM slack_jobs WHERE id='event-EvUnauthorized'").n).toBe(0);
+    const body = event("U12345678", "EvSelection");
+    await handleSlackEvents(await signedRequest(body));
+    await handleSlackEvents(await signedRequest(body));
+    expect(row("SELECT count(*) AS n FROM slack_jobs WHERE id='event-EvSelection' AND kind='selection'").n).toBe(1);
+    const { processSelectionReply } = await import("./research-selection");
+    const previous = globalThis.__contentHubResearchWorkflow__;
+    const create = vi.fn(async () => ({}));
+    globalThis.__contentHubResearchWorkflow__ = { create };
+    const input = { runId: "selection-run", userId: "U12345678", channelId: "C12345678", threadTs: "123.456" };
+    try {
+      // The two candidates share a title, so an ambiguous title cannot write.
+      await processSelectionReply("a", { ...input, text: "Article" }, "ambiguous");
+      expect(create).not.toHaveBeenCalled();
+      await expect(processSelectionReply("a", { ...input, userId: "U99999999", text: "1" }, "unauthorized")).rejects.toThrow("no longer authorized");
+      await Promise.all([
+        processSelectionReply("a", { ...input, text: "1" }, "one"),
+        processSelectionReply("a", { ...input, text: "2" }, "two"),
+      ]);
+      const selected = JSON.parse(row("SELECT value FROM research_cache WHERE id='research-selection:selection-run'").value);
+      expect(new Set(selected.selectedIds)).toEqual(new Set(selected.candidateIds));
+      expect(create).toHaveBeenCalledTimes(2);
+    } finally { globalThis.__contentHubResearchWorkflow__ = previous; }
+  });
+});

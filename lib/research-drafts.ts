@@ -553,6 +553,32 @@ const RESEARCH_DRAFT_BATCH_SIZE = 1;
 const RESEARCH_REVIEW_BATCH_SIZE = 6;
 
 export async function processResearchDraftJob(runId: string, interim = false) {
+  // A persisted claim prevents two Slack replies from writing the same finding.
+  // On an interrupted or uncertain provider call the claim remains: a person
+  // must inspect it, rather than automatically repeat a potentially billed call.
+  if (interim) return { drafted: 0, skipped: true };
+  const db = await getDb();
+  const run = await db.select().from(research_runs).where(eq(research_runs.id, runId)).get();
+  if (!run) throw new Error("Run not found");
+  const row = await db.select().from(research_cache).where(and(eq(research_cache.id, `research-selection:${runId}`), eq(research_cache.team_id, run.team_id))).get();
+  const selection = row ? JSON.parse(row.value) as { state: string; candidateIds: string[]; selectedIds: string[] } : null;
+  if (!selection || selection.state !== "sent" || !selection.selectedIds?.length) return { drafted: 0, skipped: true };
+  const lockId = `selected-writing-lock:${runId}`;
+  const owner = crypto.randomUUID();
+  const claimed = await db.insert(research_cache).values({ id: lockId, team_id: run.team_id, value: owner, created_at: Date.now() }).onConflictDoNothing().returning({ id: research_cache.id });
+  if (!claimed.length) {
+    const existing = await db.select().from(research_cache).where(and(eq(research_cache.id, lockId), eq(research_cache.team_id, run.team_id))).get();
+    if (existing && Date.now() - existing.created_at > 10 * 60_000)
+      throw new Error("Selected writing is blocked by an interrupted prior request; inspect its outcome before retrying.");
+    return { pending: true, retryAfterMs: 10_000 };
+  }
+  const result = await processSelectedResearchDraftJob(runId, selection);
+  await db.delete(research_cache).where(and(eq(research_cache.id, lockId), eq(research_cache.team_id, run.team_id), eq(research_cache.value, owner)));
+  return result;
+}
+
+async function processSelectedResearchDraftJob(runId: string, selection: { candidateIds: string[]; selectedIds: string[] }) {
+  const interim = false;
   const db = await getDb();
   const run = await db
     .select()
@@ -628,13 +654,13 @@ export async function processResearchDraftJob(runId: string, interim = false) {
       .where(eq(research_runs.id, runId));
     return { drafted: 0, skipped: true };
   }
-  const progressId = `draft-progress:${run.id}`;
+  const progressId = `selected-draft-progress:${run.id}`;
   const saved = await db.select().from(research_cache).where(and(
     eq(research_cache.id, progressId), eq(research_cache.team_id, run.team_id),
   )).get();
   let progress = saved ? JSON.parse(saved.value) as ResearchDraftProgress : undefined;
   const sourceIds = new Set(JSON.parse(run.source_ids) as string[]);
-  const candidates = progress && run.days !== 0.5 ? [] : (await getRunResearchFindings(run.team_id, run.id)).filter(finding =>
+  const candidates = (await getRunResearchFindings(run.team_id, run.id)).filter(finding => selection.selectedIds.includes(finding.id) && selection.candidateIds.includes(finding.id) &&
     sourceIds.has(finding.source_id) && finding.score >= RESEARCH_POST_MIN_SCORE
     && (researchFindingDates(finding).publishedAt === null || finding.published_at <= run.created_at) && finding.status !== "dismissed");
   const knownCandidates = new Set(progress?.candidateIds || []);
@@ -655,24 +681,21 @@ export async function processResearchDraftJob(runId: string, interim = false) {
     )
     .where(eq(research_drafts.team_id, run.team_id))
     .all();
-  const originals = await getDraftResearchFindings(run.team_id, previous);
-  const families = new Set(previous.map(entry => originals.get(`${entry.runId}:${entry.findingId}`)?.family_key || entry.family));
   let drafted = previous.filter((entry) => entry.runId === run.id).length;
   const diagnostics = JSON.parse(run.diagnostics) as ResearchRunDiagnostics;
   progress ||= {
     candidateIds: candidates.map(finding => finding.id),
-    selectedIds: candidates.filter(finding => !families.has(finding.family_key)).map(finding => finding.id),
+    selectedIds: candidates.map(finding => finding.id),
     nextOffset: 0, validationSkips: 0,
     rejectedStories: [...(diagnostics.rejectedStories || [])],
     deliveryIds: [], deliveryOffset: 0,
   };
-  // A 12-hour run may qualify more findings after an interim draft batch.
-  // Append only new frozen snapshot IDs, preserving all prior offsets/decisions.
-  if (run.days === 0.5) {
+  // Append new user selections while preserving prior offsets and decisions.
+  {
     const known = new Set(progress.candidateIds);
     for (const finding of candidates) if (!known.has(finding.id)) {
       progress.candidateIds.push(finding.id);
-      if (!families.has(finding.family_key)) progress.selectedIds.push(finding.id);
+      progress.selectedIds.push(finding.id);
       known.add(finding.id);
     }
   }
@@ -693,7 +716,7 @@ export async function processResearchDraftJob(runId: string, interim = false) {
   const rows = batchIds.length ? await getRunResearchFindings(run.team_id, run.id, batchIds) : [];
   for (const findingId of batchIds) {
     const finding = rows.find(row => row.id === findingId);
-    if (!finding || families.has(finding.family_key) || finding.status === "dismissed") {
+    if (!finding || finding.status === "dismissed") {
       progress.nextOffset++;
       await checkpointDrafts();
       continue;
@@ -763,7 +786,6 @@ export async function processResearchDraftJob(runId: string, interim = false) {
         })
         .onConflictDoNothing(),
     ]));
-    families.add(finding.family_key);
     drafted++;
     progress.nextOffset++;
     await checkpointDrafts();

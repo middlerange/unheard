@@ -5,11 +5,12 @@ import { verifyResearchRequest } from "@/lib/research-internal";
 import { researchJobErrorMessage } from "@/lib/research-errors";
 export const researchJobSchema = z
   .object({
-    operation: z.enum(["plan", "collect", "rank", "drafts", "drafts_interim", "fail", "daily"]),
+    operation: z.enum(["plan", "collect", "rank", "drafts", "drafts_interim", "selection", "fail", "daily"]),
     runId: z.string().max(100).optional(),
     sourceId: z.string().max(200).optional(),
     error: z.string().max(1000).optional(),
     scheduledTime: z.number().int().nonnegative().optional(),
+    writing: z.boolean().optional(),
   })
   .strict();
 export async function handleResearchProcess(request: Request) {

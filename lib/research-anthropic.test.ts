@@ -4,6 +4,8 @@ import { researchSourcePacketSchemaV9 } from './research-source-packet-model';
 import { ANTHROPIC_RESEARCH_TOOL_NAME, anthropicResearchOutput, anthropicResearchRequest, anthropicResearchSchema, anthropicStrictResearchSchema } from './research-anthropic';
 import { callResearchModel, RESEARCH_MODEL, evidenceJsonSchema, evidenceJsonSchemaForItems, ResearchModelRateLimitError } from './research-model';
 import { beginResearchUsage, finishResearchUsage } from './research-usage';
+import { researchDraftOutputSchema } from './research-drafts';
+import { RESEARCH_WRITING_MODEL, researchEditorialReviewOutputSchema } from './research-writing';
 
 const rejectionWrites = vi.hoisted(() => vi.fn());
 const rejectionStorage = vi.hoisted(() => vi.fn(async () => undefined));
@@ -191,6 +193,23 @@ describe('Claude research transport', () => {
     await callResearchModel('writer', {}, {}, 100, context, 'gpt-6-sol');
     expect(fetcher.mock.calls[0][0]).toBe('https://api.openai.com/v1/responses');
     expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ model: 'gpt-6-sol', reasoning: { effort: 'none' } });
+  });
+
+  it.each([
+    ['draft_generation', 'draft', researchDraftOutputSchema, 4000],
+    ['draft_generation', 'editorial_review', researchEditorialReviewOutputSchema, 1800],
+    ['slack_revision', 'rewrite', researchDraftOutputSchema, 4000],
+  ] as const)('routes %s %s through Claude with the original structured schema', async (stage, operation, schema, tokens) => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'anthropic-test');
+    const fetcher = mockMessage({ model: RESEARCH_WRITING_MODEL, content: [{ type: 'text', text: '{}' }] });
+    const writingContext = { teamId: 'team', runId: 'run', stage, operation };
+    expect((await callResearchModel('writer', { evidence: 'source' }, schema, tokens, writingContext, RESEARCH_WRITING_MODEL)).value).toEqual({});
+    expect(fetcher.mock.calls[0][0]).toBe('https://api.anthropic.com/v1/messages');
+    expect(fetcher.mock.calls[0][1]?.headers).toMatchObject({ 'x-api-key': 'anthropic-test' });
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({
+      model: 'claude-sonnet-5-5', max_tokens: tokens, output_config: { format: { type: 'json_schema', schema: anthropicResearchSchema(schema) } },
+    });
+    expect(finishResearchUsage).toHaveBeenCalledWith('usage-id', writingContext, expect.objectContaining({ model: RESEARCH_WRITING_MODEL, status: 'completed' }));
   });
 
   it('preserves a known rejection when diagnostic-only storage fails', async () => {
