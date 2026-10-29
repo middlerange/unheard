@@ -1,4 +1,6 @@
+import { z } from 'zod';
 import { researchHttp } from './research-http';
+import { probeResearchGenerationHealth } from './research-provider-health';
 import { RESEARCH_MODEL } from './research-model';
 import { RESEARCH_WRITING_MODEL } from './research-writing';
 import { readResearchProviderResponse, researchProviderRejection } from './research-provider-error';
@@ -32,6 +34,28 @@ export async function checkResearchProviders(fetcher: typeof fetch = fetch) {
   }
 }
 
+const providerRequestSchema = z.union([
+  z.object({ operation: z.literal('metadata').optional() }).strict(),
+  z.object({ operation: z.literal('generation_health'), operationId: z.uuid() }).strict(),
+]);
+async function readProviderRequest(request: Request) {
+  const reader = request.body?.getReader();
+  if (!reader) return { operation: 'metadata' as const };
+  const decoder = new TextDecoder(); let text = '', bytes = 0;
+  try {
+    while (true) { const chunk = await reader.read(); if (chunk.done) break; bytes += chunk.value.byteLength;
+      if (bytes > 512) throw new SyntaxError('Invalid provider request'); text += decoder.decode(chunk.value, { stream: true }); }
+    text += decoder.decode();
+  } finally { await reader.cancel(); }
+  const parsed = providerRequestSchema.safeParse(text.trim() ? JSON.parse(text) : {});
+  if (!parsed.success) throw new SyntaxError('Invalid provider request');
+  return parsed.data;
+}
 export function researchProvidersHttp(request: Request) {
-  return researchHttp(request, async () => checkResearchProviders());
+  return researchHttp(request, async teamId => {
+    const operation = await readProviderRequest(request);
+    return operation.operation === 'generation_health'
+      ? { generationHealth: await probeResearchGenerationHealth(teamId, operation.operationId), writing: { checked: false } }
+      : checkResearchProviders();
+  });
 }

@@ -83,8 +83,16 @@ export async function researchProviderRejection(response: Response, provider: st
     const value = response.headers.get(name);
     return value && /^\d+$/.test(value) ? [[name, Number(value)]] : [];
   }));
+  const kind = (value: unknown) => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+  const shape = { topLevel: kind(inspected.body), error: kind(body?.error),
+    codePresent: Boolean(body?.error && typeof body.error === 'object' && Object.hasOwn(body.error, 'code')),
+    typePresent: Boolean(body?.error && typeof body.error === 'object' && Object.hasOwn(body.error, 'type')),
+    messagePresent: Boolean(body?.error && typeof body.error === 'object' && Object.hasOwn(body.error, 'message')) };
+  const reasonClassification = quota ? 'billing_or_quota' : [code, type].some(value => value === 'invalid_api_key' || value === 'authentication_error') ? 'authentication'
+    : [code, type].includes('permission_error') ? 'permission' : temporary ? 'rate_limit' : configurationIssue ? 'request_configuration'
+    : inspected.bodyKind === 'json' ? 'unclassified_json_rejection' : inspected.bodyKind === 'html' ? 'html_rejection' : 'unclassified_rejection';
   const diagnostic = { provider, httpStatus: response.status, code, type, requestId, temporary, retryAfterMs, limits,
-    contentType: inspected.contentType, bodyKind: inspected.bodyKind, configurationIssue };
+    contentType: inspected.contentType, bodyKind: inspected.bodyKind, configurationIssue, reasonClassification, shape };
   const suffix = temporary ? ` Wait ${Math.ceil(retryAfterMs! / 1000)} seconds before continuing the rejected request.`
     : quota ? ' Check provider billing or account quota.' : configurationIssue ? ' Check request configuration.' : ' Check model access and account limits.';
   const message = `${provider} request rejected (HTTP ${response.status}${code || type ? `; ${code || type}` : ''}).${suffix}`;

@@ -103,3 +103,12 @@ it('classifies rejection bodies safely and cancels oversized bodies', async () =
   expect(result.diagnostic).toMatchObject({ bodyKind: 'oversized', code: null, type: null });
   expect(cancelled).toBe(true);
 });
+
+it('reports only fixed rejection reasons and structural types for nonstandard JSON403', async () => {
+  const secret = 'sk-private-body-header-and-prompt';
+  for (const error of [secret, { [secret]: secret, code: secret, type: secret, message: secret }, null]) {
+    const result = await researchProviderRejection(Response.json({ error, [secret]: secret }, { status: 403, headers: { 'x-private': secret } }), 'Anthropic');
+    expect(result.diagnostic.reasonClassification).toBe('unclassified_json_rejection'); expect(result.diagnostic.shape.topLevel).toBe('object');
+    expect(JSON.stringify(result.diagnostic) + result.error.message).not.toContain(secret); expect(result.diagnostic.temporary).toBe(false);
+  }
+});

@@ -89,3 +89,19 @@ it('reports redirects without forwarding the bound key to another destination', 
   expect(JSON.stringify(result)).not.toContain(secret);
   expect(JSON.stringify(result)).not.toContain('other.example');
 });
+
+it.each([{ operation: 'generation_health' }, { operation: 'generation_health', operationId: 'not-a-uuid' }, { operation: 'generation_health', operationId: 'b1000000-0000-4000-8000-000000000001', model: 'other' }, { operation: 'generation_health', operationId: 'b1000000-0000-4000-8000-000000000001', prompt: 'private supplied prompt' }, { operation: 'metadata', operationId: 'b1000000-0000-4000-8000-000000000001' }, { operation: 'other' }])('rejects arbitrary provider request parameters before inference: %j', async body => {
+  const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+  const response = await researchProvidersHttp(new Request('https://app.test/api/research/providers', { method: 'POST', body: JSON.stringify(body) }));
+  expect(response.status).toBe(400); expect(fetcher).not.toHaveBeenCalled(); expect(JSON.stringify(await response.json())).not.toContain('private supplied prompt');
+});
+it.each(['', '{}', '{"operation":"metadata"}'])('keeps default/explicit metadata free of generation: %s', async body => {
+  process.env.ANTHROPIC_API_KEY = secret; const fetcher = vi.fn(async (_url: unknown) => Response.json({ type: 'model', id: 'claude-haiku-5-5' })); vi.stubGlobal('fetch', fetcher);
+  const response = await researchProvidersHttp(new Request('https://app.test/api/research/providers', { method: 'POST', ...(body ? { body } : {}) }));
+  expect(response.status).toBe(200); expect(fetcher).toHaveBeenCalledTimes(1); expect(fetcher.mock.calls[0][0]).toBe('https://api.anthropic.com/v1/models/claude-haiku-5-5');
+});
+it('rejects oversized bodies and unknown keys without echoing untrusted key names', async () => {
+  const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+  for (const body of [JSON.stringify({ [secret]: true }), 'x'.repeat(513)]) { const response = await researchProvidersHttp(new Request('https://app.test/api/research/providers', { method: 'POST', body })); expect(response.status).toBe(400); expect(JSON.stringify(await response.json())).not.toContain(secret); }
+  expect(fetcher).not.toHaveBeenCalled();
+});
