@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parseResearchAudience } from './research-audience';
 import { researchSelectionAudience, RESEARCH_SELECTION_VIEW_VERSION } from './research-selection-audience';
-import { researchPacketsFromDefinitions, configuredResearchPacketDefinitions, reviewResearchSourcePackets, researchSourcePacketPolicy, researchSourcePacketPolicyContract, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, ResearchSourcePacketPending, type ResearchPacketAccess } from './research-source-packets';
+import { researchPacketsFromDefinitions, configuredResearchPacketDefinitions, reviewResearchSourcePackets, researchSourcePacketPolicy, researchSourcePacketPolicyContract, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW, RESEARCH_SOURCE_PACKET_V4_REVIEW, ResearchSourcePacketPending, type ResearchPacketAccess } from './research-source-packets';
 import { researchHash } from './research-model';
 import type { ResearchSourcePacket } from './research-source-packet-model';
 import type { ResearchSourceSeed } from './research-types';
@@ -113,7 +113,26 @@ describe('durable source packet inference', () => {
     expect(v3.normalize).toBe(v2.normalize);expect(v3.schema).toBe(v2.schema);expect(v3.metadata).toBe(v2.metadata);
     expect(v3.version).toBe(v2.version);expect(v3.qualificationPolicyVersion).toBe(v2.qualificationPolicyVersion);expect(v3.normalizerVersion).toBe(v2.normalizerVersion);
     expect(v3.instructions).not.toBe(v2.instructions);expect(researchSourcePacketPolicyContract(RESEARCH_SOURCE_PACKET_V3_REVIEW,16384)).not.toEqual(researchSourcePacketPolicyContract(RESEARCH_SOURCE_PACKET_V2_REVIEW,16384));
-    expect(()=>researchSourcePacketPolicy('reader-decision-synthesis-v4')).toThrow('Unknown source packet review policy');
+    expect(()=>researchSourcePacketPolicy('unrecognized-packet-policy')).toThrow('Unknown source packet review policy');
+    expect(await researchHash(v3.instructions)).toBe('c191704d9f6486f0132f443de750e1e734fca9cbf386c769957235d2a895447f');
+    expect(await researchHash(JSON.stringify(researchSourcePacketPolicyContract(RESEARCH_SOURCE_PACKET_V3_REVIEW,16384)))).toBe('6225b4dbd7e08cc780e2bf62af3e68164185e8fba8938e208f4f5df044746eca');
+  });
+  it('binds opt-in v4 prompt and empty-note normalizer to a new cache while keeping v1/v2/v3 reusable', async () => {
+    const test = harness(), policies = [undefined, RESEARCH_SOURCE_PACKET_V2_REVIEW, RESEARCH_SOURCE_PACKET_V3_REVIEW].map(researchSourcePacketPolicy);
+    const previous = [];
+    for (const policy of policies) previous.push(await reviewResearchSourcePackets([packet()], test.access, policy));
+    const oldRecords = [...test.values].map(([id, value]) => [id, JSON.stringify(value)]);
+    const policy = researchSourcePacketPolicy(RESEARCH_SOURCE_PACKET_V4_REVIEW);
+    const next = await reviewResearchSourcePackets([packet()], test.access, policy);
+    expect(test.generate).toHaveBeenCalledTimes(4);
+    expect(policy.normalizerVersion).toBe('structured-inference-v2+empty-content-angle-note-v1');
+    expect(policy.qualificationPolicyVersion).toBe('research-source-packet-v2');
+    expect(next.findings).toEqual(previous[2].findings); expect(next.packetProofs).toEqual(previous[2].packetProofs);
+    expect(next.manifestIds).not.toEqual(previous[2].manifestIds);
+    for (const [id, value] of oldRecords) expect(JSON.stringify(test.values.get(id))).toBe(value);
+    expect(await reviewResearchSourcePackets([packet()], test.access, policy)).toEqual(next);
+    for (const [index, old] of policies.entries()) expect(await reviewResearchSourcePackets([packet()], test.access, old)).toEqual(previous[index]);
+    expect(test.generate).toHaveBeenCalledTimes(4);
   });
   it('expires an in-flight claim without repeating inference and keeps its terminal state against a late response', async () => {
     let resolve!: (value: unknown) => void, entered!: () => void;

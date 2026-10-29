@@ -10,8 +10,8 @@ import { canonicalResearchUrl } from './research-collectors';
 import {
   RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
   researchSourcePacketMetadata, researchSourcePacketSchema, normalizeResearchSourcePacket,
-  RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS,
-  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2,
+  RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS,
+  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2, normalizeResearchSourcePacketV4,
   type ResearchSourcePacket,
 } from './research-source-packet-model';
 
@@ -64,6 +64,8 @@ export function configuredResearchPacketDefinitions(seeds: ResearchSourceSeed[],
 type PacketResult = Awaited<ReturnType<typeof normalizeResearchSourcePacket>>;
 export const RESEARCH_SOURCE_PACKET_V2_REVIEW = 'coherent-synthesis-v2';
 export const RESEARCH_SOURCE_PACKET_V3_REVIEW = 'reader-decision-synthesis-v3';
+export const RESEARCH_SOURCE_PACKET_V4_REVIEW = 'whole-reader-story-v4';
+export const RESEARCH_SOURCE_PACKET_V4_NORMALIZER = 'structured-inference-v2+empty-content-angle-note-v1';
 export const RESEARCH_SOURCE_PACKET_V2_NORMALIZER = 'structured-inference-v2';
 export type ResearchSourcePacketPolicy = {
   version: string; instructions: string; normalizerVersion?: string;
@@ -77,10 +79,10 @@ const defaultPolicy: ResearchSourcePacketPolicy = {
 };
 export function researchSourcePacketPolicy(reviewVersion?: string): ResearchSourcePacketPolicy {
   if (reviewVersion === undefined) return defaultPolicy;
-  if (reviewVersion !== RESEARCH_SOURCE_PACKET_V2_REVIEW && reviewVersion !== RESEARCH_SOURCE_PACKET_V3_REVIEW) throw new Error('Unknown source packet review policy');
-  return { version: RESEARCH_SOURCE_PACKET_V2_VERSION, instructions: reviewVersion === RESEARCH_SOURCE_PACKET_V3_REVIEW ? RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS : RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS,
-    normalizerVersion: RESEARCH_SOURCE_PACKET_V2_NORMALIZER, qualificationPolicyVersion: RESEARCH_SOURCE_PACKET_V2_VERSION,
-    metadata: researchSourcePacketMetadataV2, schema: researchSourcePacketSchemaV2, normalize: normalizeResearchSourcePacketV2 };
+  if (reviewVersion !== RESEARCH_SOURCE_PACKET_V2_REVIEW && reviewVersion !== RESEARCH_SOURCE_PACKET_V3_REVIEW && reviewVersion !== RESEARCH_SOURCE_PACKET_V4_REVIEW) throw new Error('Unknown source packet review policy');
+  return { version: RESEARCH_SOURCE_PACKET_V2_VERSION, instructions: reviewVersion === RESEARCH_SOURCE_PACKET_V4_REVIEW ? RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS : reviewVersion === RESEARCH_SOURCE_PACKET_V3_REVIEW ? RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS : RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS,
+    normalizerVersion: reviewVersion === RESEARCH_SOURCE_PACKET_V4_REVIEW ? RESEARCH_SOURCE_PACKET_V4_NORMALIZER : RESEARCH_SOURCE_PACKET_V2_NORMALIZER, qualificationPolicyVersion: RESEARCH_SOURCE_PACKET_V2_VERSION,
+    metadata: researchSourcePacketMetadataV2, schema: researchSourcePacketSchemaV2, normalize: reviewVersion === RESEARCH_SOURCE_PACKET_V4_REVIEW ? normalizeResearchSourcePacketV4 : normalizeResearchSourcePacketV2 };
 }
 export function researchSourcePacketPolicyContract(reviewVersion: string, outputTokens: number) {
   const policy = researchSourcePacketPolicy(reviewVersion);

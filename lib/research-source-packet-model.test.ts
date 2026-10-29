@@ -4,8 +4,8 @@ import { researchSourceReviewPassages } from './research-source-review-model';
 import {
   RESEARCH_SOURCE_PACKET_VERSION, RESEARCH_SOURCE_PACKET_INSTRUCTIONS,
   researchSourcePacketMetadata, researchSourcePacketSchema, normalizeResearchSourcePacket,
-  RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS,
-  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2,
+  RESEARCH_SOURCE_PACKET_V2_VERSION, RESEARCH_SOURCE_PACKET_V2_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS, RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS,
+  researchSourcePacketMetadataV2, researchSourcePacketSchemaV2, normalizeResearchSourcePacketV2, normalizeResearchSourcePacketV4,
   type ResearchSourcePacket,
 } from './research-source-packet-model';
 
@@ -222,6 +222,34 @@ describe('opt-in structured packet qualification v2', () => {
     expect(RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS).toContain('at least two distinct configured documents');
     expect(RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS).toContain('An unsupported bridge cannot qualify');
     expect(RESEARCH_SOURCE_PACKET_V3_INSTRUCTIONS).toContain('There is no acceptance quota');
+  });
+  it('asks for a complete primary reader story without changing evidence or relationship standards', () => {
+    expect(RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS).toContain('Start the primary frame with the complete coherent main reader story');
+    expect(RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS).toContain('actions, artifacts and handoffs');
+    expect(RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS).toContain('without implying that separate resources automatically chain together');
+    expect(RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS).toContain('claim has EXACTLY these four keys');
+    expect(RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS).toContain('An unsupported bridge cannot qualify');
+    expect(RESEARCH_SOURCE_PACKET_V4_INSTRUCTIONS).toContain('There is no acceptance quota');
+  });
+  it('removes only exact empty claim contentAngleNote in v4, without mutating raw frames or any grade', async () => {
+    const primary = frame(), child = frame('another-method');
+    const raw = response({ ...primary, claim: { ...primary.claim, contentAngleNote: '' } },
+      [{ ...child, claim: { ...child.claim, contentAngleNote: '' } }]);
+    const original = JSON.stringify(raw);
+    const old = await normalizeResearchSourcePacketV2(raw, [packet()], profiles);
+    expect(old.findings).toEqual([]); expect(old.diagnostics).toHaveLength(2);
+    const next = await normalizeResearchSourcePacketV4(raw, [packet()], profiles);
+    const expected = await normalizeResearchSourcePacketV2(response(primary, [child]), [packet()], profiles);
+    expect(next).toEqual(expected); expect(next.findings).toHaveLength(2);
+    expect(next.findings.every(idea => idea.score === 92)).toBe(true);
+    expect(JSON.stringify(raw)).toBe(original);
+    for (const fields of [{ contentAngleNote: 'nonempty' }, { contentAngleNote: ' ' }, { contentAngleNote: null },
+      { contentAngleNote: 0 }, { claim_note: '' }, { contentAngleNote: '', other: '' }]) {
+      const invalid = response({ ...primary, claim: { ...primary.claim, ...fields } }, [child]);
+      const result = await normalizeResearchSourcePacketV4(invalid, [packet()], profiles);
+      expect(result.findings).toHaveLength(1); expect(result.findings[0].familyKey).toBe(child.familyKey);
+      expect(result.diagnostics[0].reason).toContain('unknown fields');
+    }
   });
   function inference() {
     const idea = frame(); idea.relationshipSupport = 'bounded_inference';
