@@ -82,3 +82,12 @@ export function nextResearchDailyAt(
   }
   throw new Error("Unable to determine the next research daily time");
 }
+
+/** The anchor and, for twice-daily schedules, its 12-hour counterpart. */
+export function nextResearchScheduledAt(time: string, timezone: string, after: number, intervalHours: 12 | 24, skipToday = false): number {
+  if (intervalHours === 24) return nextResearchDailyAt(time, timezone, after, skipToday);
+  if (!isResearchDailyTime(time)) throw new Error("Invalid research daily time");
+  const [hour, minute] = time.split(":").map(Number);
+  const second = `${String((hour + 12) % 24).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  return Math.min(nextResearchDailyAt(time, timezone, after), nextResearchDailyAt(second, timezone, after));
+}

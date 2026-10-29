@@ -33,6 +33,7 @@ function ResearchSchedulePage() {
   const [enabled, setEnabled] = useState(false);
   const [autoDrafts, setAutoDrafts] = useState(true);
   const [time, setTime] = useState('');
+  const [intervalHours, setIntervalHours] = useState<12 | 24>(24);
   const [timezone, setTimezone] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -48,6 +49,7 @@ function ResearchSchedulePage() {
       setData(snapshot);
       setEnabled(snapshot.settings.dailyEnabled);
       setAutoDrafts(snapshot.settings.autoDrafts);
+      setIntervalHours(snapshot.settings.dailyIntervalHours);
       setTime(snapshot.settings.dailyTime ?? '');
       setTimezone(snapshot.settings.dailyTimezone);
       setError(null);
@@ -65,8 +67,8 @@ function ResearchSchedulePage() {
     return () => controller.abort();
   }, [load]);
 
-  const dirty = Boolean(data && (enabled !== data.settings.dailyEnabled || autoDrafts !== data.settings.autoDrafts || time !== (data.settings.dailyTime ?? '') || timezone !== data.settings.dailyTimezone));
-  const requiresTime = enabled && (data?.settings.dailyTime !== null || !data?.settings.dailyEnabled);
+  const dirty = Boolean(data && (enabled !== data.settings.dailyEnabled || autoDrafts !== data.settings.autoDrafts || intervalHours !== data.settings.dailyIntervalHours || time !== (data.settings.dailyTime ?? '') || timezone !== data.settings.dailyTimezone));
+  const requiresTime = intervalHours === 12 || enabled && (data?.settings.dailyTime !== null || !data?.settings.dailyEnabled);
   const zones = [...new Set(['UTC', timezone, ...timezones])].filter(Boolean).sort();
 
   async function save(event: FormEvent<HTMLFormElement>) {
@@ -76,11 +78,12 @@ function ResearchSchedulePage() {
     setSaved(false);
     setError(null);
     try {
-      await request({ method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dailyEnabled: enabled, autoDrafts, dailyTime: time || null, dailyTimezone: timezone }) });
+      await request({ method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dailyEnabled: enabled, autoDrafts, dailyIntervalHours: intervalHours, dailyTime: time || null, dailyTimezone: timezone }) });
       const snapshot = await request<ResearchSnapshot>();
       setData(snapshot);
       setEnabled(snapshot.settings.dailyEnabled);
       setAutoDrafts(snapshot.settings.autoDrafts);
+      setIntervalHours(snapshot.settings.dailyIntervalHours);
       setTime(snapshot.settings.dailyTime ?? '');
       setTimezone(snapshot.settings.dailyTimezone);
       setSaved(true);
@@ -114,6 +117,8 @@ function ResearchSchedulePage() {
         </label>
 
         {data.settings.dailyTime === null && <p className="rounded-xl bg-[var(--color-bg-subtle)] p-4 text-sm leading-6 text-[var(--color-text-muted)]">Your current schedule runs on a rolling daily interval. Choose a time and save to switch to a fixed daily schedule.</p>}
+
+        <div><label htmlFor="research-frequency" className="mb-2 block text-sm font-medium">Frequency</label><select id="research-frequency" value={intervalHours} onChange={event => { setIntervalHours(Number(event.target.value) as 12 | 24); setSaved(false); }} disabled={saving} className="h-10 rounded-lg border border-[var(--color-border-opaque)] bg-[var(--color-bg-input)] px-3 text-sm"><option value={24}>Once daily</option><option value={12}>Twice daily, 12 hours apart</option></select>{intervalHours === 12 && <p className={cn('mt-2 text-xs leading-5', muted)}>Scans the preceding 12 hours at the selected time and again 12 hours later.</p>}</div>
 
         <div className="grid gap-5 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
           <div><label htmlFor="research-daily-time" className="mb-2 block text-sm font-medium">Daily start time</label><Input id="research-daily-time" type="time" value={time} onChange={event => { setTime(event.target.value); setSaved(false); }} required={requiresTime} disabled={saving} className="h-10 tabular-nums" aria-describedby="research-time-help" /><p id="research-time-help" className={cn('mt-2 text-xs leading-5', muted)}>Uses the timezone selected alongside.</p></div>

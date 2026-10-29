@@ -296,6 +296,10 @@ export async function runResearchDraftWriting(input: ResearchDraftWritingInput, 
   throw new ResearchDraftValidationError("Editorial review did not reach a decision");
 }
 
+class ResearchInterimProviderError extends Error {
+  constructor() { super("Writing provider request failed; its billing outcome may be unknown"); this.name = "ResearchInterimProviderError"; }
+}
+
 async function generateDraft(
   run: typeof research_runs.$inferSelect,
   finding: ResearchFindingRow,
@@ -431,8 +435,14 @@ async function generateDraft(
       await db.update(research_runs).set({ cache_hits: sql`${research_runs.cache_hits} + 1` }).where(eq(research_runs.id, run.id));
       return JSON.parse(cached.value);
     }
-    const response = await callResearchModel(instructions, modelInput, schema, maxTokens,
-      { teamId: run.team_id, runId: run.id, stage: current ? "slack_revision" : "draft_generation", operation }, RESEARCH_WRITING_MODEL);
+    let response: Awaited<ReturnType<typeof callResearchModel>>;
+    try {
+      response = await callResearchModel(instructions, modelInput, schema, maxTokens,
+        { teamId: run.team_id, runId: run.id, stage: current ? "slack_revision" : "draft_generation", operation }, RESEARCH_WRITING_MODEL);
+    } catch (error) {
+      if (error instanceof ResearchModelRateLimitError || run.days !== 0.5 || run.status !== "ranking") throw error;
+      throw new ResearchInterimProviderError();
+    }
     inputTokens += response.inputTokens;
     outputTokens += response.outputTokens;
     const value = JSON.stringify(response.value);
@@ -532,6 +542,8 @@ type ResearchDraftProgress = {
   selectedIds: string[];
   nextOffset: number;
   validationSkips: number;
+  interimFailures?: number;
+  deliveryFailures?: number;
   rejectedStories: NonNullable<ResearchRunDiagnostics["rejectedStories"]>;
   deliveryIds: string[];
   deliveryOffset: number;
@@ -540,7 +552,7 @@ type ResearchDraftProgress = {
 const RESEARCH_DRAFT_BATCH_SIZE = 1;
 const RESEARCH_REVIEW_BATCH_SIZE = 6;
 
-export async function processResearchDraftJob(runId: string) {
+export async function processResearchDraftJob(runId: string, interim = false) {
   const db = await getDb();
   const run = await db
     .select()
@@ -551,10 +563,22 @@ export async function processResearchDraftJob(runId: string) {
   if (
     !run.editorial ||
     run.mode !== "scan" ||
-    run.days !== 1 ||
-    !["drafting", "completed"].includes(run.status)
+    (run.days !== 1 && run.days !== 0.5) ||
+    !(interim ? run.days === 0.5 && run.status === "ranking" : ["drafting", "completed"].includes(run.status))
   )
     return { drafted: 0, skipped: true };
+  async function acknowledgePendingDrafts() {
+    const rankId = `rank-progress:${run!.id}`;
+    const rank = await db.select().from(research_cache).where(and(eq(research_cache.id, rankId), eq(research_cache.team_id, run!.team_id))).get();
+    if (!rank) return;
+    const value = JSON.parse(rank.value);
+    if (!value.pendingDrafts) return;
+    value.pendingDrafts = false;
+    const updated = await db.update(research_cache).set({ value: JSON.stringify(value) }).where(and(
+      eq(research_cache.id, rankId), eq(research_cache.team_id, run!.team_id), eq(research_cache.value, rank.value),
+    )).returning({ id: research_cache.id });
+    if (updated.length !== 1) throw new Error("Rank progress changed while acknowledging interim drafts");
+  }
   const connected = await db
     .select({
       id: channels.id,
@@ -586,6 +610,7 @@ export async function processResearchDraftJob(runId: string) {
     ? `Skipped profiles requiring media, a system prompt, a publishing implementation, or an explicit Reddit r/subreddit: ${excluded.map((profile) => profile.name).join(", ")}.`
     : null;
   if (!destinations.length) {
+    if (interim) { await acknowledgePendingDrafts(); return { drafted: 0, skipped: true }; }
     await db
       .update(research_runs)
       .set({
@@ -609,10 +634,11 @@ export async function processResearchDraftJob(runId: string) {
   )).get();
   let progress = saved ? JSON.parse(saved.value) as ResearchDraftProgress : undefined;
   const sourceIds = new Set(JSON.parse(run.source_ids) as string[]);
-  const candidates = progress ? [] : (await getRunResearchFindings(run.team_id, run.id)).filter(finding =>
+  const candidates = progress && run.days !== 0.5 ? [] : (await getRunResearchFindings(run.team_id, run.id)).filter(finding =>
     sourceIds.has(finding.source_id) && finding.score >= RESEARCH_POST_MIN_SCORE
     && (researchFindingDates(finding).publishedAt === null || finding.published_at <= run.created_at) && finding.status !== "dismissed");
-  for (const finding of candidates) await saveResearchFindingSnapshot(finding);
+  const knownCandidates = new Set(progress?.candidateIds || []);
+  for (const finding of candidates) if (!knownCandidates.has(finding.id)) await saveResearchFindingSnapshot(finding);
   const previous = await db
     .select({
       runId: research_drafts.run_id,
@@ -640,6 +666,16 @@ export async function processResearchDraftJob(runId: string) {
     rejectedStories: [...(diagnostics.rejectedStories || [])],
     deliveryIds: [], deliveryOffset: 0,
   };
+  // A 12-hour run may qualify more findings after an interim draft batch.
+  // Append only new frozen snapshot IDs, preserving all prior offsets/decisions.
+  if (run.days === 0.5) {
+    const known = new Set(progress.candidateIds);
+    for (const finding of candidates) if (!known.has(finding.id)) {
+      progress.candidateIds.push(finding.id);
+      if (!families.has(finding.family_key)) progress.selectedIds.push(finding.id);
+      known.add(finding.id);
+    }
+  }
   const rejectedStories = progress.rejectedStories;
   async function checkpointDrafts() {
     const value = JSON.stringify(progress);
@@ -670,12 +706,15 @@ export async function processResearchDraftJob(runId: string) {
         await checkpointDrafts();
         return { drafted, pending: true, retryAfterMs: error.retryAfterMs };
       }
-      if (!(error instanceof ResearchDraftValidationError)) throw error;
+      if (!(error instanceof ResearchDraftValidationError) && !(interim && error instanceof ResearchInterimProviderError)) throw error;
+      // An uncertain writing outcome must not be automatically repeated. Preserve
+      // the finding for manual review while allowing the remaining scan to proceed.
       progress.validationSkips++;
+      if (error instanceof ResearchInterimProviderError) progress.interimFailures = (progress.interimFailures || 0) + 1;
       rejectedStories.push({
         title: finding.title,
         score: finding.score,
-        reason: `Draft validation failed: ${error.message}`.slice(0, 500),
+        reason: `${error instanceof ResearchDraftValidationError ? "Draft validation failed" : "Interim writing failed; no automatic retry"}: ${error instanceof Error ? error.message : "Unknown writing failure"}`.slice(0, 500),
       });
       progress.nextOffset++;
       await checkpointDrafts();
@@ -751,14 +790,12 @@ export async function processResearchDraftJob(runId: string) {
       // The Slack job key includes draft ID and revision, so checkpoint recovery
       // cannot create a second review for an already queued revision.
       if (pending.some(draft => draft.id === draftId)) await queueResearchDraftForSlack(draftId);
-    } catch (error) {
+    } catch {
+      progress.deliveryFailures = (progress.deliveryFailures || 0) + 1;
       await db
         .update(research_drafts)
         .set({
-          error:
-            error instanceof Error
-              ? error.message.slice(0, 500)
-              : "Slack delivery failed",
+          error: "Slack review queueing could not be confirmed; check its delivery state before retrying.",
           updated_at: Date.now(),
         })
         .where(
@@ -772,9 +809,10 @@ export async function processResearchDraftJob(runId: string) {
     await checkpointDrafts();
   }
   if (progress.nextOffset < progress.selectedIds.length || progress.deliveryOffset < progress.deliveryIds.length) {
-    await retryResearchStorage(async () => db.update(research_runs).set({ status: "drafting", completed_at: null }).where(eq(research_runs.id, runId)));
+    if (!interim) await retryResearchStorage(async () => db.update(research_runs).set({ status: "drafting", completed_at: null }).where(eq(research_runs.id, runId)));
     return { drafted, pending: true };
   }
+  if (interim) { await acknowledgePendingDrafts(); return { drafted, pending: false }; }
   const validationSkips = progress.validationSkips;
   let outcome = "Strong findings were reviewed, but no original draft fit the enabled profiles with sufficient evidence.";
   if (drafted > 0) {
@@ -788,7 +826,7 @@ export async function processResearchDraftJob(runId: string) {
   }
   const completedAt = Date.now();
   const finalDiagnostics = JSON.stringify({ ...diagnostics, draftCandidatesCount: progress.candidateIds.length, draftedCount: drafted, rejectedStories, outcome });
-  const finalError = [run.error, configurationWarning, !drafted && validationSkips ? `${validationSkips} stories failed draft validation; no drafts were generated. See the per-story reasons.` : null].filter(Boolean).join(" ") || null;
+  const finalError = [run.error, configurationWarning, progress.interimFailures ? `${progress.interimFailures} interim writing request(s) failed; no automatic retry was attempted. Review the affected findings manually.` : null, progress.deliveryFailures ? `${progress.deliveryFailures} Slack review(s) could not be confirmed queued; check the drafts before retrying.` : null, !drafted && validationSkips ? `${validationSkips} stories failed draft validation; no drafts were generated. See the per-story reasons.` : null].filter(Boolean).join(" ") || null;
   await retryResearchStorage(async () => db
     .update(research_runs)
     .set({

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isResearchDailyTime, isResearchTimezone, nextResearchDailyAt } from "./research-schedule";
+import { isResearchDailyTime, isResearchTimezone, nextResearchDailyAt, nextResearchScheduledAt } from "./research-schedule";
 
 const next = (time: string, timezone: string, after: string, skipToday = false) =>
   new Date(nextResearchDailyAt(time, timezone, Date.parse(after), skipToday)).toISOString();
@@ -37,5 +37,14 @@ describe("daily research wall-clock schedules", () => {
 
   it("waits until tomorrow after a delayed occurrence dispatches before today's selected time", () => {
     expect(next("09:15", "Asia/Kolkata", "2026-10-23T02:00:00Z", true)).toBe("2026-10-24T03:45:00.000Z");
+  });
+});
+
+describe("twice-daily research wall-clock schedule", () => {
+  it("alternates 9am and 9pm Kolkata without skipping the second occurrence", () => {
+    const next = (after: string) => new Date(nextResearchScheduledAt("09:00", "Asia/Kolkata", Date.parse(after), 12, true)).toISOString();
+    expect(next("2026-10-29T03:29:00Z")).toBe("2026-10-29T03:30:00.000Z");
+    expect(next("2026-10-29T03:30:00Z")).toBe("2026-10-29T15:30:00.000Z");
+    expect(next("2026-10-29T15:30:00Z")).toBe("2026-10-30T03:30:00.000Z");
   });
 });

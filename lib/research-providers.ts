@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { researchHttp } from './research-http';
 import { probeResearchGenerationHealth } from './research-provider-health';
+import { probeResearchHaikuGenerationHealth } from './research-provider-haiku-health';
 import { RESEARCH_MODEL } from './research-model';
 import { RESEARCH_WRITING_MODEL } from './research-writing';
 import { readResearchProviderResponse, researchProviderRejection } from './research-provider-error';
@@ -37,6 +38,7 @@ export async function checkResearchProviders(fetcher: typeof fetch = fetch) {
 const providerRequestSchema = z.union([
   z.object({ operation: z.literal('metadata').optional() }).strict(),
   z.object({ operation: z.literal('generation_health'), operationId: z.uuid() }).strict(),
+  z.object({ operation: z.literal('haiku_generation_health'), operationId: z.uuid() }).strict(),
 ]);
 async function readProviderRequest(request: Request) {
   const reader = request.body?.getReader();
@@ -54,8 +56,10 @@ async function readProviderRequest(request: Request) {
 export function researchProvidersHttp(request: Request) {
   return researchHttp(request, async teamId => {
     const operation = await readProviderRequest(request);
-    return operation.operation === 'generation_health'
-      ? { generationHealth: await probeResearchGenerationHealth(teamId, operation.operationId), writing: { checked: false } }
-      : checkResearchProviders();
+    if (operation.operation === 'generation_health')
+      return { generationHealth: await probeResearchGenerationHealth(teamId, operation.operationId), writing: { checked: false } };
+    if (operation.operation === 'haiku_generation_health')
+      return { generationHealth: await probeResearchHaikuGenerationHealth(teamId, operation.operationId), writing: { checked: false } };
+    return checkResearchProviders();
   });
 }

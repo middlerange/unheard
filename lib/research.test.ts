@@ -915,6 +915,15 @@ describe("research persistence and team isolation", () => {
       await finishResearchRankJob(daily.run.id);
       const dailySnapshot = await getResearchSnapshot(team);
       expect(dailySnapshot.runs.find(row => row.id === daily.run.id)).toMatchObject({ status: "completed", days: 1, diagnostics: { eligibleCount: 6, evergreenCount: 1 } });
+      const twelve = await createResearchRun(team, { days: 0.5, mode: "scan" });
+      execute({ queries: [{ sql: "INSERT INTO research_run_sources(id,run_id,source_id,status) VALUES(?,?,?,'completed')", params: ["twelve-hour-step", twelve.run.id, seed.id] }] });
+      execute({ queries: [{ id: "twelve-boundary", at: twelve.run.createdAt - 12 * 3_600_000 }, { id: "twelve-inside", at: twelve.run.createdAt - 12 * 3_600_000 + 1 }].map(item => ({
+        sql: "INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,'article')",
+        params: [item.id, team, seed.id, new URL(item.id, seed.url).href, item.id, quote, item.at, twelve.run.createdAt, quote],
+      })) });
+      expected = ["six-inside", "six-start", "six-end", "six-older", "six-future", "twelve-inside"];
+      await finishResearchRankJob(twelve.run.id);
+      expect((await getResearchSnapshot(team)).runs.find(row => row.id === twelve.run.id)).toMatchObject({ status: "completed", days: 0.5, diagnostics: { eligibleCount: 6, evergreenCount: 0 } });
     } finally {
       fetcher?.mockRestore(); globalThis.__contentHubResearchWorkflow__ = priorWorkflow;
       if (priorKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = priorKey;
@@ -1189,15 +1198,92 @@ describe("research persistence and team isolation", () => {
     }
   }, 30_000);
 
-  it.each(['committed reply lost', 'checkpoint outage'])('persists writing once through storage failure without repeating paid requests: %s', async mode => {
-    const teamId = mode === 'committed reply lost' ? 'writing-storage-committed' : 'writing-storage-outage';
+  it("sends incremental 12-hour drafts to the review queue without ending ranking or missing later findings", async () => {
+    const team = "interim-review", runId = `${team}-run`, now = Date.now();
+    const quote = "The team moved account setup after the first preview so users could inspect the output first.";
+    execute({ queries: [
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)", params: [team, team, team] },
+      { sql: "INSERT INTO channels(id,team_id,name,platform,group_name,research_enabled,system_prompt,created_at) VALUES(?,?,'Personal','linkedin','personal',1,'Explain specific product decisions and useful practitioner tests.',0)", params: [`${team}-li`, team] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_ids) VALUES(?,?,'scan','ranking',0.5,1,?,'Product teams',?)", params: [runId, team, now, JSON.stringify(["interim-source"])] },
+    ] });
+    const addFinding = (n: number, family: string) => execute({ queries: [
+      { sql: 'INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,?)', params: [`${team}-item-${n}`, team, 'interim-source', `https://example.com/${team}-${n}`, `Preview choice ${n}`, quote, now - 1000, now, quote.repeat(10), 'article'] },
+      { sql: 'INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', params: [`${team}-finding-${n}`, team, runId, `${team}-item-${n}`, 'interim-source', `Preview choice ${n}`, `https://example.com/${team}-${n}`, now - 1000, 90, 'Preview precedes setup.', 'Commitment follows useful output.', 'Inspect the first-preview path before asking for setup.', quote, 'Reported workflow, no conversion result.', now, family] },
+    ] });
+    const priorKey = process.env.OPENAI_API_KEY; process.env.OPENAI_API_KEY = 'test-interim';
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const input = JSON.parse(JSON.parse(String(init?.body)).input);
+      if (input.proposed) return editorialReviewFixture();
+      return modelResponseFixture({ status: 'completed', usage: { input_tokens: 20, output_tokens: 10 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify({ ready: true, reason: 'A bounded first-preview decision.', editorial: editorialFixture(quote), targets: [{ channelId: `${team}-li`, platform: 'linkedin', content: `Show users an inspectable output before asking for account setup. Audit whether the setup step needs information that the first preview has not yet given them. Source: ${input.source.url}`, thread: [], supportQuote: quote, redditTitle: null, subreddit: null }] }) }] }] });
+    });
+    try {
+      addFinding(1, 'interim-first');
+      execute({ queries: [{ sql: 'INSERT INTO research_cache(id,team_id,value,created_at) VALUES(?,?,?,?)', params: [`rank-progress:${runId}`, team, JSON.stringify({ pendingDrafts: true }), now] }] });
+      // A rank retry after a lost response surfaces the durable outbox before doing any more model work.
+      expect(await processResearchJob({ operation: 'rank', runId })).toEqual({ ok: true, pending: true, draftReady: true });
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(await processResearchDraftJob(runId, true)).toEqual({ drafted: 1, pending: false });
+      expect(JSON.parse(execute({ queries: [{ sql: 'SELECT value FROM research_cache WHERE id=?', params: [`rank-progress:${runId}`] }] })[0].results[0].value).pendingDrafts).toBe(false);
+      let [run, drafts, jobs] = execute({ queries: [
+        { sql: 'SELECT status,completed_at FROM research_runs WHERE id=?', params: [runId] },
+        { sql: 'SELECT COUNT(*) count FROM research_drafts WHERE run_id=?', params: [runId] },
+        { sql: "SELECT COUNT(*) count FROM slack_jobs WHERE team_id=? AND kind='review'", params: [team] },
+      ] }).map((result: { results: unknown[] }) => result.results[0]);
+      expect(run).toEqual({ status: 'ranking', completed_at: null }); expect(drafts.count).toBe(1); expect(jobs.count).toBe(1);
+      // A durable marker surviving a replay must not regenerate or queue duplicate reviews.
+      execute({ queries: [{ sql: 'UPDATE research_cache SET value=? WHERE id=?', params: [JSON.stringify({ pendingDrafts: true }), `rank-progress:${runId}`] }] });
+      expect(await processResearchDraftJob(runId, true)).toEqual({ drafted: 1, pending: false });
+      expect(JSON.parse(execute({ queries: [{ sql: 'SELECT value FROM research_cache WHERE id=?', params: [`rank-progress:${runId}`] }] })[0].results[0].value).pendingDrafts).toBe(false);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      addFinding(2, 'interim-second');
+      expect(await processResearchDraftJob(runId, true)).toEqual({ drafted: 2, pending: false });
+      expect(await processResearchDraftJob(runId, true)).toEqual({ drafted: 2, pending: false });
+      [run, drafts, jobs] = execute({ queries: [
+        { sql: 'SELECT status,completed_at FROM research_runs WHERE id=?', params: [runId] },
+        { sql: 'SELECT COUNT(*) count FROM research_drafts WHERE run_id=?', params: [runId] },
+        { sql: "SELECT COUNT(*) count FROM slack_jobs WHERE team_id=? AND kind='review'", params: [team] },
+      ] }).map((result: { results: unknown[] }) => result.results[0]);
+      expect(run).toEqual({ status: 'ranking', completed_at: null }); expect(drafts.count).toBe(2); expect(jobs.count).toBe(2);
+      expect(fetcher).toHaveBeenCalledTimes(4);
+      // If the global finding changes later, the first run's frozen family still
+      // suppresses another candidate with the same original decision.
+      execute({ queries: [{ sql: 'UPDATE research_findings SET family_key=? WHERE id=?', params: ['mutated-live-family', `${team}-finding-1`] }] });
+      addFinding(3, 'interim-first');
+      expect(await processResearchDraftJob(runId, true)).toEqual({ drafted: 2, pending: false });
+      expect(fetcher).toHaveBeenCalledTimes(4);
+      // Unknown provider outcomes are recorded once and never retried during ranking.
+      addFinding(4, 'interim-fourth');
+      fetcher.mockRejectedValueOnce(new Error('network interruption with private detail'));
+      expect(await processResearchDraftJob(runId, true)).toEqual({ drafted: 2, pending: false });
+      expect(fetcher).toHaveBeenCalledTimes(5);
+      expect(await processResearchDraftJob(runId, true)).toEqual({ drafted: 2, pending: false });
+      expect(fetcher).toHaveBeenCalledTimes(5);
+      // A failed review enqueue leaves the draft intact and is visible in the final run error.
+      addFinding(5, 'interim-fifth');
+      storageFault = (queries, phase) => { if (phase === 'before' && queries.some(query => query.sql.startsWith('insert into "slack_jobs"'))) throw new Error('queue unavailable with private detail'); };
+      expect(await processResearchDraftJob(runId, true)).toEqual({ drafted: 3, pending: false });
+      storageFault = undefined;
+      expect(await processResearchDraftJob(runId, true)).toEqual({ drafted: 3, pending: false });
+      expect(fetcher).toHaveBeenCalledTimes(7);
+      execute({ queries: [{ sql: "UPDATE research_runs SET status='drafting' WHERE id=?", params: [runId] }] });
+      expect(await processResearchDraftJob(runId)).toEqual({ drafted: 3 });
+      const [finalRun] = execute({ queries: [{ sql: 'SELECT status,error,diagnostics FROM research_runs WHERE id=?', params: [runId] }] })[0].results;
+      expect(finalRun.status).toBe('completed');
+      expect(finalRun.error).toContain('no automatic retry');
+      expect(finalRun.error).toContain('Slack review(s) could not be confirmed queued');
+      expect(finalRun.diagnostics).not.toContain('private detail');
+    } finally { storageFault = undefined; fetcher.mockRestore(); if (priorKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = priorKey; }
+  }, 60_000);
+
+  it.each([['committed reply lost', 1], ['checkpoint outage', 1], ['committed reply lost', 0.5]] as const)('persists writing once through storage failure without repeating paid requests: %s, %s days', async (mode, days) => {
+    const teamId = `${mode === 'committed reply lost' ? 'writing-storage-committed' : 'writing-storage-outage'}-${days}`;
     const runId = `${teamId}-run`;
     const now = Date.now();
     const quote = 'The team moved account setup after the first preview so users could inspect the output first.';
     execute({ queries: [
       { sql: 'INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES(?,?,?,0,0)', params: [teamId, teamId, teamId] },
       { sql: "INSERT INTO channels(id,team_id,name,platform,group_name,research_enabled,system_prompt,created_at) VALUES(?,?,'Personal','linkedin','personal',1,'Explain specific product decisions and useful practitioner tests.',0)", params: [`${teamId}-li`, teamId] },
-      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_ids) VALUES(?,?,'scan','drafting',1,1,?,'Product teams',?)", params: [runId, teamId, now, JSON.stringify(['writing-storage-source'])] },
+      { sql: "INSERT INTO research_runs(id,team_id,mode,status,days,editorial,created_at,icp,source_ids) VALUES(?,?,'scan','drafting',?,1,?,'Product teams',?)", params: [runId, teamId, days, now, JSON.stringify(['writing-storage-source'])] },
       { sql: 'INSERT INTO research_items(id,team_id,source_id,canonical_url,title,excerpt,published_at,collected_at,content,content_provenance) VALUES(?,?,?,?,?,?,?,?,?,?)', params: [`${teamId}-item`, teamId, 'writing-storage-source', `https://example.com/${teamId}`, 'Inspect the first preview before setup', quote, now - 1000, now, quote.repeat(10), 'article'] },
       { sql: 'INSERT INTO research_findings(id,team_id,run_id,item_id,source_id,title,url,published_at,score,summary,why_it_matters,content_angle,evidence,limitations,created_at,family_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', params: [`${teamId}-finding`, teamId, runId, `${teamId}-item`, 'writing-storage-source', 'Inspect the first preview before setup', `https://example.com/${teamId}`, now - 1000, 90, 'Preview precedes setup.', 'Commitment follows useful output.', 'Inspect the first-preview path before asking for setup.', quote, 'Reported workflow, no conversion result.', now, teamId] },
     ] });
@@ -3024,6 +3110,64 @@ describe("research persistence and team isolation", () => {
       else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
     }
   }, 30_000);
+  it("schedules two 12-hour editorial scans and keeps each occurrence distinct", async () => {
+    execute({ queries: [
+      { sql: "UPDATE research_settings SET daily_enabled=0" },
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('twice-research','Twice','twice-research',0,0)" },
+    ] });
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-29T03:29:00Z"));
+    const oldOpenAI = process.env.OPENAI_API_KEY, oldAnthropic = process.env.ANTHROPIC_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key"; process.env.ANTHROPIC_API_KEY = "test-key";
+    const dispatch = vi.fn(async () => ({})); globalThis.__contentHubResearchWorkflow__ = { create: dispatch };
+    try {
+      await updateResearchSettings("twice-research", { dailyEnabled: true, autoDrafts: true, dailyIntervalHours: 12, dailyTime: "09:00", dailyTimezone: "Asia/Kolkata" });
+      let snapshot = await getResearchSnapshot("twice-research");
+      expect(snapshot.settings).toMatchObject({ dailyIntervalHours: 12, nextDailyAt: Date.parse("2026-10-29T03:30:00Z") });
+      now.mockReturnValue(Date.parse("2026-10-29T03:30:00Z"));
+      expect(await processResearchJob({ operation: "daily", scheduledTime: Date.now() })).toEqual({ dispatched: 1 });
+      snapshot = await getResearchSnapshot("twice-research");
+      expect(snapshot.runs[0]).toMatchObject({ mode: "scan", days: 0.5, editorial: true });
+      expect(snapshot.settings.nextDailyAt).toBe(Date.parse("2026-10-29T15:30:00Z"));
+      const first = snapshot.runs[0].id;
+      execute({ queries: [{ sql: "UPDATE research_runs SET status='completed' WHERE id=?", params: [first] }] });
+      now.mockReturnValue(Date.parse("2026-10-29T15:30:00Z"));
+      expect(await processResearchJob({ operation: "daily", scheduledTime: Date.now() })).toEqual({ dispatched: 1 });
+      snapshot = await getResearchSnapshot("twice-research");
+      expect(snapshot.runs.find(run => run.id !== first)).toMatchObject({ days: 0.5, editorial: true });
+      expect(snapshot.settings.nextDailyAt).toBe(Date.parse("2026-10-30T03:30:00Z"));
+      expect(dispatch).toHaveBeenCalledTimes(2);
+    } finally {
+      now.mockRestore();
+      if (oldOpenAI === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = oldOpenAI;
+      if (oldAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = oldAnthropic;
+    }
+  }, 30_000);
+
+  it("retains each missed 12-hour window after a busy scan delays dispatch", async () => {
+    execute({ queries: [
+      { sql: "UPDATE research_settings SET daily_enabled=0" },
+      { sql: "INSERT INTO teams(id,name,slug,created_at,updated_at) VALUES('twice-delayed','Delayed','twice-delayed',0,0)" },
+    ] });
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-29T03:29:00Z"));
+    const priorKey = process.env.ANTHROPIC_API_KEY; process.env.ANTHROPIC_API_KEY = "test-key";
+    globalThis.__contentHubResearchWorkflow__ = { create: vi.fn(async () => ({})) };
+    try {
+      await updateResearchSettings("twice-delayed", { dailyEnabled: true, autoDrafts: false, dailyIntervalHours: 12, dailyTime: "09:00", dailyTimezone: "Asia/Kolkata" });
+      now.mockReturnValue(Date.parse("2026-10-30T04:00:00Z"));
+      expect(await processResearchJob({ operation: "daily", scheduledTime: Date.now() })).toEqual({ dispatched: 1 });
+      let snapshot = await getResearchSnapshot("twice-delayed");
+      expect(snapshot.runs[0]).toMatchObject({ days: 0.5, editorial: false, createdAt: Date.parse("2026-10-29T03:30:00Z") });
+      expect(snapshot.settings.nextDailyAt).toBe(Date.parse("2026-10-29T15:30:00Z"));
+      const first = snapshot.runs[0].id;
+      expect(await processResearchJob({ operation: "daily", scheduledTime: Date.now() })).toEqual({ dispatched: 0 });
+      execute({ queries: [{ sql: "UPDATE research_runs SET status='completed' WHERE id=?", params: [first] }] });
+      expect(await processResearchJob({ operation: "daily", scheduledTime: Date.now() })).toEqual({ dispatched: 1 });
+      snapshot = await getResearchSnapshot("twice-delayed");
+      expect(snapshot.runs.find(run => run.id !== first)).toMatchObject({ createdAt: Date.parse("2026-10-29T15:30:00Z") });
+      expect(snapshot.settings.nextDailyAt).toBe(Date.parse("2026-10-30T03:30:00Z"));
+    } finally { now.mockRestore(); if (priorKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = priorKey; }
+  }, 30_000);
+
   it("retries a failed scheduled workflow dispatch using the same queued run ID", async () => {
     execute({ queries: [
       { sql: "UPDATE research_settings SET daily_enabled=0" },

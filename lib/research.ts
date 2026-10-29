@@ -1,5 +1,5 @@
 import { ResearchCacheOnlyMiss } from "./research-cache-only";
-import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "./db/client";
 import { retryResearchStorage } from "./research-storage";
@@ -41,7 +41,7 @@ import {
   isResearchDailyTime,
   isResearchTimezone,
   isSameResearchLocalDay,
-  nextResearchDailyAt,
+  nextResearchScheduledAt,
 } from "./research-schedule";
 import type {
   ResearchFinding,
@@ -225,6 +225,7 @@ export async function getResearchSnapshot(
       icp: settings!.icp,
       dailyEnabled: settings!.daily_enabled,
       autoDrafts: settings!.auto_drafts,
+      dailyIntervalHours: settings!.daily_interval_hours as 12 | 24,
       dailyTime: settings!.daily_time,
       dailyTimezone: settings!.daily_timezone,
       nextDailyAt: settings!.next_daily_at,
@@ -303,6 +304,7 @@ export async function updateResearchSettings(teamId: string, input: unknown) {
       icp: z.string().trim().min(20).max(4000).optional(),
       dailyEnabled: z.boolean().optional(),
       autoDrafts: z.boolean().optional(),
+      dailyIntervalHours: z.union([z.literal(12), z.literal(24)]).optional(),
       dailyTime: z.string()
         .refine(isResearchDailyTime, "Use a daily time in HH:mm format")
         .nullable().optional(),
@@ -318,9 +320,12 @@ export async function updateResearchSettings(teamId: string, input: unknown) {
   const time = data.dailyTime === undefined ? settings!.daily_time : data.dailyTime;
   const timezone = data.dailyTimezone ?? settings!.daily_timezone;
   const enabled = data.dailyEnabled ?? settings!.daily_enabled;
+  const intervalHours = data.dailyIntervalHours ?? settings!.daily_interval_hours as 12 | 24;
+  if (intervalHours === 12 && !time) throw new Error("Choose an anchor time for the twice-daily schedule");
   const scheduleChanged = time !== settings!.daily_time
     || timezone !== settings!.daily_timezone
-    || enabled !== settings!.daily_enabled;
+    || enabled !== settings!.daily_enabled
+    || intervalHours !== settings!.daily_interval_hours;
   const now = Date.now();
   const ranToday = settings!.last_daily_at !== null
     && isSameResearchLocalDay(settings!.last_daily_at, now, timezone);
@@ -334,9 +339,10 @@ export async function updateResearchSettings(teamId: string, input: unknown) {
       ...(data.autoDrafts !== undefined ? { auto_drafts: data.autoDrafts } : {}),
       ...(scheduleChanged ? {
         daily_time: time,
+        daily_interval_hours: intervalHours,
         daily_timezone: timezone,
         next_daily_at: time && enabled
-          ? nextResearchDailyAt(time, timezone, now, ranToday)
+          ? nextResearchScheduledAt(time, timezone, now, intervalHours, ranToday)
           : null,
         daily_claim_id: null,
         daily_claim_until: null,
@@ -389,10 +395,11 @@ export async function createResearchRun(
   input: unknown,
   editorial = false,
   scheduledRunId?: string,
+  scheduledWindowEnd?: number,
 ) {
   const data = z
     .object({
-      days: z.union([z.literal(0.25), z.literal(1), z.literal(7), z.literal(30)]).default(30),
+      days: z.union([z.literal(0.25), z.literal(0.5), z.literal(1), z.literal(7), z.literal(30)]).default(30),
       mode: z.enum(["scan", "collect"]).default("scan"),
       sourceIds: z.array(z.string().min(1)).min(1)
         .refine(ids => new Set(ids).size === ids.length, "Source IDs must be unique")
@@ -411,7 +418,7 @@ export async function createResearchRun(
   const db = await getDb();
   const settings = await db.select().from(research_settings)
     .where(eq(research_settings.team_id, teamId)).get();
-  const writeDrafts = editorial && settings!.auto_drafts && data.days === 1 && data.mode === "scan";
+  const writeDrafts = editorial && settings!.auto_drafts && (data.days === 1 || data.days === 0.5) && data.mode === "scan";
   if (writeDrafts && !process.env.OPENAI_API_KEY)
     throw new Error("Set OPENAI_API_KEY in Cloudflare secrets to generate research drafts");
   if (data.sourceIds) {
@@ -422,9 +429,9 @@ export async function createResearchRun(
     z.array(z.string()).refine(ids => ids.every(id => enabledIds.has(id)), "Requested sources must be enabled for this team").parse(data.sourceIds);
   }
   async function checkActiveRun(active: typeof research_runs.$inferSelect) {
-    if ((data.days === 0.25 || active.days === 0.25) && (active.days !== data.days || active.mode !== data.mode))
+    if (([0.25, 0.5].includes(data.days) || [0.25, 0.5].includes(active.days)) && (active.days !== data.days || active.mode !== data.mode))
       throw new Error("A research run with a different time window or mode is active. Wait for it to finish before starting the six-hour scan.");
-    if (data.days === 0.25 && !data.sourceIds) {
+    if ((data.days === 0.25 || data.days === 0.5) && !data.sourceIds) {
       const enabled = await db.select({ seedId: research_sources.seed_id }).from(research_sources).where(and(
         eq(research_sources.team_id, teamId), eq(research_sources.enabled, true),
       )).all();
@@ -502,7 +509,7 @@ export async function createResearchRun(
       status: "queued",
       days: data.days,
       editorial: writeDrafts,
-      created_at: Date.now(),
+      created_at: scheduledWindowEnd ?? Date.now(),
       icp: profiles.length
         ? `${settings!.icp}\n\nPublishing profiles: ${JSON.stringify(profiles)}\nUse each profile systemPrompt to decide relevance. Each draft must choose exactly one account identity group and include its enabled supported channels; never mix account groups in one approval. These profile instructions take precedence over the general audience description when they differ.`
         : settings!.icp,
@@ -1381,6 +1388,7 @@ type ResearchRankProgress = {
   diagnostics: ResearchRankDiagnostics;
   coverageWarning: string | null;
   referencePacketsComplete?: boolean;
+  pendingDrafts?: boolean;
 };
 const MAX_RANK_EVIDENCE_BATCHES = 3;
 const MAX_RANK_ROUTING_BATCHES = 3;
@@ -1550,6 +1558,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
     ]));
   }
   await db.update(research_runs).set({ status: "ranking" }).where(eq(research_runs.id, run.id));
+  if (progress?.pendingDrafts && run.editorial && run.days === 0.5) return { ok: true, pending: true, draftReady: true };
   if (!progress) {
     const sources = JSON.parse(run.source_ids) as string[];
     const discoveryCutoff = Date.now();
@@ -1577,9 +1586,11 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       ),
     ) : sql`0`;
     const eligibleSignal = and(
-      run.days === 0.25
-        ? and(gte(research_items.published_at, windowStart), lte(research_items.published_at, run.created_at))
-        : or(datedSignal, undatedWatchSignal),
+      run.days === 0.5
+        ? and(gt(research_items.published_at, windowStart), lte(research_items.published_at, run.created_at))
+        : run.days === 0.25
+          ? and(gte(research_items.published_at, windowStart), lte(research_items.published_at, run.created_at))
+          : or(datedSignal, undatedWatchSignal),
       or(eq(research_items.content_type, "article"), eq(research_items.transcript_status, "available")),
     );
     const candidates = await db
@@ -1691,6 +1702,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       });
     });
     const batch = full.flatMap(item => item.status === "fulfilled" && item.value.content ? [item.value] : []);
+    let draftReady = false;
     if (batch.length) {
       const input = batch.map(item => ({
         id: item.id, title: item.title, sourceId: item.source_id, publishedAt: item.published_at,
@@ -1723,6 +1735,8 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
           reason,
         });
       }
+      draftReady = run.editorial && run.days === 0.5 && accepted.length > 0;
+      if (draftReady) { progress.pendingDrafts = true; await persistProgress(progress); }
       await saveQualifiedResearchFindings(run, batch, accepted, diagnostics);
     }
     diagnostics.evidenceCount += batch.length;
@@ -1735,6 +1749,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
       diagnostics.outcome = `Shortlisted ${progress.selectedIds.length} stories, but their public evidence could not be read.`;
     }
     await persistProgress(progress);
+    if (draftReady) return { ok: true, pending: true, draftReady: true };
   }
   if (progress.nextOffset < progress.selectedIds.length) return { ok: true, pending: true };
   if (!progress.selectedIds.length && diagnostics.screenedCount) {
@@ -1771,8 +1786,11 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
     const { snapshotHash, ...snapshot } = packetPlan;
     if (packetPlan.version !== "configured-public-reference-packets-v1" || packetPlan.runId !== run.id || packetPlan.teamId !== run.team_id
       || JSON.stringify(packetPlan.candidateIds) !== JSON.stringify(candidateIds) || snapshotHash !== await researchHash(JSON.stringify(snapshot))) throw new Error("Reference packet plan differs from the frozen run");
+    let packetDraftReady = false;
     try {
       const output = await cachedResearchSourcePackets(run, packetPlan.packets, coverageBudget);
+      packetDraftReady = run.editorial && run.days === 0.5 && output.acceptedIdeas.length > 0;
+      if (packetDraftReady) { progress.pendingDrafts = true; await persistProgress(progress); }
       await saveQualifiedResearchFindings(run, packetPlan.items, output.acceptedIdeas.map(finding => ({ ...finding, isAdditional: true })), diagnostics, output.packetProofs);
       const resultId = `research-reference-packets:${run.id}:result`, value = JSON.stringify(output);
       await db.insert(research_cache).values({ id: resultId, team_id: run.team_id, value, created_at: Date.now() }).onConflictDoNothing();
@@ -1782,6 +1800,7 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
     progress.referencePacketsComplete = true;
     diagnostics.outcome = `${diagnostics.outcome ?? ""} Related public-source packets were assessed with original source citations.`;
     await persistProgress(progress);
+    if (packetDraftReady) return { ok: true, pending: true, draftReady: true };
   }
   const failed = await db
     .select()
@@ -1862,6 +1881,7 @@ export async function processResearchJob(job: ResearchJob) {
           ? isNull(research_settings.daily_time)
           : eq(research_settings.daily_time, settings.daily_time),
         eq(research_settings.daily_timezone, settings.daily_timezone),
+        eq(research_settings.daily_interval_hours, settings.daily_interval_hours),
         settings.next_daily_at === null
           ? isNull(research_settings.next_daily_at)
           : eq(research_settings.next_daily_at, settings.next_daily_at),
@@ -1882,9 +1902,10 @@ export async function processResearchJob(job: ResearchJob) {
             ne(research_runs.mode, "replay"),
             eq(research_runs.status, "queued"),
           )).get();
-          scheduledRunId = queued?.id.startsWith("daily-")
+          const expectedRunId = `daily-${await researchHash(`${settings.team_id}:${occurrence}`)}`;
+          scheduledRunId = queued?.id.startsWith("daily-") && (settings.daily_interval_hours !== 12 || queued.id === expectedRunId)
             ? queued.id
-            : `daily-${await researchHash(`${settings.team_id}:${occurrence}`)}`;
+            : expectedRunId;
           // Persist the association before dispatch, including across settings
           // edits, so an interrupted recovery cannot create a second workflow.
           const linked = await db.update(research_settings)
@@ -1902,7 +1923,8 @@ export async function processResearchJob(job: ResearchJob) {
         const result = previous && terminal(previous.status)
           ? { run: runView(previous) }
           : await createResearchRun(
-            settings.team_id, { days: 1, mode: "scan" }, true, scheduledRunId,
+            settings.team_id, { days: settings.daily_interval_hours === 12 ? 0.5 : 1, mode: "scan" }, true, scheduledRunId,
+            settings.daily_interval_hours === 12 ? settings.next_daily_at ?? undefined : undefined,
           );
         if (result.run.id !== scheduledRunId) continue;
         const dispatchedAt = Date.now();
@@ -1911,7 +1933,7 @@ export async function processResearchJob(job: ResearchJob) {
           .set({
             last_daily_at: dispatchedAt,
             next_daily_at: settings.daily_time
-              ? nextResearchDailyAt(settings.daily_time, settings.daily_timezone, dispatchedAt, true)
+              ? nextResearchScheduledAt(settings.daily_time, settings.daily_timezone, settings.daily_interval_hours === 12 ? settings.next_daily_at! : dispatchedAt, settings.daily_interval_hours as 12 | 24, true)
               : null,
             daily_claim_id: null,
             daily_claim_until: null,
@@ -1950,9 +1972,9 @@ export async function processResearchJob(job: ResearchJob) {
     const { processResearchReplay } = await import("./research-replay");
     return processResearchReplay(run, job.operation);
   }
-  if (job.operation === "drafts") {
+  if (job.operation === "drafts" || job.operation === "drafts_interim") {
     const { processResearchDraftJob } = await import("./research-drafts");
-    return processResearchDraftJob(run.id);
+    return processResearchDraftJob(run.id, job.operation === "drafts_interim");
   }
   if (terminal(run.status)) return { sourceIds: [], done: true };
   if (job.operation === "fail") {

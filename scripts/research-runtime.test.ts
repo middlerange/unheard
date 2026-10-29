@@ -21,6 +21,22 @@ describe('durable research execution', () => {
     expect(options['Draft daily posts'].retries).toEqual({ limit: 0, delay: '1 second', backoff: 'constant' });
   });
 
+  it('delivers each qualified 12-hour batch before ranking the next, without paid step retries', async () => {
+    const events: string[] = []; let ranks = 0, interims = 0;
+    const invoke = vi.fn(async (payload: { operation: string }) => {
+      events.push(payload.operation);
+      if (payload.operation === 'plan') return { sourceIds: [] };
+      if (payload.operation === 'rank') return ++ranks < 3 ? { pending: true, draftReady: true } : { pending: false };
+      if (payload.operation === 'drafts_interim') return { pending: ++interims === 1 };
+      return { drafted: 2 };
+    });
+    const doStep = vi.fn(async (_name: string, _options: unknown, work: () => Promise<unknown>) => work());
+    const sleep = vi.fn(async () => {});
+    await runResearchWorkflow('incremental-run', { do: doStep, sleep }, invoke);
+    expect(events).toEqual(['plan', 'rank', 'drafts_interim', 'drafts_interim', 'rank', 'drafts_interim', 'rank', 'drafts']);
+    for (const [name, options] of doStep.mock.calls) if (name.startsWith('Draft')) expect(options).toMatchObject({ retries: { limit: 0 } });
+  });
+
   it('records failure without continuing into paid analysis', async () => {
     const invoke = vi.fn(async (payload: { operation: string }) => {
       if (payload.operation === 'plan') return { sourceIds: ['broken-source'] };

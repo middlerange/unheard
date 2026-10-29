@@ -398,6 +398,7 @@ export const research_settings = sqliteTable('research_settings', {
   icp: text('icp').notNull(), daily_enabled: integer('daily_enabled', { mode: 'boolean' }).notNull().default(false),
   auto_drafts: integer('auto_drafts', { mode: 'boolean' }).notNull().default(true),
   last_daily_at: integer('last_daily_at'), updated_at: integer('updated_at').notNull(),
+  daily_interval_hours: integer('daily_interval_hours').notNull().default(24),
   daily_time: text('daily_time'), daily_timezone: text('daily_timezone').notNull().default('UTC'),
   next_daily_at: integer('next_daily_at'), daily_claim_id: text('daily_claim_id'), daily_claim_until: integer('daily_claim_until'),
   daily_pending_run_id: text('daily_pending_run_id'),

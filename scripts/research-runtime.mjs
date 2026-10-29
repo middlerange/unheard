@@ -65,6 +65,16 @@ export async function runResearchWorkflow(runId, step, invoke) {
     let batch = 1;
     let ranking = await step.do('Rank findings', paidOptions, () => invoke({ operation: 'rank', runId }));
     while (ranking?.pending === true) {
+      if (ranking.draftReady === true) {
+        let draftBatch = 1;
+        let interim = await step.do(`Draft qualified findings after rank batch ${batch}`, paidOptions, () => invoke({ operation: 'drafts_interim', runId }));
+        while (interim?.pending === true) {
+          if (Number.isFinite(interim.retryAfterMs) && interim.retryAfterMs > 0)
+            await step.sleep(`Wait for interim writing after rank batch ${batch} draft ${draftBatch}`, `${Math.ceil(interim.retryAfterMs / 1000)} seconds`);
+          draftBatch++;
+          interim = await step.do(`Draft qualified findings after rank batch ${batch} part ${draftBatch}`, paidOptions, () => invoke({ operation: 'drafts_interim', runId }));
+        }
+      }
       if (Number.isFinite(ranking.retryAfterMs) && ranking.retryAfterMs > 0) {
         await step.sleep(`Wait for research evidence after batch ${batch}`, `${Math.ceil(ranking.retryAfterMs / 1000)} seconds`);
       }

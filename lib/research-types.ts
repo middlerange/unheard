@@ -109,6 +109,7 @@ export type ResearchSnapshot = {
     icp: string;
     dailyEnabled: boolean;
     autoDrafts: boolean;
+    dailyIntervalHours: 12 | 24;
     dailyTime: string | null;
     dailyTimezone: string;
     nextDailyAt: number | null;
@@ -119,7 +120,7 @@ export type ResearchSnapshot = {
   drafts: ResearchDraft[];
 };
 export type ResearchJob = {
-  operation: "plan" | "collect" | "rank" | "drafts" | "fail" | "daily";
+  operation: "plan" | "collect" | "rank" | "drafts" | "drafts_interim" | "fail" | "daily";
   runId?: string;
   sourceId?: string;
   error?: string;
