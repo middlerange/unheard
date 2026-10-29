@@ -2282,6 +2282,28 @@ export const RESEARCH_SOURCE_SEEDS: ResearchSourceSeed[] = [
         "reason": "An original summit-organizer takeaway report names Katelyn Bourgoin among separately attributed speakers; an original Exit Five interview features the same practitioner. Preserve each speaker's attribution, original publication and reported scope. The pairing permits editorial comparison, not a claim of shared outcomes, creator authorship or social-post derivation."
       }
     },
-    "notes": "Original event organizer's written takeaways, dated June 4, 2026. Preserve individual speaker attribution: the organizer's summaries are not verified verbatim speaker transcripts. Retain actual publication and first observation, and distinguish practitioner positions from measured outcomes. The ordinary article body limit may exclude later sessions; do not claim a captured prefix is the complete event or article. Related-reference qualification remains disabled pending validation. Known-page backfill is not historical blind discovery."
+    "notes": "Original event organizer's written takeaways, dated June 4, 2026. Preserve individual speaker attribution: the organizer's summaries are not verified verbatim speaker transcripts. Retain actual publication and first observation, and distinguish practitioner positions from measured outcomes. The ordinary article body limit may exclude later sessions; do not claim a captured prefix is the complete event or article. Related-reference qualification applies the unchanged profile and evidence rules; activation is not qualification or match credit. Known-page backfill is not historical blind discovery."
+  },
+  {
+    "id": "creatorscience-katelyn-replay-reference",
+    "name": "Creator Science — Katelyn Bourgoin interview replay",
+    "url": "https://creatorscience.com/podcast/katelyn-bourgoin-replay/",
+    "kind": "web",
+    "pageMode": "article",
+    "category": "practitioner",
+    "enabled": true,
+    "priority": 2,
+    "freeArticleFallback": true,
+    "freeArticleFallbackOnRedirect": true,
+    "referencePacket": {
+      "id": "creatorscience-and-exit-five-practitioner-interviews",
+      "enabled": true,
+      "sourceIds": ["creatorscience-katelyn-replay-reference", "reference-268173540fbd"],
+      "relationship": {
+        "type": "configured_reference",
+        "reason": "Two original publisher interviews feature Katelyn Bourgoin. Preserve the host and guest attribution, each interview's publication and the scope of the described practitioner methods. Editorial comparison does not establish shared measured outcomes, automatic execution or social-post derivation."
+      }
+    },
+    "notes": "Public Creator Science interview transcript on a Greatest Hits replay page, with publisher publication metadata dated March 4, 2025; the original recording date is not established. The transcript has unlabelled speaker turns, so do not assign ambiguous host-and-guest statements exclusively to the guest. Capture the complete ordinary article without silently truncating it; an observed full-transcript heading is not configured as a chapter selector pending native capture validation. Preserve actual first observation and distinguish described methods from measured outcomes. Related-reference qualification applies the unchanged profile and evidence rules; activation is not qualification or match credit. Known-page backfill is not historical blind discovery."
   }
 ];

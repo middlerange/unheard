@@ -132,7 +132,7 @@ describe('research source selection', () => {
 it('restricts feed hydration and free fetch to their reviewed publisher and section watches', () => {
   const ids = ['google-deepmind-research', 'openai-news'];
   expect(RESEARCH_SOURCE_SEEDS.filter(source => source.hydratePublishedWindowOnly).map(source => source.id).sort()).toEqual(ids);
-  expect(RESEARCH_SOURCE_SEEDS.filter(source => source.freeArticleFallback).map(source => source.id).sort()).toEqual(['google-ads-audience-signals-reference', 'google-ads-dynamic-prospecting', 'google-deepmind-research', 'google-demand-gen-lookalike-constraint-reference', 'google-demand-gen-lookalike-mode-reference', 'google-demand-gen-original-cases', 'growthmemo-personal-ipo-summit-reference', 'openai-news']);
+  expect(RESEARCH_SOURCE_SEEDS.filter(source => source.freeArticleFallback).map(source => source.id).sort()).toEqual(['creatorscience-katelyn-replay-reference', 'google-ads-audience-signals-reference', 'google-ads-dynamic-prospecting', 'google-deepmind-research', 'google-demand-gen-lookalike-constraint-reference', 'google-demand-gen-lookalike-mode-reference', 'google-demand-gen-original-cases', 'growthmemo-personal-ipo-summit-reference', 'openai-news']);
   expect(RESEARCH_SOURCE_SEEDS.find(source => source.id === 'google-ads-dynamic-prospecting')).toMatchObject({
     kind: 'web', pageMode: 'article', articleSectionHeading: 'About dynamic prospecting', freeArticleFallback: true,
   });
@@ -155,4 +155,22 @@ it('keeps an enabled public organizer watch separate from its unvalidated practi
   expect(configuredResearchPacketDefinitions(enabledOnlyLocally, items, ['fixture-0'], activeIds, 3000).definitions[0])
     .toMatchObject({ id: seed.referencePacket!.id, primarySourceId: 'fixture-0', sourceIds: ['fixture-0', 'fixture-1'], relationship: seed.referencePacket!.relationship });
   expect(seed.referencePacket!.enabled).toBe(false);
+});
+
+it('routes complete practitioner interviews only when both original sources are active', () => {
+  const seed = RESEARCH_SOURCE_SEEDS.find(source => source.id === 'creatorscience-katelyn-replay-reference')!;
+  expect(seed).toMatchObject({ enabled: true, kind: 'web', pageMode: 'article', freeArticleFallback: true, freeArticleFallbackOnRedirect: true });
+  expect(seed.url).toBe('https://creatorscience.com/podcast/katelyn-bourgoin-replay/');
+  expect(seed.articleSectionHeading).toBeUndefined();
+  expect(seed.articleTimestampRange).toBeUndefined();
+  expect(seed.artifactReview).toBeUndefined();
+  expect(seed.referencePacket).toMatchObject({ enabled: true, sourceIds: [seed.id, 'reference-268173540fbd'], relationship: { type: 'configured_reference' } });
+  const member = RESEARCH_SOURCE_SEEDS.find(source => source.id === 'reference-268173540fbd')!;
+  const items = [seed, member].map((source, index) => ({ id: 'replay-fixture-' + index, sourceId: source.id, url: source.url,
+    publishedAt: 1000, discoveredAt: 2000, content: 'A synthetic public interview fixture preserves speaker attribution and source routing. '.repeat(10) }));
+  expect(configuredResearchPacketDefinitions([seed, member], items, ['replay-fixture-0'], [seed.id], 3000).definitions).toEqual([]);
+  const localSeed = { ...seed, referencePacket: { ...seed.referencePacket!, enabled: true } };
+  expect(configuredResearchPacketDefinitions([localSeed, member], items, ['replay-fixture-0'], [seed.id, member.id], 3000).definitions[0])
+    .toMatchObject({ id: seed.referencePacket!.id, primarySourceId: 'replay-fixture-0', sourceIds: ['replay-fixture-0', 'replay-fixture-1'], relationship: seed.referencePacket!.relationship });
+  expect(seed.referencePacket!.enabled).toBe(true);
 });
