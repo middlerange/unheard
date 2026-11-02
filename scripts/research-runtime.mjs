@@ -36,22 +36,25 @@ export async function invokeResearchProcess(handler, env, payload, path = '/api/
   return result;
 }
 
+async function writeSelectedCandidates(runId, step, invoke, paidOptions) {
+  let batch = 1;
+  let drafts = await step.do('Write selected candidates', paidOptions, () => invoke({ operation: 'drafts', runId }));
+  while (drafts?.pending === true) {
+    if (Number.isFinite(drafts.retryAfterMs) && drafts.retryAfterMs > 0)
+      await step.sleep(`Wait for selected writing batch ${batch}`, `${Math.ceil(drafts.retryAfterMs / 1000)} seconds`);
+    batch++;
+    drafts = await step.do(`Write selected candidates batch ${batch}`, paidOptions, () => invoke({ operation: 'drafts', runId }));
+  }
+  return drafts;
+}
+
 export async function runResearchWorkflow(runId, step, invoke, selectedWriting = false, selectionOnly = false) {
   const collectionOptions = { retries: { limit: 2, delay: '5 seconds', backoff: 'exponential' }, timeout: '10 minutes' };
+  let writing = selectedWriting;
   try {
     const paidOptions = { retries: { limit: 0, delay: '1 second', backoff: 'constant' }, timeout: '10 minutes' };
-    if (selectionOnly) return await step.do('Send candidates for selection', paidOptions, () => invoke({ operation: 'selection', runId }));
-    if (selectedWriting) {
-      let batch = 1;
-      let drafts = await step.do('Write selected candidates', paidOptions, () => invoke({ operation: 'drafts', runId }));
-      while (drafts?.pending === true) {
-        if (Number.isFinite(drafts.retryAfterMs) && drafts.retryAfterMs > 0)
-          await step.sleep(`Wait for selected writing batch ${batch}`, `${Math.ceil(drafts.retryAfterMs / 1000)} seconds`);
-        batch++;
-        drafts = await step.do(`Write selected candidates batch ${batch}`, paidOptions, () => invoke({ operation: 'drafts', runId }));
-      }
-      return drafts;
-    }
+    if (selectionOnly) return await step.do('Select top angle per story', paidOptions, () => invoke({ operation: 'selection', runId }));
+    if (selectedWriting) return await writeSelectedCandidates(runId, step, invoke, paidOptions);
     const plan = await step.do('Plan research collection', collectionOptions, () => invoke({ operation: 'plan', runId }));
     let pending = plan.sourceIds.map(sourceId => ({ sourceId, batch: 1 }));
     let round = 1;
@@ -83,11 +86,14 @@ export async function runResearchWorkflow(runId, step, invoke, selectedWriting =
       batch++;
       ranking = await step.do(`Rank findings batch ${batch}`, paidOptions, () => invoke({ operation: 'rank', runId }));
     }
-    return await step.do('Send candidates for selection', paidOptions, () => invoke({ operation: 'selection', runId }));
+    const selection = await step.do('Select top angle per story', paidOptions, () => invoke({ operation: 'selection', runId }));
+    if (!selection?.count) return selection;
+    writing = true;
+    return await writeSelectedCandidates(runId, step, invoke, paidOptions);
   } catch (error) {
     try {
       await step.do('Record research failure', collectionOptions, () => invoke({
-        operation: 'fail', runId, ...(selectedWriting ? { writing: true } : {}), error: error instanceof Error ? error.message.slice(0, 500) : 'Research failed.',
+        operation: 'fail', runId, ...(writing ? { writing: true } : {}), error: error instanceof Error ? error.message.slice(0, 500) : 'Research failed.',
       }));
     } catch (recordError) {
       console.error('Could not record research failure:', recordError);

@@ -4,6 +4,7 @@ import * as schema from "./schema";
 import {
   authenticateSlackRequest,
   getSlackCredentials,
+  slackApi,
   verifySlackRequest,
 } from "./slack";
 import {
@@ -12,6 +13,12 @@ import {
   hasPendingSlackEdits,
 } from "./slack-review";
 const ack = () => Response.json({ ok: true });
+type SlackModalView = {
+  id?: string;
+  callback_id?: string;
+  private_metadata?: string;
+  state?: { values?: Record<string, Record<string, { value?: string | null }>> };
+};
 export async function readSlackBody(request: Request) {
   if (Number(request.headers.get("content-length") || 0) > 64_000) return null;
   const reader = request.body?.getReader();
@@ -112,18 +119,6 @@ export async function handleSlackEvents(request: Request) {
   )
     return ack();
   const db = await getDb();
-  const { findSelectionForThread } = await import("./research-selection");
-  const selection = await findSelectionForThread(integration.team_id, event.channel, event.thread_ts);
-  if (selection && integration.enabled) {
-    await enqueueSlackJob(integration.team_id, "selection", {
-      draftId: selection.runId,
-      userId: event.user,
-      text: event.text,
-      channelId: event.channel,
-      threadTs: event.thread_ts,
-    }, `event-${data.event_id}`);
-    return ack();
-  }
   const draft = (
     await db
       .select()
@@ -168,6 +163,8 @@ export async function handleSlackInteractions(request: Request) {
     channel?: { id?: string };
     message?: { ts?: string; thread_ts?: string };
     actions?: Array<{ action_id?: string; value?: string; action_ts?: string }>;
+    trigger_id?: string;
+    view?: SlackModalView;
   };
   try {
     data = JSON.parse(new URLSearchParams(body).get("payload") || "");
@@ -192,11 +189,13 @@ export async function handleSlackInteractions(request: Request) {
       { error: "Invalid Slack signature or disabled integration" },
       { status: 401 },
     );
+  if (data.type === "view_submission" && data.view?.callback_id === "research_edit")
+    return submitEditRequest(integration, data.user?.id, data.view);
   const action = data.actions?.[0];
   if (
     data.type !== "block_actions" ||
     !action ||
-    !["research_approve", "research_reject"].includes(action.action_id || "")
+    !["research_approve", "research_reject", "research_edit"].includes(action.action_id || "")
   )
     return ack();
   if (
@@ -240,6 +239,35 @@ export async function handleSlackInteractions(request: Request) {
     (await hasPendingSlackEdits(integration.team_id, draft.id))
   )
     return ack();
+  if (action.action_id === "research_edit") {
+    if (!data.trigger_id) return ack();
+    const { botToken } = await getSlackCredentials(integration.team_id);
+    await slackApi(botToken, "views.open", {
+      trigger_id: data.trigger_id,
+      view: {
+        type: "modal",
+        callback_id: "research_edit",
+        private_metadata: JSON.stringify({ draftId: draft.id }),
+        title: { type: "plain_text", text: "Edit post" },
+        submit: { type: "plain_text", text: "Request edit" },
+        close: { type: "plain_text", text: "Cancel" },
+        blocks: [
+          {
+            type: "input",
+            block_id: "instruction",
+            label: { type: "plain_text", text: "What should change?" },
+            element: {
+              type: "plain_text_input",
+              action_id: "text",
+              multiline: true,
+              max_length: 4000,
+            },
+          },
+        ],
+      },
+    });
+    return ack();
+  }
   const id = `action-${await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${integration.team_id}:${data.user.id}:${action.action_id}:${action.action_ts}:${action.value}`)).then((buffer) => Array.from(new Uint8Array(buffer), (b) => b.toString(16).padStart(2, "0")).join(""))}`;
   await enqueueSlackJob(
     integration.team_id,
@@ -256,4 +284,57 @@ export async function handleSlackInteractions(request: Request) {
     id,
   );
   return ack();
+}
+async function submitEditRequest(
+  integration: typeof schema.slack_integrations.$inferSelect,
+  userId: string | undefined,
+  view: SlackModalView,
+) {
+  const closeModal = () => new Response(null, { status: 200 });
+  const text = view.state?.values?.instruction?.text?.value?.trim();
+  if (
+    !userId ||
+    !(JSON.parse(integration.approver_user_ids) as string[]).includes(userId) ||
+    !text ||
+    text.length > 4000 ||
+    !view.id
+  )
+    return closeModal();
+  let draftId: unknown;
+  try {
+    draftId = JSON.parse(view.private_metadata || "").draftId;
+  } catch {
+    return closeModal();
+  }
+  if (typeof draftId !== "string") return closeModal();
+  const draft = await getResearchDraft(integration.team_id, draftId);
+  if (
+    !draft ||
+    (!integration.enabled && !draft.is_test) ||
+    draft.slack_channel_id !== integration.channel_id ||
+    !draft.slack_thread_ts ||
+    !["pending", "editing", "delivering"].includes(draft.status)
+  )
+    return closeModal();
+  await enqueueSlackJob(
+    integration.team_id,
+    "edit",
+    {
+      draftId: draft.id,
+      userId,
+      text,
+      channelId: draft.slack_channel_id,
+      threadTs: draft.slack_thread_ts,
+    },
+    `view-${view.id}`,
+  );
+  const { botToken } = await getSlackCredentials(integration.team_id);
+  await slackApi(botToken, "chat.postMessage", {
+    channel: draft.slack_channel_id,
+    thread_ts: draft.slack_thread_ts,
+    text: `<@${userId}> requested an edit: ${text}`,
+    unfurl_links: false,
+    unfurl_media: false,
+  }).catch(() => {});
+  return closeModal();
 }

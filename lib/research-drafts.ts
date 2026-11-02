@@ -454,6 +454,8 @@ async function generateDraft(
   return { ...result, inputTokens, outputTokens };
 }
 
+export class ResearchEditDeclinedError extends Error {}
+
 export async function rewriteResearchDraftContent(
   draftId: string,
   teamId: string,
@@ -531,7 +533,7 @@ export async function rewriteResearchDraftContent(
     editorialInstruction,
   );
   if (!result.content)
-    throw new Error(
+    throw new ResearchEditDeclinedError(
       "The requested edit cannot be supported by this source. Try a change to tone, length, or structure.",
     );
   return { ...result, content: result.content };
@@ -561,8 +563,8 @@ export async function processResearchDraftJob(runId: string, interim = false) {
   const run = await db.select().from(research_runs).where(eq(research_runs.id, runId)).get();
   if (!run) throw new Error("Run not found");
   const row = await db.select().from(research_cache).where(and(eq(research_cache.id, `research-selection:${runId}`), eq(research_cache.team_id, run.team_id))).get();
-  const selection = row ? JSON.parse(row.value) as { state: string; candidateIds: string[]; selectedIds: string[] } : null;
-  if (!selection || selection.state !== "sent" || !selection.selectedIds?.length) return { drafted: 0, skipped: true };
+  const selection = row ? JSON.parse(row.value) as { candidateIds: string[]; selectedIds: string[] } : null;
+  if (!selection?.selectedIds?.length) return { drafted: 0, skipped: true };
   const lockId = `selected-writing-lock:${runId}`;
   const owner = crypto.randomUUID();
   const claimed = await db.insert(research_cache).values({ id: lockId, team_id: run.team_id, value: owner, created_at: Date.now() }).onConflictDoNothing().returning({ id: research_cache.id });

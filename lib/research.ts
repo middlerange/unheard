@@ -393,16 +393,6 @@ export async function dispatchResearchRun(runId: string) {
       throw error;
   }
 }
-export async function dispatchSelectedResearchWriting(runId: string, selectionEventId: string) {
-  const workflow = globalThis.__contentHubResearchWorkflow__;
-  if (!workflow) throw new Error("Research Workflow is unavailable.");
-  const id = `selection-${await researchHash(`${runId}:${selectionEventId}`)}`;
-  try {
-    await workflow.create({ id, params: { runId, selectedWriting: true } });
-  } catch (error) {
-    if (!/already exists|duplicate|instance.*exists/i.test(error instanceof Error ? error.message : "")) throw error;
-  }
-}
 export async function createResearchRun(
   teamId: string,
   input: unknown,
@@ -2029,8 +2019,8 @@ export async function processResearchJob(job: ResearchJob) {
   }
   if (job.operation === "selection") {
     if (!run.editorial || run.mode !== "scan" || !["drafting", "completed"].includes(run.status)) return { skipped: true };
-    const { sendResearchSelection } = await import("./research-selection");
-    const result = await sendResearchSelection(run.team_id, run.id);
+    const { selectTopResearchAngles } = await import("./research-selection");
+    const result = await selectTopResearchAngles(run.team_id, run.id);
     await db.update(research_runs).set({ status: "completed", completed_at: Date.now() }).where(eq(research_runs.id, run.id));
     return result;
   }
@@ -2049,8 +2039,8 @@ export async function processResearchJob(job: ResearchJob) {
             : "Writing stopped after a provider or processing error. The request outcome may be unknown; it will not be automatically repeated.";
       await db.update(research_runs).set({ status: "completed", error: [run.error, diagnostic].filter(Boolean).join(" ").slice(0, 1000) }).where(eq(research_runs.id, run.id));
       try {
-        const { notifySelectionThread } = await import("./research-selection");
-        await notifySelectionThread(run.team_id, run.id, diagnostic);
+        const { notifyResearchChannel } = await import("./research-selection");
+        await notifyResearchChannel(run.team_id, run.id, diagnostic);
       } catch (error) { console.error("Could not confirm selected-writing failure notice", error instanceof Error ? error.name : "error"); }
       return { ok: true };
     }
