@@ -18,7 +18,7 @@ import { researchSourceDepthQuotePolicy, researchSourceQuoteDepthRequestMetadata
 import { RESEARCH_SOURCE_DEPTH_QUESTIONS_GROUPING_VERSION, RESEARCH_SOURCE_DEPTH_QUESTIONS_VERSION, RESEARCH_SOURCE_DEPTH_QUESTIONS_TRANSPORT, RESEARCH_SOURCE_DEPTH_QUESTIONS_SONNET_INSTRUCTIONS, researchSourceDepthGroupingRoute, researchSourceDepthQuestionPolicy, researchSourceQuestionDepthRequestMetadata } from "./research-source-depth-questions";
 import { reviewResearchSourcePackets, configuredResearchPacketDefinitions, researchPacketsFromDefinitions, researchSourcePacketPolicy, researchSourcePacketPolicyContract } from "./research-source-packets";
 import type { ResearchSourcePacket } from "./research-source-packet-model";
-import type { ResearchArtifactSourceFormats } from "./research-types";
+import type { ResearchArtifactSourceFormats, ResearchSourceSeed } from "./research-types";
 import { researchSourceArtifactPolicy, researchSourceArtifactRoutingContract, validResearchArtifactSourceFormats, RESEARCH_SOURCE_ARTIFACT_VERSION, RESEARCH_SOURCE_ARTIFACT_FORMAT } from "./research-source-artifact";
 import { researchFindingDates, researchItemSignalKind } from "./research-dates";
 import { getDraftResearchFindings, researchRunFindingsCount, saveResearchFindingSnapshot, type ResearchFindingRow } from "./research-finding-snapshots";
@@ -151,6 +151,50 @@ export async function initializeResearch(teamId: string) {
       )
       .onConflictDoNothing();
 }
+export async function getTeamResearchSourceSeeds(teamId: string): Promise<ResearchSourceSeed[]> {
+  const db = await getDb();
+  const custom = await db
+    .select({ definition: research_sources.definition })
+    .from(research_sources)
+    .where(and(eq(research_sources.team_id, teamId), isNotNull(research_sources.definition)))
+    .all();
+  return [...RESEARCH_SOURCE_SEEDS, ...custom.map((row) => JSON.parse(row.definition!) as ResearchSourceSeed)];
+}
+export async function addResearchSource(teamId: string, input: unknown) {
+  const data = z
+    .object({
+      name: z.string().trim().min(1).max(120),
+      url: z.string().trim().url().regex(/^https:\/\//, "Use an https URL"),
+      feedUrl: z.string().trim().url().regex(/^https:\/\//, "Use an https URL").optional(),
+      category: z.enum(["practitioner", "research", "industry", "competitor", "community", "youtube"]),
+    })
+    .strict()
+    .parse(input);
+  await initializeResearch(teamId);
+  const seeds = await getTeamResearchSourceSeeds(teamId);
+  if (seeds.some((seed) => seed.url === data.url || (data.feedUrl && seed.feedUrl === data.feedUrl)))
+    throw new Error("This source is already registered");
+  const seed: ResearchSourceSeed = {
+    id: `custom-${crypto.randomUUID()}`,
+    name: data.name,
+    url: data.url,
+    ...(data.feedUrl ? { feedUrl: data.feedUrl } : {}),
+    kind: data.feedUrl ? "rss" : "web",
+    category: data.category,
+    enabled: true,
+    notes: "Added from Content Hub.",
+    priority: 2,
+  };
+  const db = await getDb();
+  await db.insert(research_sources).values({
+    id: `${teamId}:${seed.id}`,
+    team_id: teamId,
+    seed_id: seed.id,
+    enabled: true,
+    definition: JSON.stringify(seed),
+  });
+  return { ok: true, id: seed.id };
+}
 export async function getResearchSnapshot(
   teamId: string,
 ): Promise<ResearchSnapshot> {
@@ -220,6 +264,7 @@ export async function getResearchSnapshot(
   const originalDraftFindings = await getDraftResearchFindings(teamId, drafts.map(({ draft }) => ({
     runId: draft.run_id, findingId: draft.finding_id,
   })));
+  const teamSeeds = [...RESEARCH_SOURCE_SEEDS, ...sources.flatMap((row) => row.definition ? [JSON.parse(row.definition) as ResearchSourceSeed] : [])];
   return {
     configured: Boolean(process.env.ANTHROPIC_API_KEY),
     workflowConfigured: Boolean(globalThis.__contentHubResearchWorkflow__),
@@ -233,7 +278,7 @@ export async function getResearchSnapshot(
       dailyTimezone: settings!.daily_timezone,
       nextDailyAt: settings!.next_daily_at,
     },
-    sources: RESEARCH_SOURCE_SEEDS.map((seed) => {
+    sources: teamSeeds.map((seed) => {
       const stored = sources.find((row) => row.seed_id === seed.id);
       return {
         ...seed,
@@ -280,9 +325,9 @@ export async function getResearchSnapshot(
       runId: row.run_id,
       itemId: row.item_id,
       sourceId: row.source_id,
-      sourceName: RESEARCH_SOURCE_SEEDS.find((s) => s.id === row.source_id)?.kind === "search"
+      sourceName: teamSeeds.find((s) => s.id === row.source_id)?.kind === "search"
         ? new URL(row.url).hostname.replace(/^www\./, "")
-        : RESEARCH_SOURCE_SEEDS.find((s) => s.id === row.source_id)?.name || row.source_id,
+        : teamSeeds.find((s) => s.id === row.source_id)?.name || row.source_id,
       title: row.title,
       url: row.url,
       ...researchFindingDates(row),
@@ -360,7 +405,7 @@ export async function updateResearchSource(teamId: string, input: unknown) {
     .object({ id: z.string(), enabled: z.boolean() })
     .strict()
     .parse(input);
-  if (!RESEARCH_SOURCE_SEEDS.some((seed) => seed.id === data.id))
+  if (!(await getTeamResearchSourceSeeds(teamId)).some((seed) => seed.id === data.id))
     throw new Error("Source not found");
   await initializeResearch(teamId);
   const db = await getDb();
@@ -406,11 +451,13 @@ export async function createResearchRun(
       mode: z.enum(["scan", "collect"]).default("scan"),
       sourceIds: z.array(z.string().min(1)).min(1)
         .refine(ids => new Set(ids).size === ids.length, "Source IDs must be unique")
-        .refine(ids => ids.every(id => RESEARCH_SOURCE_SEEDS.some(source => source.id === id)), "Source IDs must identify registered research sources")
         .optional(),
     })
     .strict()
     .parse(input);
+  const teamSeeds = await getTeamResearchSourceSeeds(teamId);
+  if (data.sourceIds && !data.sourceIds.every(id => teamSeeds.some(source => source.id === id)))
+    throw new Error("Source IDs must identify registered research sources");
   if (!globalThis.__contentHubResearchWorkflow__)
     throw new Error(
       "Research Workflow is unavailable. Deploy the Cloudflare ResearchWorkflow binding.",
@@ -438,7 +485,7 @@ export async function createResearchRun(
       const enabled = await db.select({ seedId: research_sources.seed_id }).from(research_sources).where(and(
         eq(research_sources.team_id, teamId), eq(research_sources.enabled, true),
       )).all();
-      const requested = enabled.map(source => source.seedId).filter(id => RESEARCH_SOURCE_SEEDS.some(seed => seed.id === id));
+      const requested = enabled.map(source => source.seedId).filter(id => teamSeeds.some(seed => seed.id === id));
       const activeIds = new Set(JSON.parse(active.source_ids) as string[]);
       if (activeIds.size !== requested.length || requested.some(id => !activeIds.has(id)))
         throw new Error("A research run with different sources is active. Wait for it to finish before starting the six-hour scan.");
@@ -500,7 +547,7 @@ export async function createResearchRun(
   ]);
   const ids = data.sourceIds ?? sources
     .map((source) => source.seed_id)
-    .filter((id) => RESEARCH_SOURCE_SEEDS.some((seed) => seed.id === id));
+    .filter((id) => teamSeeds.some((seed) => seed.id === id));
   if (!ids.length) throw new Error("Enable at least one research source");
   const id = scheduledRunId ?? crypto.randomUUID();
   const row = await db
@@ -597,7 +644,7 @@ async function collectForRun(
   sourceId: string,
 ) {
   const db = await getDb();
-  const source = RESEARCH_SOURCE_SEEDS.find((seed) => seed.id === sourceId);
+  const source = (await getTeamResearchSourceSeeds(run.team_id)).find((seed) => seed.id === sourceId);
   if (!source || !(JSON.parse(run.source_ids) as string[]).includes(sourceId))
     throw new Error("Source is not part of this run");
   const stepId = `${run.id}:${sourceId}`;
@@ -1730,9 +1777,10 @@ async function rankRun(run: typeof research_runs.$inferSelect) {
     for (const itemId of ids.filter(id => !shortlisted.some(item => item.id === id))) diagnostics.rejectedStories.push({
       title: itemId, score: null, reason: "Public evidence unavailable: the frozen selected item no longer exists.",
     });
+    const teamSeeds = await getTeamResearchSourceSeeds(run.team_id);
     const full = await Promise.allSettled(shortlisted.map(async item => {
       if (item.content) return item;
-      const source = RESEARCH_SOURCE_SEEDS.find(seed => seed.id === item.source_id)!;
+      const source = teamSeeds.find(seed => seed.id === item.source_id)!;
       const html = await fetchResearchText(item.canonical_url, sourceHosts(source.kind === "search"
         ? { ...source, url: item.canonical_url, feedUrl: undefined } : source));
       const content = (item.content_provenance === "abstract"

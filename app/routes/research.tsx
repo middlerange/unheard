@@ -137,6 +137,14 @@ function ResearchPage() {
     });
   }
 
+  function addSource(source: NewResearchSource, onAdded: () => void) {
+    void mutate('add-source', async () => {
+      await request('/api/research/sources', jsonRequest('POST', { ...source, feedUrl: source.feedUrl || undefined }));
+      onAdded();
+      toast.success(`${source.name} added and enabled.`);
+    });
+  }
+
   function actOnFinding(finding: ResearchFinding, action: 'save_idea' | 'dismiss') {
     void mutate(finding.id, async () => {
       const result = await request<{ ideaId?: string }>('/api/research/findings', jsonRequest('POST', { id: finding.id, action }));
@@ -247,6 +255,7 @@ function ResearchPage() {
         {tab === 'sources' && <>
           <div className="flex flex-wrap items-start justify-between gap-4"><div className="max-w-2xl"><h2 className="text-sm font-medium">A reading list with a higher bar</h2><p className={cn('mt-2 text-sm leading-6', muted)}>Prioritize people who do the work and publish original thinking. Competitor blogs from the original registry are kept for reference and start disabled. You choose what gets scanned.</p></div><div className="flex flex-wrap gap-2"><SearchField value={sourceQuery} onChange={setSourceQuery} placeholder="Search sources" /><select aria-label="Source category" className={selectClass} value={sourceCategory} onChange={event => setSourceCategory(event.target.value)}><option value="all">All categories</option><option value="practitioner">Practitioners</option><option value="research">Original research</option><option value="industry">Primary industry news</option><option value="youtube">YouTube</option><option value="community">Communities</option><option value="competitor">Competitor blogs</option></select></div></div>
           <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-subtle)] p-4 text-xs leading-6 text-[var(--color-text-muted)]">YouTube videos without an accessible transcript are collected as metadata only and excluded from ranked findings. Sources with access restrictions or collection errors are flagged below.</div>
+          <AddSourceForm disabled={Boolean(pending)} onAdd={addSource} />
           {sources.length ? <div className={cn(panel, 'divide-y divide-[var(--color-border)] overflow-hidden')}>{sources.map(source => <SourceRow key={source.id} source={source} disabled={Boolean(pending)} onToggle={() => updateSource(source)} />)}</div> : <EmptyState icon={Globe} title="No sources match" description="Try a different name or category." />}
         </>}
 
@@ -292,6 +301,20 @@ function FindingCard({ finding, disabled, saving, onSave, onDismiss }: { finding
     </div>
     <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-5 py-3 sm:px-6"><span className={cn('text-xs', saved ? 'text-emerald-300' : muted)}>{saved ? <span className="inline-flex items-center gap-1.5"><Check className="size-3.5" />Saved to your ideas</span> : finding.status === 'dismissed' ? 'Dismissed' : 'Review the original, then make it your own.'}</span><div className="flex gap-2">{finding.status === 'new' && <Button variant="ghost" disabled={disabled} onClick={onDismiss} className={press}><X />Dismiss</Button>}{saved && finding.ideaId ? <Button asChild variant="outline" className={press}><Link to="/ideas/$id" params={{ id: finding.ideaId }} search={{ assistant: undefined, brandId: undefined, templateId: undefined, instruction: undefined }}>View idea<ArrowUpRight /></Link></Button> : <Button variant="outline" disabled={disabled || saved} onClick={onSave} className={press}>{saving ? <Loader2 className="animate-spin" /> : saved ? <Check /> : <Lightbulb />}{saved ? 'Saved' : 'Save as idea'}</Button>}</div></div>
   </article>;
+}
+
+type NewResearchSource = { name: string; url: string; feedUrl: string; category: ResearchSource['category'] };
+
+function AddSourceForm({ disabled, onAdd }: { disabled: boolean; onAdd: (source: NewResearchSource, onAdded: () => void) => void }) {
+  const empty: NewResearchSource = { name: '', url: '', feedUrl: '', category: 'practitioner' };
+  const [source, setSource] = useState(empty);
+  return <form className={cn(panel, 'grid gap-3 p-4 sm:grid-cols-[1fr_1.4fr_1.4fr_auto_auto] sm:items-end sm:p-5')} onSubmit={event => { event.preventDefault(); onAdd(source, () => setSource(empty)); }}>
+    <label className="grid gap-1.5 text-xs text-[var(--color-text-secondary)]">Name<Input required value={source.name} onChange={event => setSource({ ...source, name: event.target.value })} placeholder="Publisher or author" /></label>
+    <label className="grid gap-1.5 text-xs text-[var(--color-text-secondary)]">Page URL<Input required type="url" value={source.url} onChange={event => setSource({ ...source, url: event.target.value })} placeholder="https://example.com/blog" /></label>
+    <label className="grid gap-1.5 text-xs text-[var(--color-text-secondary)]">Feed URL (optional)<Input type="url" value={source.feedUrl} onChange={event => setSource({ ...source, feedUrl: event.target.value })} placeholder="https://example.com/feed" /></label>
+    <label className="grid gap-1.5 text-xs text-[var(--color-text-secondary)]">Category<select className={selectClass} value={source.category} onChange={event => setSource({ ...source, category: event.target.value as NewResearchSource['category'] })}><option value="practitioner">Practitioner</option><option value="research">Original research</option><option value="industry">Primary industry news</option><option value="community">Community</option><option value="youtube">YouTube</option><option value="competitor">Competitor blog</option></select></label>
+    <Button type="submit" disabled={disabled} className={press}>Add source</Button>
+  </form>;
 }
 
 function SourceRow({ source, disabled, onToggle }: { source: ResearchSource; disabled: boolean; onToggle: () => void }) {

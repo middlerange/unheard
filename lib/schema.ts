@@ -407,6 +407,7 @@ export const research_sources = sqliteTable('research_sources', {
   id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }),
   seed_id: text('seed_id').notNull(), enabled: integer('enabled', { mode: 'boolean' }).notNull(),
   last_collected_at: integer('last_collected_at'), last_error: text('last_error'), item_count: integer('item_count').notNull().default(0),
+  definition: text('definition'),
 });
 export const research_runs = sqliteTable('research_runs', {
   id: text('id').primaryKey(), team_id: text('team_id').notNull().references(() => teams.id, { onDelete: 'cascade' }),
