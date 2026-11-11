@@ -46,11 +46,16 @@ export interface ChannelView {
   group_name: string | null;
   account_id: string | null;
   default_subreddit: string | null;
+  youtube_privacy: YouTubePrivacy | null;
   created_at: number;
 }
 
+const YOUTUBE_PRIVACY_OPTIONS = ['private', 'unlisted', 'public'] as const;
+export type YouTubePrivacy = typeof YOUTUBE_PRIVACY_OPTIONS[number];
+
 async function toView(ch: Channel): Promise<ChannelView> {
   let defaultSubreddit: string | null = null;
+  let youtubePrivacy: YouTubePrivacy | null = null;
   if (ch.platform === 'reddit') {
     try {
       const credentials = JSON.parse(await decrypt(ch.credentials)) as { defaultSubreddit?: unknown };
@@ -59,6 +64,15 @@ async function toView(ch: Channel): Promise<ChannelView> {
       }
     } catch {
       defaultSubreddit = null;
+    }
+  }
+  if (ch.platform === 'youtube') {
+    try {
+      const credentials = JSON.parse(await decrypt(ch.credentials)) as { privacyStatus?: unknown };
+      const parsed = z.enum(YOUTUBE_PRIVACY_OPTIONS).safeParse(credentials.privacyStatus);
+      youtubePrivacy = parsed.success ? parsed.data : 'private';
+    } catch {
+      youtubePrivacy = null;
     }
   }
   return {
@@ -70,6 +84,7 @@ async function toView(ch: Channel): Promise<ChannelView> {
     group_name: ch.group_name ?? null,
     account_id: ch.account_id ?? null,
     default_subreddit: defaultSubreddit,
+    youtube_privacy: youtubePrivacy,
     created_at: ch.created_at,
   };
 }
@@ -190,6 +205,9 @@ export async function persistChannel(data: ChannelCreateInput): Promise<ChannelV
     default_subreddit: data.platform === 'reddit' && typeof data.credentials.defaultSubreddit === 'string'
       ? data.credentials.defaultSubreddit
       : null,
+    youtube_privacy: data.platform === 'youtube'
+      ? z.enum(YOUTUBE_PRIVACY_OPTIONS).catch('private').parse(data.credentials.privacyStatus)
+      : null,
     created_at: existing?.created_at ?? now 
   };
 }
@@ -245,6 +263,31 @@ export const updateChannel = createServerFn({ method: 'POST' })
       credentials: encrypted,
       created_at: existing.created_at,
     } satisfies Channel);
+  });
+
+export const setYouTubePrivacy = createServerFn({ method: 'POST' })
+  .inputValidator(z.object({ id: z.string(), privacyStatus: z.enum(YOUTUBE_PRIVACY_OPTIONS) }))
+  .handler(async ({ data }): Promise<ChannelView> => {
+    const teamId = await getTeamId();
+    const existing = await getChannel(data.id, teamId);
+    if (!existing || existing.platform !== 'youtube') throw new Error('YouTube channel not found');
+
+    const credentials = JSON.parse(await decrypt(existing.credentials)) as Record<string, unknown>;
+    const encrypted = await encrypt(JSON.stringify({ ...credentials, privacyStatus: data.privacyStatus }));
+    await dbUpsertChannel(
+      existing.id,
+      teamId,
+      existing.name,
+      existing.platform,
+      existing.account_type,
+      existing.is_default,
+      existing.group_name ?? null,
+      existing.account_id ?? null,
+      encrypted,
+      Date.now()
+    );
+
+    return toView({ ...existing, credentials: encrypted });
   });
 
 export const deleteChannel = createServerFn({ method: 'POST' })

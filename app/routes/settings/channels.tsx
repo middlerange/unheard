@@ -11,7 +11,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Plus, Trash2, ChevronLeft, Twitter, Linkedin, Instagram, Facebook, Youtube } from "@/components/icons";
 import { RedditLogo } from '@/components/RedditLogo';
-import { getChannels, createChannel, deleteChannel, setDefaultChannel, type ChannelView } from '@/app/server-fns/channels';
+import { getChannels, createChannel, deleteChannel, setDefaultChannel, setYouTubePrivacy, type ChannelView, type YouTubePrivacy } from '@/app/server-fns/channels';
 import { getConnectAvailability, startLinkedInConnect, startMetaConnect, startYouTubeConnect } from '@/app/server-fns/social-connect';
 import { startRedditConnect } from '@/app/server-fns/reddit-connect';
 import { startTwitterConnect } from '@/app/server-fns/twitter-connect';
@@ -63,7 +63,7 @@ interface RedditFields {
 }
 
 interface YouTubeFields {
-  privacyStatus: 'private' | 'unlisted' | 'public';
+  privacyStatus: YouTubePrivacy;
   notifySubscribers: boolean;
 }
 
@@ -308,6 +308,19 @@ function ChannelSettings() {
       });
       resetForm();
       await refresh();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handlePrivacyChange(id: string, privacyStatus: YouTubePrivacy) {
+    setSaving(true);
+    try {
+      await setYouTubePrivacy({ data: { id, privacyStatus } });
+      await refresh();
+      toast.success(`New uploads will be ${privacyStatus}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not update privacy');
     } finally {
       setSaving(false);
     }
@@ -615,6 +628,14 @@ function ChannelSettings() {
                     {channel.platform === 'reddit' && channel.default_subreddit ? ` · r/${channel.default_subreddit}` : ''}
                   </p>
                 </div>
+                {channel.platform === 'youtube' && channel.youtube_privacy && (
+                  <YouTubePrivacySelect
+                    value={channel.youtube_privacy}
+                    onChange={value => handlePrivacyChange(channel.id, value)}
+                    disabled={saving}
+                    className="h-7 w-28 text-xs"
+                  />
+                )}
                 {!channel.is_default && (
                   <Button
                     size="sm"
@@ -782,16 +803,11 @@ function YouTubeConnectForm({
       <div className="flex gap-3">
         <div className="space-y-1.5 flex-1">
           <Label className="text-xs">Privacy</Label>
-          <Select value={fields.privacyStatus} onValueChange={value => onChange({ ...fields, privacyStatus: value as YouTubeFields['privacyStatus'] })}>
-            <SelectTrigger className="h-8 w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="private">Private</SelectItem>
-              <SelectItem value="unlisted">Unlisted</SelectItem>
-              <SelectItem value="public">Public</SelectItem>
-            </SelectContent>
-          </Select>
+          <YouTubePrivacySelect
+            value={fields.privacyStatus}
+            onChange={privacyStatus => onChange({ ...fields, privacyStatus })}
+            className="h-8 w-full"
+          />
         </div>
         <div className="flex items-end pb-1">
           <div className="flex items-center gap-2">
@@ -805,6 +821,31 @@ function YouTubeConnectForm({
         </div>
       </div>
     </div>
+  );
+}
+
+function YouTubePrivacySelect({
+  value,
+  onChange,
+  disabled,
+  className,
+}: {
+  value: YouTubePrivacy;
+  onChange: (value: YouTubePrivacy) => void;
+  disabled?: boolean;
+  className?: string;
+}) {
+  return (
+    <Select value={value} onValueChange={next => onChange(next as YouTubePrivacy)} disabled={disabled}>
+      <SelectTrigger className={className} aria-label="YouTube upload privacy">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value="private">Private</SelectItem>
+        <SelectItem value="unlisted">Unlisted</SelectItem>
+        <SelectItem value="public">Public</SelectItem>
+      </SelectContent>
+    </Select>
   );
 }
 
