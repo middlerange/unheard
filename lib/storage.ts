@@ -42,6 +42,18 @@ export async function uploadFile(key: string, buffer: Buffer, contentType: strin
   return `${R2_PUBLIC_URL.replace(/\/$/, '')}/${key}`;
 }
 
+export async function readMedia(item: { path: string; url: string }): Promise<ArrayBuffer> {
+  const bucket = globalThis.__contentHubMediaBucket__;
+  if (bucket) {
+    const object = await bucket.get(item.path);
+    if (!object) throw new Error(`Media not found in storage: ${item.path}`);
+    return new Response(object.body).arrayBuffer();
+  }
+  const res = await fetch(item.url);
+  if (!res.ok) throw new Error(`Failed to download media ${item.url}: ${res.status}`);
+  return res.arrayBuffer();
+}
+
 export async function serveMedia(request: Request, filename: string): Promise<Response> {
   // Only UUID-named upload objects are public; bucket contents cannot be listed.
   if (!/^[a-f0-9-]{36}\.[a-z0-9]{1,10}$/i.test(filename)) return new Response('Not found', { status: 404 });

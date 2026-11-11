@@ -2,6 +2,7 @@
 // ABOUTME: Uses the Community Management Posts API (rest/posts) with Images API for uploads.
 
 import type { Media } from './db/types';
+import { readMedia } from './storage';
 
 const REST = 'https://api.linkedin.com/rest';
 const PROFILE = 'https://api.linkedin.com/v2/me';
@@ -65,10 +66,8 @@ async function initializeImageUpload(owner: string, creds?: LinkedInCreds): Prom
   };
 }
 
-async function uploadImage(uploadUrl: string, imageUrl: string, creds?: LinkedInCreds): Promise<void> {
-  const imageRes = await fetch(imageUrl);
-  if (!imageRes.ok) throw new Error(`Failed to fetch image for LinkedIn upload: ${imageRes.status}`);
-  const buffer = await imageRes.arrayBuffer();
+async function uploadImage(uploadUrl: string, image: Media, creds?: LinkedInCreds): Promise<void> {
+  const buffer = await readMedia(image);
   const res = await fetch(uploadUrl, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${token(creds)}`, 'Content-Type': 'application/octet-stream' },
@@ -145,10 +144,8 @@ async function retry(stage: string, maxAttempts: number, fn: () => Promise<Respo
   throw new Error(`[LinkedIn ${stage}] ${msg}${cause} after ${maxAttempts} attempts`);
 }
 
-async function uploadVideo(videoUrl: string, owner: string, creds?: LinkedInCreds): Promise<string> {
-  const videoRes = await fetchWithStage('fetch-r2', () => fetch(videoUrl));
-  if (!videoRes.ok) throw new Error(`[LinkedIn fetch-r2] status ${videoRes.status}`);
-  const buffer = await fetchWithStage('fetch-r2-body', () => videoRes.arrayBuffer());
+async function uploadVideo(video: Media, owner: string, creds?: LinkedInCreds): Promise<string> {
+  const buffer = await fetchWithStage('read-media', () => readMedia(video));
   const fileSizeBytes = buffer.byteLength;
 
   const { videoUrn, uploadToken, instructions } = await fetchWithStage(
@@ -232,14 +229,14 @@ export async function linkedinPost(
   if (images.length > 0) {
     for (const img of images) {
       const { uploadUrl, imageUrn } = await initializeImageUpload(author, creds);
-      await uploadImage(uploadUrl, img.url, creds);
+      await uploadImage(uploadUrl, img, creds);
       imageUrns.push(imageUrn);
     }
   }
 
   let videoUrn: string | null = null;
   if (videos.length > 0) {
-    videoUrn = await uploadVideo(videos[0].url, author, creds);
+    videoUrn = await uploadVideo(videos[0], author, creds);
   }
 
   let contentField: object | undefined;

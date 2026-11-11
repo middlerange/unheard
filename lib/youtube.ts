@@ -2,6 +2,7 @@
 // ABOUTME: Publishes a single uploaded video with snippet/status metadata.
 
 import type { Media } from './db/types';
+import { readMedia } from './storage';
 
 const YOUTUBE_UPLOAD_INIT_URL = 'https://www.googleapis.com/upload/youtube/v3/videos';
 const GOOGLE_OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -67,12 +68,7 @@ export async function youtubeUploadVideo(
   }
 
   const accessToken = await getYouTubeAccessToken(creds);
-  const download = await fetch(video.url);
-  if (!download.ok) {
-    throw new Error(`Failed to download video for YouTube upload: ${download.status}`);
-  }
-
-  const fileBuffer = await download.arrayBuffer();
+  const fileBuffer = await readMedia(video);
   const metadata = {
     snippet: {
       title: deriveYouTubeTitle(description, video),

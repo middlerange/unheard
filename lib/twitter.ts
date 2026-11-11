@@ -2,6 +2,7 @@
 // ABOUTME: Uses runtime-safe fetch + OAuth 1.0a (no Node https dependency).
 
 import type { Media } from './db/types';
+import { readMedia } from './storage';
 
 export interface TwitterCreds {
   apiKey: string;
@@ -145,9 +146,7 @@ async function readError(res: Response): Promise<string> {
 }
 
 async function uploadMedia(creds: ResolvedTwitterCreds, mediaItem: Media): Promise<string> {
-  const res = await fetch(mediaItem.url);
-  if (!res.ok) throw new Error(`Failed to fetch media from R2: ${res.status}`);
-  const buffer = await res.arrayBuffer();
+  const buffer = await readMedia(mediaItem);
 
   if (mediaItem.type === 'video') {
     return uploadVideoChunked(creds, buffer);

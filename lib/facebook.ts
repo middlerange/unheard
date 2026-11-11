@@ -2,6 +2,7 @@
 // ABOUTME: Uses the Resumable Upload API to obtain a file handle, then publishes the video to the Page.
 
 import type { Media } from './db/types';
+import { readMedia } from './storage';
 
 const FACEBOOK_API_VERSION = 'v25.0';
 const FACEBOOK_GRAPH_BASE = `https://graph.facebook.com/${FACEBOOK_API_VERSION}`;
@@ -61,12 +62,7 @@ export async function facebookPublishVideo(
 
   const uploadToken = creds.userAccessToken ?? creds.pageAccessToken;
 
-  const fileResponse = await fetch(video.url);
-  if (!fileResponse.ok) {
-    throw new Error(`Failed to download video for Facebook upload: ${fileResponse.status}`);
-  }
-
-  const arrayBuffer = await fileResponse.arrayBuffer();
+  const arrayBuffer = await readMedia(video);
   const fileBytes = new Uint8Array(arrayBuffer);
   const mimeType = 'video/mp4';
 

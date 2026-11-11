@@ -2,6 +2,7 @@
 // ABOUTME: Uses OAuth 2.0 with refresh token flow for posting.
 
 import type { Media } from './db/types';
+import { readMedia } from './storage';
 
 const REDDIT_API_BASE = 'https://oauth.reddit.com';
 const REDDIT_AUTH_BASE = 'https://www.reddit.com';
@@ -179,10 +180,7 @@ async function uploadMedia(
   mediaItem: Media,
   creds: ResolvedRedditCreds
 ): Promise<string> {
-  // Fetch media from R2
-  const res = await fetch(mediaItem.url);
-  if (!res.ok) throw new Error(`Failed to fetch media: ${res.status}`);
-  const buffer = await res.arrayBuffer();
+  const buffer = await readMedia(mediaItem);
   
   // Reddit uses direct image upload or URL-based posting
   // For now, we'll use the existing URL if it's publicly accessible
