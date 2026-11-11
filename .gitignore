@@ -50,3 +50,7 @@ bun-debug.log*
 
 # generated agent skill downloads
 /public/skills/
+
+# local research and generated deliverables
+/artifacts/
+/outputs/
