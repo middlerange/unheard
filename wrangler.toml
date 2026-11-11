@@ -9,6 +9,9 @@ preview_urls = true
 cpu_ms = 300_000
 subrequests = 50_000
 
+[observability]
+enabled = true
+
 [vars]
 RESEARCH_DEPTH_MODEL = "claude-sonnet-5-5"
 RESEARCH_DEPTH_GROUPING_VERSION = "attributed-quotes-and-questions-v2"
